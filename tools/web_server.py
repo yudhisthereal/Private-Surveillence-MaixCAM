@@ -16,15 +16,38 @@ control_flags = {
     "record": False,
     "show_raw": False,
     "set_background": False,
-    "auto_update_bg": True
+    "auto_update_bg": True,
+    "show_safe_area": False,
+    "use_safety_check": True
 }
 
 # === Config ===
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "../static")
 STREAM_JPG_PATH = "/tmp/stream_frame.jpg"
+SAFE_AREA_FILE = "/root/safe_areas.json"
 HTTP_PORT = 80
 WS_PORT = 8081
 
+# Load safe areas from file
+safe_areas = []
+try:
+    if os.path.exists(SAFE_AREA_FILE):
+        with open(SAFE_AREA_FILE, 'r') as f:
+            safe_areas = json.load(f)
+        print(f"Loaded {len(safe_areas)} safe area(s) from file")
+except Exception as e:
+    print(f"Error loading safe areas: {e}")
+
+def save_safe_areas():
+    """Save safe areas to file"""
+    try:
+        with open(SAFE_AREA_FILE, 'w') as f:
+            json.dump(safe_areas, f)
+        print(f"Saved {len(safe_areas)} safe area(s) to file")
+        return True
+    except Exception as e:
+        print(f"Error saving safe areas: {e}")
+        return False
 
 # === HTTP Server Thread ===
 def handle_http(conn, addr):
@@ -66,6 +89,30 @@ def handle_http(conn, addr):
                 conn.send(b"HTTP/1.1 200 OK\r\n\r\n")
             except Exception as e:
                 print("Command error:", e)
+                conn.send(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            conn.close()
+            return
+        elif path == "/get_safe_areas":
+            # Return current safe areas
+            conn.send(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+            conn.send(json.dumps(safe_areas).encode())
+            conn.close()
+            return
+        elif path == "/set_safe_areas":
+            # Set new safe areas
+            try:
+                header, body = request.split("\r\n\r\n", 1)
+                new_safe_areas = json.loads(body)
+                safe_areas.clear()
+                safe_areas.extend(new_safe_areas)
+                success = save_safe_areas()
+                if success:
+                    conn.send(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+                    conn.send(json.dumps({"status": "success"}).encode())
+                else:
+                    conn.send(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+            except Exception as e:
+                print("Set safe areas error:", e)
                 conn.send(b"HTTP/1.1 400 Bad Request\r\n\r\n")
             conn.close()
             return
@@ -119,6 +166,10 @@ def handle_command(msg):
         control_flags["auto_update_bg"] = bool(val)
     elif cmd == "set_background":
         control_flags["set_background"] = True
+    elif cmd == "toggle_safe_area_display":
+        control_flags["show_safe_area"] = bool(val)
+    elif cmd == "toggle_safety_check":
+        control_flags["use_safety_check"] = bool(val)
 
 
 # === External API ===
@@ -132,15 +183,14 @@ def send_frame(img):
     except Exception as e:
         print("Error saving JPEG for stream:", e)
 
-
-
 def get_control_flags():
     return control_flags
 
+def get_safe_areas():
+    return safe_areas
 
 def reset_set_background_flag():
     control_flags["set_background"] = False
-
 
 # === Main Server Loops ===
 def start_servers():

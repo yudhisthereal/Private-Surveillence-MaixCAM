@@ -70,3 +70,280 @@ video {
     margin: 0 auto;
     padding: 0;
 }
+
+/* Safe Area Editor Popup Styles */
+#safeAreaPopup {
+    display: none;
+    position: fixed;
+    top: 5%;
+    left: 5%;
+    width: 90%;
+    height: 90%;
+    padding: 20px;
+    background: #2a2a2a;
+    border: 2px solid #666;
+    border-radius: 10px;
+    z-index: 1000;
+    color: #fff;
+    overflow: auto;
+}
+
+.instructions {
+    background: #1a3a5f;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 15px;
+    font-size: 14px;
+    text-align: left;
+    border-left: 4px solid #4a9eff;
+}
+
+.instructions ul {
+    margin: 8px 0;
+    padding-left: 20px;
+}
+
+.instructions li {
+    margin: 5px 0;
+    line-height: 1.4;
+}
+
+.canvas-container {
+    border: 2px solid #444;
+    margin: 15px 0;
+    border-radius: 8px;
+    overflow: auto;
+    background: #000;
+    max-width: 100%;
+    max-height: 70vh;
+}
+
+#safeAreaCanvas {
+    display: block;
+    cursor: crosshair;
+    background: #000;
+}
+
+.toolbar {
+    margin: 15px 0;
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.toolbar button {
+    background: #3a3a3a;
+    border: 1px solid #555;
+    padding: 10px 20px;
+    border-radius: 6px;
+    color: white;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.toolbar button:hover {
+    background: #4a4a4a;
+    border-color: #666;
+}
+
+#newPolygonBtn {
+    background: #28a745;
+    border-color: #34ce57;
+}
+
+#newPolygonBtn:hover {
+    background: #218838;
+}
+
+#clearAllBtn {
+    background: #dc3545;
+    border-color: #e4606d;
+}
+
+#clearAllBtn:hover {
+    background: #c82333;
+}
+
+#saveSafeAreasBtn {
+    background: #007bff;
+    border-color: #4dabf7;
+}
+
+#saveSafeAreasBtn:hover {
+    background: #0056b3;
+}
+
+.status {
+    margin-top: 15px;
+    padding: 12px;
+    border-radius: 6px;
+    text-align: center;
+    font-weight: bold;
+    border: 1px solid transparent;
+}
+
+.status.saving {
+    background: #fff3cd;
+    color: #856404;
+    border-color: #ffeaa7;
+}
+
+.status.success {
+    background: #d4edda;
+    color: #155724;
+    border-color: #c3e6cb;
+}
+
+.status.error {
+    background: #f8d7da;
+    color: #721c24;
+    border-color: #f5c6cb;
+}
+
+/* Control panel improvements */
+.control-panel {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #2a2a2a;
+    border-radius: 8px;
+    border: 1px solid #444;
+}
+
+.control-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#editSafeAreaBtn {
+    background: #17a2b8;
+    border-color: #6f42c1;
+}
+
+#editSafeAreaBtn:hover {
+    background: #138496;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    .control-panel {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .toolbar {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .toolbar button {
+        width: 200px;
+    }
+    
+    #safeAreaPopup {
+        top: 2%;
+        left: 2%;
+        width: 96%;
+        height: 96%;
+    }
+}
+
+/* Safe Area Editor Popup Styles */
+#safeAreaPopup {
+    display: none;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #2a2a2a;
+    border: 2px solid #666;
+    border-radius: 10px;
+    z-index: 1000;
+    color: #fff;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow: auto;
+    padding: 20px;
+}
+
+.canvas-container {
+    border: 2px solid #444;
+    margin: 15px 0;
+    border-radius: 8px;
+    overflow: auto;
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    max-width: 100%;
+    max-height: 70vh;
+}
+
+#safeAreaCanvas {
+    display: block;
+    cursor: crosshair;
+    background: #000;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.toolbar {
+    margin: 15px 0;
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.status {
+    margin-top: 15px;
+    padding: 12px;
+    border-radius: 6px;
+    text-align: center;
+    font-weight: bold;
+    border: 1px solid transparent;
+}
+
+.status.saving {
+    background: #fff3cd;
+    color: #856404;
+    border-color: #ffeaa7;
+}
+
+.status.success {
+    background: #d4edda;
+    color: #155724;
+    border-color: #c3e6cb;
+}
+
+.status.error {
+    background: #f8d7da;
+    color: #721c24;
+    border-color: #f5c6cb;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    #safeAreaPopup {
+        padding: 15px;
+        max-width: 95vw;
+        max-height: 95vh;
+    }
+    
+    .toolbar {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .toolbar button {
+        width: 200px;
+    }
+}

@@ -13,18 +13,46 @@
     <div>
         <label><input type="checkbox" id="toggleRecord"> Record</label>
         <label><input type="checkbox" id="toggleRaw"> Show Raw</label>
-        <label><input type="checkbox" id="autoUpdateBg", checked> Auto-update BG</label>
+        <label><input type="checkbox" id="autoUpdateBg" checked> Auto-update BG</label>
+        <label><input type="checkbox" id="showSafeArea"> Show Safe Areas</label>
+        <label><input type="checkbox" id="useSafetyCheck" checked> Use Safety Check</label>
         <button id="setBackgroundBtn">📸 Set Current Frame as Background</button>
+        <button id="editSafeAreaBtn">🛡️ Edit Safe Areas</button>
     </div>
 
     <img id="stream" src="/stream.mjpg" alt="Live Stream" />
 
-    <div id="popup">
+    <!-- Background Confirmation Popup -->
+    <div id="popup" class="popup">
         <h3>Set this frame as background?</h3>
         <img id="preview" src="">
         <br />
         <button onclick="confirmBackground()">Yes</button>
         <button onclick="hidePopup()">Cancel</button>
+    </div>
+
+    <!-- Safe Area Editor Popup -->
+    <div id="safeAreaPopup" class="popup">
+        <h3>🛡️ Edit Safe Areas</h3>
+        <div class="instructions">
+            <p><strong>Instructions:</strong></p>
+            <ul>
+                <li>Click on the image to add points to the polygon</li>
+                <li>Click near the first point to close the polygon</li>
+                <li>Right-click to remove the last point</li>
+                <li>Press 'Save' when done</li>
+            </ul>
+        </div>
+        <div class="canvas-container">
+            <canvas id="safeAreaCanvas"></canvas>
+        </div>
+        <div class="toolbar">
+            <button id="newPolygonBtn">New Polygon</button>
+            <button id="clearAllBtn">Clear All</button>
+            <button id="saveSafeAreasBtn">💾 Save</button>
+            <button onclick="hideSafeAreaPopup()">Cancel</button>
+        </div>
+        <div id="saveStatus" class="status"></div>
     </div>
 
     <script src="script.js"></script>

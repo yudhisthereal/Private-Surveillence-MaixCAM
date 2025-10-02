@@ -6,12 +6,15 @@ from tools.time_utils import get_timestamp_str
 from tools.skeleton_saver import SkeletonSaver2D
 from pose.judge_fall import get_fall_info
 from tools import web_server
+from tools.safe_area import BodySafetyChecker, CheckMethod  # Import the safe area classes
 import queue
 import numpy as np
 import os
+import json
 
 # Image Paths
 BACKGROUND_PATH = "/root/static/background.jpg"
+SAFE_AREA_FILE = "/root/safe_areas.json"
 
 # Wi-Fi Setup
 SSID = "ROBOTIIK"
@@ -67,6 +70,43 @@ prev_human_present = False
 no_human_counter = 0
 last_update_ms = time.ticks_ms()
 
+# Initialize Body Safety Checker
+safety_checker = BodySafetyChecker()
+SAFETY_CHECK_METHOD = CheckMethod.TORSO_HEAD  # Choose from: HIP, TORSO, TORSO_HEAD, TORSO_HEAD_KNEES, FULL_BODY
+USE_SAFETY_CHECK = True  # Enable/disable safety checking
+
+# Load safe areas from file or use default
+def load_safe_areas():
+    """Load safe areas from JSON file"""
+    try:
+        if os.path.exists(SAFE_AREA_FILE):
+            with open(SAFE_AREA_FILE, 'r') as f:
+                safe_areas = json.load(f)
+            print(f"Loaded {len(safe_areas)} safe area(s) from file")
+            return safe_areas
+        else:
+            print("No safe areas file found, using default")
+            return []
+    except Exception as e:
+        print(f"Error loading safe areas: {e}")
+        return []
+
+def update_safety_checker_polygons():
+    """Update the safety checker with current safe areas from web server"""
+    try:
+        safe_areas = web_server.get_safe_areas()
+        safety_checker.clear_safe_polygons()
+        for polygon in safe_areas:
+            safety_checker.add_safe_polygon(polygon)
+        print(f"Updated safety checker with {len(safe_areas)} polygon(s)")
+    except Exception as e:
+        print(f"Error updating safety checker: {e}")
+
+# Load initial safe areas
+initial_safe_areas = load_safe_areas()
+for polygon in initial_safe_areas:
+    safety_checker.add_safe_polygon(polygon)
+
 def start_new_recording():
     global frame_id, recording_start_time, is_recording
     
@@ -91,8 +131,36 @@ def stop_recording():
         print("Stopped recording")
 
 def to_keypoints_np(obj_points):
+    """Convert flat list [x1, y1, x2, y2, ...] to numpy array"""
     keypoints = np.array(obj_points)
     return keypoints.reshape(-1, 2)
+
+def flat_keypoints_to_pairs(keypoints_flat):
+    """Convert flat list [x1, y1, x2, y2, ...] to list of tuples [(x1,y1), (x2,y2), ...]"""
+    if len(keypoints_flat) % 2 != 0:
+        # If odd number, assume last element is confidence or discard it
+        keypoints_flat = keypoints_flat[:len(keypoints_flat)//2*2]
+    
+    pairs = []
+    for i in range(0, len(keypoints_flat), 2):
+        if i + 1 < len(keypoints_flat):
+            pairs.append((keypoints_flat[i], keypoints_flat[i+1]))
+    return pairs
+
+def normalize_keypoints(keypoints_flat, img_width, img_height):
+    """Normalize keypoints to 0-1 range for safe area checking"""
+    normalized = []
+    pairs = flat_keypoints_to_pairs(keypoints_flat)
+    
+    for x, y in pairs:
+        if x > 0 and y > 0:  # Valid keypoint
+            x_norm = x / img_width
+            y_norm = y / img_height
+            normalized.append((x_norm, y_norm, 1.0))  # Default confidence
+        else:
+            normalized.append((0.0, 0.0, 0.0))  # Invalid keypoint
+    
+    return normalized
 
 # Background update functions
 def rects_overlap(x1, y1, w1, h1, x2, y2, w2, h2):
@@ -138,6 +206,7 @@ online_targets = {
 
 fall_down = False
 fall_ids = set()
+unsafe_ids = set()  # Track persons not in safe area
 
 # Tracking params
 max_lost_buff_time = 30
@@ -167,6 +236,9 @@ else:
 while not app.need_exit():
     raw_img = cam.read()
     flags = web_server.get_control_flags()
+
+    # Update safety checker with latest polygons from web server
+    update_safety_checker_polygons()
 
     # Run segmentation for background updates and human detection
     objs_seg = segmentor.detect(raw_img, conf_th=0.5, iou_th=0.45)
@@ -287,11 +359,29 @@ while not app.need_exit():
                         elif track.id in fall_ids:
                             fall_ids.remove(track.id)
 
+                    # Safety area check
+                    if USE_SAFETY_CHECK and flags.get("use_safety_check", True):
+                        # Normalize keypoints for safe area checking
+                        normalized_keypoints = normalize_keypoints(obj.points, img.width(), img.height())
+                        
+                        # Check if person is in safe area
+                        is_safe = safety_checker.body_in_safe_zone(normalized_keypoints, SAFETY_CHECK_METHOD)
+                        
+                        if not is_safe:
+                            unsafe_ids.add(track.id)
+                        elif track.id in unsafe_ids:
+                            unsafe_ids.remove(track.id)
+
                     # Draw
                     status_str = pose_estimator.evaluate_pose(keypoints_np)
+                    
+                    # Determine status and color based on fall detection and safety check
                     if track.id in fall_ids:
                         msg = f"[{track.id}] FALL"
                         color = image.COLOR_RED
+                    elif track.id in unsafe_ids:
+                        msg = f"[{track.id}] UNSAFE"
+                        color = image.COLOR_ORANGE
                     else:
                         msg = f"[{track.id}] {status_str}"
                         color = image.COLOR_GREEN
@@ -300,9 +390,28 @@ while not app.need_exit():
                     detector.draw_pose(img, obj.points, 8 if detector.input_width() > 480 else 4, color=color)
                     
                     if is_recording:
-                        skeleton_saver_2d.add_keypoints(frame_id, track.id, obj.points, 1 if track.id in fall_ids else 0)
+                        # Save safety status: 0=normal, 1=fall, 2=unsafe
+                        safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
+                        skeleton_saver_2d.add_keypoints(frame_id, track.id, obj.points, safety_status)
                     
                     break  # no need to check other objs
+
+    # Draw safe area polygons for visualization (if enabled)
+    if USE_SAFETY_CHECK and flags.get("show_safe_area", False):
+        for polygon in safety_checker.safe_polygons:
+            points = []
+            for x_norm, y_norm in polygon:
+                x_pixel = int(x_norm * img.width())
+                y_pixel = int(y_norm * img.height())
+                points.append((x_pixel, y_pixel))
+            
+            # Draw polygon
+            for i in range(len(points)):
+                start_point = points[i]
+                end_point = points[(i + 1) % len(points)]
+                img.draw_line(start_point[0], start_point[1], 
+                            end_point[0], end_point[1], 
+                            color=image.COLOR_BLUE, thickness=2)
 
     if is_recording:
         recorder.add_frame(img)
