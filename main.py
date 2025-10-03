@@ -17,8 +17,10 @@ BACKGROUND_PATH = "/root/static/background.jpg"
 SAFE_AREA_FILE = "/root/safe_areas.json"
 
 # Wi-Fi Setup
-SSID = "ROBOTIIK"
-PASSWORD = "81895656"
+# SSID = "ROBOTIIK"
+# PASSWORD = "81895656"
+SSID = "MaixCAM-Wifi"
+PASSWORD = "maixcamwifi"
 server_ip = connect_wifi(SSID, PASSWORD)
 
 # Web Server Setup
