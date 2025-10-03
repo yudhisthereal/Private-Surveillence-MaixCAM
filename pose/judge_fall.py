@@ -1,12 +1,23 @@
+# judge_fall.py
+
+FALL_COUNT_THRES = 2  # how many consecutive falls required to confirm
+
+# persistent counter for consecutive falls
+fall_counter = 0  
+
 def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_size, fps):
+    global fall_counter
     fall_down = False
+
+    # Case: no detection available
+    if online_targets["bbox"][index].empty():
+        if fall_counter > 0:
+            fall_counter = max(0, fall_counter - 1)
+            return True  # still report fall during detection gaps
+        return False
 
     # Get current and previous bounding boxes
     cur_bbox = [online_targets_det.x, online_targets_det.y, online_targets_det.w, online_targets_det.h]
-
-    if online_targets["bbox"][index].empty():
-        return False
-
     pre_bbox = online_targets["bbox"][index].get()
     _ = online_targets["points"][index].get()  # keep points queue in sync with bbox
 
@@ -23,7 +34,12 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     print(f"[DEBUG] v_top = {v_top:.6f}, v_height = {v_height:.6f}, threshold = {fallParam['v_bbox_y']}")
 
     if v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"]:
-        print(f"[FALL] Fall triggered (top drop or height shrink): v_top = {v_top:.6f}, v_height = {v_height:.6f}")
+        fall_counter = min(FALL_COUNT_THRES, fall_counter + 1)  # increment, cap at threshold
+    else:
+        fall_counter = max(0, fall_counter - 1)  # decay if not falling
+
+    if fall_counter >= FALL_COUNT_THRES:
+        print(f"[FALL] Confirmed fall (counter={fall_counter})")
         fall_down = True
 
     return fall_down

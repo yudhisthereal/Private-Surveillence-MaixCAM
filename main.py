@@ -5,7 +5,7 @@ from tools.video_record import VideoRecorder
 from tools.time_utils import get_timestamp_str
 from tools.skeleton_saver import SkeletonSaver2D
 from pose.judge_fall import get_fall_info
-from tools import web_server
+from tools.web_server import web_server  # Import the web_server instance
 from tools.safe_area import BodySafetyChecker, CheckMethod  # Import the safe area classes
 import queue
 import numpy as np
@@ -91,10 +91,11 @@ def load_safe_areas():
         print(f"Error loading safe areas: {e}")
         return []
 
-def update_safety_checker_polygons():
-    """Update the safety checker with current safe areas from web server"""
+def update_safety_checker_polygons(safe_areas=None):
+    """Update the safety checker with safe areas"""
     try:
-        safe_areas = web_server.get_safe_areas()
+        if safe_areas is None:
+            safe_areas = web_server.get_safe_areas()
         safety_checker.clear_safe_polygons()
         for polygon in safe_areas:
             safety_checker.add_safe_polygon(polygon)
@@ -102,10 +103,12 @@ def update_safety_checker_polygons():
     except Exception as e:
         print(f"Error updating safety checker: {e}")
 
+# Set callback for safe areas updates
+web_server.set_safe_areas_callback(update_safety_checker_polygons)
+
 # Load initial safe areas
 initial_safe_areas = load_safe_areas()
-for polygon in initial_safe_areas:
-    safety_checker.add_safe_polygon(polygon)
+update_safety_checker_polygons(initial_safe_areas)
 
 def start_new_recording():
     global frame_id, recording_start_time, is_recording
@@ -237,8 +240,10 @@ while not app.need_exit():
     raw_img = cam.read()
     flags = web_server.get_control_flags()
 
-    # Update safety checker with latest polygons from web server
-    update_safety_checker_polygons()
+    # Check for safe areas updates (only process if there are updates)
+    if web_server.safe_areas_have_updates():
+        # The callback will automatically update the safety checker
+        pass
 
     # Run segmentation for background updates and human detection
     objs_seg = segmentor.detect(raw_img, conf_th=0.5, iou_th=0.45)
@@ -359,7 +364,12 @@ while not app.need_exit():
                         elif track.id in fall_ids:
                             fall_ids.remove(track.id)
 
-                    # Safety area check
+                    # Safety area check - ONLY when person is lying down
+                    status_str = pose_estimator.evaluate_pose(keypoints_np)
+                    # is_lying_down = False
+                    # if status_str:
+                    #     is_lying_down = "lying" in status_str.lower() or "fall" in status_str.lower()
+                    
                     if USE_SAFETY_CHECK and flags.get("use_safety_check", True):
                         # Normalize keypoints for safe area checking
                         normalized_keypoints = normalize_keypoints(obj.points, img.width(), img.height())
@@ -371,10 +381,12 @@ while not app.need_exit():
                             unsafe_ids.add(track.id)
                         elif track.id in unsafe_ids:
                             unsafe_ids.remove(track.id)
+                    else:
+                        # If not lying down or safety check disabled, remove from unsafe_ids
+                        if track.id in unsafe_ids:
+                            unsafe_ids.remove(track.id)
 
                     # Draw
-                    status_str = pose_estimator.evaluate_pose(keypoints_np)
-                    
                     # Determine status and color based on fall detection and safety check
                     if track.id in fall_ids:
                         msg = f"[{track.id}] FALL"
