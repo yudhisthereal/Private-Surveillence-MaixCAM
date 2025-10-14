@@ -1,4 +1,5 @@
 # Private Human Pose Monitoring System for MaixCAM
+![maixcam](https://github.com/user-attachments/assets/25653e7d-aa29-4702-9b5c-b6a4c986b9ea)
 
 ## 📋 Overview
 
@@ -81,7 +82,7 @@ A comprehensive human pose monitoring system built for the MaixCAM platform that
 
 ### Accessing Web Interface
 1. Check the console output for the device IP address
-2. Open a web browser and navigate to: `http://[DEVICE_IP]:8000/`
+2. Open a web browser and navigate to: `http://[DEVICE_IP]:80/`
 3. Use the web interface to:
    - View live feed (MJPEG stream)
    - Toggle recording
