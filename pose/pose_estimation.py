@@ -8,11 +8,16 @@ class PoseEstimation:
     - Reject frames with incomplete keypoints by checking a missing-value sentinel (default -1).
     - Append to the smoothing deque only when the current frame is complete.
     - Return None (and set self.status = []) when keypoints are incomplete or angles cannot be computed.
+    - Added limb length ratios to distinguish sitting and bending_down from standing.
     """
     def __init__(self, keypoints_window_size=5, missing_value=-1):
         self.keypoints_map_deque = deque(maxlen=keypoints_window_size)
         self.status = []
         self.missing_value = missing_value
+        
+        # Thresholds for limb length ratios
+        self.thigh_calf_ratio_threshold = 0.7  # If thigh is significantly shorter than calf
+        self.torso_leg_ratio_threshold = 0.5   # If torso is significantly shorter than leg
 
     def feed_keypoints_17(self, keypoints_17):
         # keypoints_17: flattened list/array [x0,y0, x1,y1, ..., x16,y16]
@@ -25,7 +30,9 @@ class PoseEstimation:
             'Left Hip': keypoints[11],
             'Right Hip': keypoints[12],
             'Left Knee': keypoints[13],
-            'Right Knee': keypoints[14]
+            'Right Knee': keypoints[14],
+            'Left Ankle': keypoints[15],
+            'Right Ankle': keypoints[16]
         }
 
         return self.feed_keypoints_map(kp_map)
@@ -40,6 +47,34 @@ class PoseEstimation:
             if v[0] == self.missing_value or v[1] == self.missing_value:
                 return False
         return True
+
+    def _calculate_limb_lengths(self, km):
+        """Calculate limb lengths and ratios for posture classification."""
+        # Calculate thigh length (hip to knee)
+        left_thigh = np.linalg.norm(km['Left Hip'] - km['Left Knee'])
+        right_thigh = np.linalg.norm(km['Right Hip'] - km['Right Knee'])
+        thigh_length = (left_thigh + right_thigh) / 2.0
+        
+        # Calculate calf length (knee to ankle)
+        left_calf = np.linalg.norm(km['Left Knee'] - km['Left Ankle'])
+        right_calf = np.linalg.norm(km['Right Knee'] - km['Right Ankle'])
+        calf_length = (left_calf + right_calf) / 2.0
+        
+        # Calculate torso height (shoulder to hip)
+        left_torso = np.linalg.norm(km['Left Shoulder'] - km['Left Hip'])
+        right_torso = np.linalg.norm(km['Right Shoulder'] - km['Right Hip'])
+        torso_height = (left_torso + right_torso) / 2.0
+        
+        # Calculate leg length (hip to ankle)
+        left_leg = np.linalg.norm(km['Left Hip'] - km['Left Ankle'])
+        right_leg = np.linalg.norm(km['Right Hip'] - km['Right Ankle'])
+        leg_length = (left_leg + right_leg) / 2.0
+        
+        # Calculate ratios
+        thigh_calf_ratio = thigh_length / calf_length if calf_length > 0 else 1.0
+        torso_leg_ratio = torso_height / leg_length if leg_length > 0 else 1.0
+        
+        return thigh_calf_ratio, torso_leg_ratio
 
     def feed_keypoints_map(self, keypoints_map):
         # If current frame is incomplete, clear status and do not append — return None
@@ -82,9 +117,18 @@ class PoseEstimation:
         # convert thigh angle to "uprightness" where smaller is more upright
         thigh_uprightness = abs(thigh_angle - 180.0)
 
-        # simple thresholds (tweakable)
+        # Calculate limb length ratios
+        thigh_calf_ratio, torso_leg_ratio = self._calculate_limb_lengths(km)
+
+        # Classification with limb length ratios
         if torso_angle < 30 and thigh_uprightness < 40:
-            label = "standing"
+            # Check if angles suggest standing but limb ratios suggest otherwise
+            if thigh_calf_ratio < self.thigh_calf_ratio_threshold:
+                label = "sitting"  # Thigh is significantly shorter than calf
+            elif torso_leg_ratio < self.torso_leg_ratio_threshold:
+                label = "bending_down"  # Torso is significantly shorter than leg
+            else:
+                label = "standing"
         elif torso_angle < 30 and thigh_uprightness >= 40:
             label = "sitting"
         elif 30 <= torso_angle < 80 and thigh_uprightness < 60:
