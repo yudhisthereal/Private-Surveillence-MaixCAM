@@ -368,25 +368,28 @@ while not app.need_exit():
 
                     # Safety area check - ONLY when person is lying down
                     status_str = pose_estimator.evaluate_pose(keypoints_np)
-                    # is_lying_down = False
-                    # if status_str:
-                    #     is_lying_down = "lying" in status_str.lower() or "fall" in status_str.lower()
-                    
-                    if USE_SAFETY_CHECK and flags.get("use_safety_check", True):
-                        # Normalize keypoints for safe area checking
-                        normalized_keypoints = normalize_keypoints(obj.points, img.width(), img.height())
-                        
-                        # Check if person is in safe area
-                        is_safe = safety_checker.body_in_safe_zone(normalized_keypoints, SAFETY_CHECK_METHOD)
-                        
-                        if not is_safe:
-                            unsafe_ids.add(track.id)
-                        elif track.id in unsafe_ids:
-                            unsafe_ids.remove(track.id)
-                    else:
-                        # If not lying down or safety check disabled, remove from unsafe_ids
-                        if track.id in unsafe_ids:
-                            unsafe_ids.remove(track.id)
+                    is_lying_down = False
+                    if status_str:
+                        if status_str is not str:
+                            status_str = str(status_str)
+                        is_lying_down = "lying" in status_str.lower() or "fall" in status_str.lower()
+                            
+                    if is_lying_down:
+                        if USE_SAFETY_CHECK and flags.get("use_safety_check", True):
+                            # Normalize keypoints for safe area checking
+                            normalized_keypoints = normalize_keypoints(obj.points, img.width(), img.height())
+                            
+                            # Check if person is in safe area
+                            is_safe = safety_checker.body_in_safe_zone(normalized_keypoints, SAFETY_CHECK_METHOD)
+                            
+                            if not is_safe:
+                                unsafe_ids.add(track.id)
+                            elif track.id in unsafe_ids:
+                                unsafe_ids.remove(track.id)
+                        else:
+                            # If not lying down or safety check disabled, remove from unsafe_ids
+                            if track.id in unsafe_ids:
+                                unsafe_ids.remove(track.id)
 
                     # Draw
                     # Determine status and color based on fall detection and safety check
