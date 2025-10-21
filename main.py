@@ -303,14 +303,13 @@ while not app.need_exit():
     if len(human_presence_history) > NO_HUMAN_FRAMES_TO_STOP + 1:
         human_presence_history.pop(0)
     
-    # Smart recording logic
+    # Unified recording logic
     if flags["record"]:
         now = time.ticks_ms()
         
         # Check if we should start recording
         if not is_recording:
             # Start if we have human presence for MIN_HUMAN_FRAMES_TO_START consecutive frames
-            # Or if we just ended a recording and human is still present
             if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
                 all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
                 start_new_recording()
@@ -328,7 +327,11 @@ while not app.need_exit():
             if (no_human_count >= NO_HUMAN_FRAMES_TO_STOP or 
                 now - recording_start_time >= MAX_RECORDING_DURATION_MS):
                 stop_recording()
-    
+    else:
+        # Manual stop if recording flag is disabled but we're still recording
+        if is_recording:
+            stop_recording()
+
     # Process tracking and drawing
     out_bbox = yolo_objs_to_tracker_objs(objs)
     tracks = tracker0.update(out_bbox)
@@ -442,17 +445,6 @@ while not app.need_exit():
     disp.show(img)
     
     web_server.send_frame(img)
-
-    flags = web_server.get_control_flags()
-    
-    # Manual recording control from web interface
-    if flags["record"] and not is_recording and not recorder.is_active:
-        # Manual start - check if we should start immediately
-        if human_present:
-            start_new_recording()
-    elif not flags["record"] and is_recording:
-        # Manual stop
-        stop_recording()
 
     if flags["set_background"]:
         web_server.confirm_background(BACKGROUND_PATH)
