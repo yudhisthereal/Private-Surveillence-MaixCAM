@@ -5,23 +5,34 @@ from tools.video_record import VideoRecorder
 from tools.time_utils import get_timestamp_str
 from tools.skeleton_saver import SkeletonSaver2D
 from pose.judge_fall import get_fall_info
-from tools.web_server import web_server  # Import the web_server instance
-from tools.safe_area import BodySafetyChecker, CheckMethod  # Import the safe area classes
+from tools.web_server import web_server
+from tools.safe_area import BodySafetyChecker, CheckMethod
 import queue
 import numpy as np
 import os
 import json
+import paho.mqtt.client as mqtt
+import base64
+import pickle
+import ssl
 
 # Image Paths
 BACKGROUND_PATH = "/root/static/background.jpg"
 SAFE_AREA_FILE = "/root/safe_areas.json"
 
 # Wi-Fi Setup
-# SSID = "ROBOTIIK"
-# PASSWORD = "81895656"
-SSID = "MaixCAM-Wifi"
-PASSWORD = "maixcamwifi"
+SSID = "GEREJA AL-IKHLAS (UMI MARIA)"
+PASSWORD = "susugedhe"
 server_ip = connect_wifi(SSID, PASSWORD)
+
+# HiveMQ MQTT Setup
+MQTT_BROKER = "3e065ffaa6084b219bc6553c8659b067.s1.eu.hivemq.cloud"
+MQTT_PORT = 8883
+MQTT_USERNAME = "PatientMonitor"
+MQTT_PASSWORD = "Patientmonitor1"
+MQTT_TOPIC_SKELETAL = "patient_monitor/skeletal_data"
+MQTT_TOPIC_DIAGNOSIS = "patient_monitor/diagnosis"
+MQTT_TOPIC_CONTROL = "patient_monitor/control"
 
 # Web Server Setup
 web_server.start_servers()
@@ -49,22 +60,22 @@ os.makedirs(video_dir, exist_ok=True)
 
 recorder = VideoRecorder()
 skeleton_saver_2d = SkeletonSaver2D()
-frame_id = 0  # the frame ID of the current recording
+frame_id = 0
 
 # Recording parameters
-MIN_HUMAN_FRAMES_TO_START = 3  # Start recording after 3 frames with human presence
-NO_HUMAN_FRAMES_TO_STOP = 30   # Stop recording after 30 frames without human presence
-MAX_RECORDING_DURATION_MS = 90000  # 90 seconds max recording duration
+MIN_HUMAN_FRAMES_TO_START = 3
+NO_HUMAN_FRAMES_TO_STOP = 30
+MAX_RECORDING_DURATION_MS = 90000
 
 # Recording state variables
-human_presence_history = []  # Track human presence for last few frames
+human_presence_history = []
 recording_start_time = 0
 is_recording = False
 
 # Background update settings
-UPDATE_INTERVAL_MS = 10000  # 10 seconds
+UPDATE_INTERVAL_MS = 10000
 NO_HUMAN_CONFIRM_FRAMES = 10
-STEP = 8  # Step size for background update
+STEP = 8
 
 # Background state variables
 background_img = None
@@ -74,8 +85,153 @@ last_update_ms = time.ticks_ms()
 
 # Initialize Body Safety Checker
 safety_checker = BodySafetyChecker()
-SAFETY_CHECK_METHOD = CheckMethod.TORSO_HEAD  # Choose from: HIP, TORSO, TORSO_HEAD, TORSO_HEAD_KNEES, FULL_BODY
-USE_SAFETY_CHECK = True  # Enable/disable safety checking
+SAFETY_CHECK_METHOD = CheckMethod.TORSO_HEAD
+USE_SAFETY_CHECK = True
+
+# MQTT Client setup
+mqtt_client = None
+OPERATION_MODE = "encrypted_analytics"  # "local_analysis" or "encrypted_analytics"
+REMOTE_ACCESS_MODE = False
+
+def setup_mqtt():
+    """Setup MQTT client for communication with analytics server"""
+    global mqtt_client
+    try:
+        mqtt_client = mqtt.Client()
+        
+        # Set username and password for authentication
+        mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+        mqtt_client.tls_set(cert_reqs=ssl.CERT_NONE)
+        
+        mqtt_client.on_connect = on_mqtt_connect
+        mqtt_client.on_message = on_mqtt_message
+        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        mqtt_client.loop_start()
+        print("MQTT client configured for HiveMQ Cloud")
+    except Exception as e:
+        print(f"MQTT connection failed: {e}")
+
+def on_mqtt_connect(client, userdata, flags, rc):
+    """Callback for when MQTT client connects"""
+    if rc == 0:
+        print("Connected to MQTT broker")
+        client.subscribe(MQTT_TOPIC_DIAGNOSIS)
+        client.subscribe(MQTT_TOPIC_CONTROL)
+    else:
+        print(f"Failed to connect to MQTT broker, return code {rc}")
+        if rc == 5:
+            print("Authentication failed - check username and password")
+
+def on_mqtt_message(client, userdata, msg):
+    """Callback for when MQTT message is received"""
+    global OPERATION_MODE, REMOTE_ACCESS_MODE
+    
+    try:
+        payload = json.loads(msg.payload.decode())
+        
+        if msg.topic == MQTT_TOPIC_DIAGNOSIS:
+            handle_analytics_diagnosis(payload)
+        elif msg.topic == MQTT_TOPIC_CONTROL:
+            handle_control_message(payload)
+            
+    except Exception as e:
+        print(f"Error processing MQTT message: {e}")
+
+def handle_analytics_diagnosis(payload):
+    """Handle diagnosis received from analytics server"""
+    # Placeholder for handling encrypted diagnosis from analytics
+    diagnosis = payload.get("diagnosis", {})
+    timestamp = payload.get("timestamp")
+    signature = payload.get("signature")  # For verification
+    
+    print(f"Received diagnosis from analytics: {diagnosis}")
+    
+    # Verify signature and process diagnosis
+    if verify_diagnosis_signature(payload):
+        # Merge with local diagnosis if needed
+        fused_diagnosis = fuse_diagnoses(local_diagnosis, diagnosis)
+        trigger_appropriate_actions(fused_diagnosis)
+
+def handle_control_message(payload):
+    """Handle control messages from analytics server or caregiver"""
+    global OPERATION_MODE, REMOTE_ACCESS_MODE
+    
+    command = payload.get("command")
+    
+    if command == "switch_mode":
+        new_mode = payload.get("mode")
+        if new_mode in ["local_analysis", "encrypted_analytics"]:
+            OPERATION_MODE = new_mode
+            print(f"Switched to {OPERATION_MODE} mode")
+    
+    elif command == "remote_access":
+        REMOTE_ACCESS_MODE = payload.get("enable", False)
+        if REMOTE_ACCESS_MODE:
+            print("Remote access enabled")
+            # Start streaming reduced video/skeletal data
+            start_remote_streaming()
+        else:
+            print("Remote access disabled")
+            stop_remote_streaming()
+    
+    elif command == "trigger_recording":
+        # Trigger recording based on analytics decision
+        start_new_recording()
+
+def verify_diagnosis_signature(payload):
+    """Verify the signature of the diagnosis from analytics"""
+    # Placeholder for signature verification
+    # This ensures the diagnosis hasn't been tampered with
+    return True  # Implement proper verification
+
+def fuse_diagnoses(local_diagnosis, analytics_diagnosis):
+    """Fuse local and analytics diagnoses for better accuracy"""
+    # Placeholder for diagnosis fusion logic
+    return analytics_diagnosis  # For now, trust analytics
+
+def trigger_appropriate_actions(diagnosis):
+    """Trigger appropriate actions based on diagnosis"""
+    # Placeholder for action triggering
+    if diagnosis.get("alert_level") == "high":
+        # Trigger emergency protocols
+        pass
+
+def start_remote_streaming():
+    """Start streaming reduced video/skeletal data for remote access"""
+    # Placeholder for remote streaming implementation
+    print("Starting remote streaming...")
+
+def stop_remote_streaming():
+    """Stop remote streaming"""
+    # Placeholder for stopping remote streaming
+    print("Stopping remote streaming...")
+
+def send_skeletal_data_to_analytics(keypoints, bbox, track_id, timestamp):
+    """Send skeletal data to analytics server via MQTT"""
+    if mqtt_client and OPERATION_MODE == "encrypted_analytics":
+        try:
+            # Encrypt skeletal data before sending
+            encrypted_data = encrypt_skeletal_data({
+                "keypoints": keypoints,
+                "bbox": bbox,
+                "track_id": track_id,
+                "timestamp": timestamp,
+                "device_id": "maixcam_001"  # Unique device identifier
+            })
+            
+            mqtt_client.publish(MQTT_TOPIC_SKELETAL, json.dumps(encrypted_data))
+        except Exception as e:
+            print(f"Error sending skeletal data to analytics: {e}")
+
+def encrypt_skeletal_data(data):
+    """Encrypt skeletal data for secure transmission"""
+    # Placeholder for encryption implementation
+    # Use proper encryption like AES or RSA
+    return {
+        "encrypted_data": base64.b64encode(pickle.dumps(data)).decode(),
+        "encryption_method": "placeholder",
+        "timestamp": time.time()
+    }
 
 # Load safe areas from file or use default
 def load_safe_areas():
@@ -143,7 +299,6 @@ def to_keypoints_np(obj_points):
 def flat_keypoints_to_pairs(keypoints_flat):
     """Convert flat list [x1, y1, x2, y2, ...] to list of tuples [(x1,y1), (x2,y2), ...]"""
     if len(keypoints_flat) % 2 != 0:
-        # If odd number, assume last element is confidence or discard it
         keypoints_flat = keypoints_flat[:len(keypoints_flat)//2*2]
     
     pairs = []
@@ -158,12 +313,12 @@ def normalize_keypoints(keypoints_flat, img_width, img_height):
     pairs = flat_keypoints_to_pairs(keypoints_flat)
     
     for x, y in pairs:
-        if x > 0 and y > 0:  # Valid keypoint
+        if x > 0 and y > 0:
             x_norm = x / img_width
             y_norm = y / img_height
-            normalized.append((x_norm, y_norm, 1.0))  # Default confidence
+            normalized.append((x_norm, y_norm, 1.0))
         else:
-            normalized.append((0.0, 0.0, 0.0))  # Invalid keypoint
+            normalized.append((0.0, 0.0, 0.0))
     
     return normalized
 
@@ -211,7 +366,7 @@ online_targets = {
 
 fall_down = False
 fall_ids = set()
-unsafe_ids = set()  # Track persons not in safe area
+unsafe_ids = set()
 
 # Tracking params
 max_lost_buff_time = 30
@@ -233,18 +388,19 @@ def yolo_objs_to_tracker_objs(objs, valid_class_id=[0]):
 if os.path.exists(BACKGROUND_PATH):
     background_img = image.load(BACKGROUND_PATH, format=image.Format.FMT_RGB888)
 else:
-    # Capture initial background
     background_img = cam.read().copy()
     background_img.save(BACKGROUND_PATH)
+
+# Setup MQTT
+setup_mqtt()
 
 # === Main loop ===
 while not app.need_exit():
     raw_img = cam.read()
     flags = web_server.get_control_flags()
 
-    # Check for safe areas updates (only process if there are updates)
+    # Check for safe areas updates
     if web_server.safe_areas_have_updates():
-        # The callback will automatically update the safety checker
         pass
 
     # Run segmentation for background updates and human detection
@@ -252,7 +408,7 @@ while not app.need_exit():
     current_human_present = any(segmentor.labels[obj.class_id] in ["person", "human"] for obj in objs_seg)
     bg_updated = False
 
-    # Background update logic - only if auto_update_bg is enabled
+    # Background update logic
     if flags["auto_update_bg"]:
         if prev_human_present and not current_human_present:
             no_human_counter += 1
@@ -278,7 +434,6 @@ while not app.need_exit():
             background_img.save(BACKGROUND_PATH)
             last_update_ms = time.ticks_ms()
     else:
-        # Reset counters when auto-update is disabled
         no_human_counter = 0
         prev_human_present = current_human_present
 
@@ -289,34 +444,28 @@ while not app.need_exit():
         if background_img is not None:
             img = background_img.copy()
         else:
-            img = raw_img.copy()  # fallback
+            img = raw_img.copy()
 
     # Pose detection and tracking
     objs = detector.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
     
-    # Check for human presence from pose detector as well
     pose_human_present = len(objs) > 0
     human_present = current_human_present or pose_human_present
     
-    # Update human presence history (keep last NO_HUMAN_FRAMES_TO_STOP + 1 frames)
     human_presence_history.append(human_present)
     if len(human_presence_history) > NO_HUMAN_FRAMES_TO_STOP + 1:
         human_presence_history.pop(0)
     
-    # Unified recording logic
+    # Recording logic
     if flags["record"]:
         now = time.ticks_ms()
         
-        # Check if we should start recording
         if not is_recording:
-            # Start if we have human presence for MIN_HUMAN_FRAMES_TO_START consecutive frames
             if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
                 all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
                 start_new_recording()
         
-        # Check if we should stop recording
         if is_recording:
-            # Stop if no human for NO_HUMAN_FRAMES_TO_STOP consecutive frames
             no_human_count = 0
             for presence in reversed(human_presence_history):
                 if not presence:
@@ -328,7 +477,6 @@ while not app.need_exit():
                 now - recording_start_time >= MAX_RECORDING_DURATION_MS):
                 stop_recording()
     else:
-        # Manual stop if recording flag is disabled but we're still recording
         if is_recording:
             stop_recording()
 
@@ -346,6 +494,16 @@ while not app.need_exit():
             for obj in objs:
                 if abs(obj.x - tracker_obj.x) < 10 and abs(obj.y - tracker_obj.y) < 10:
                     keypoints_np = to_keypoints_np(obj.points)
+                    timestamp = time.ticks_ms()
+
+                    # Send skeletal data to analytics if in encrypted mode
+                    if OPERATION_MODE == "encrypted_analytics":
+                        send_skeletal_data_to_analytics(
+                            obj.points, 
+                            [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
+                            track.id,
+                            timestamp
+                        )
 
                     # Assign ID
                     if track.id not in online_targets["id"]:
@@ -362,14 +520,14 @@ while not app.need_exit():
                     online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
                     online_targets["points"][idx].put(obj.points)
 
-                    # Call fall detection when queue is full
+                    # Local fall detection
                     if online_targets["bbox"][idx].qsize() == queue_size:
                         if get_fall_info(tracker_obj, online_targets, idx, fallParam, queue_size, fps):
                             fall_ids.add(track.id)
                         elif track.id in fall_ids:
                             fall_ids.remove(track.id)
 
-                    # Safety area check - ONLY when person is lying down
+                    # Safety area check
                     status_str = pose_estimator.evaluate_pose(keypoints_np)
                     is_lying_down = False
                     if status_str:
@@ -379,10 +537,7 @@ while not app.need_exit():
                             
                     if is_lying_down:
                         if USE_SAFETY_CHECK and flags.get("use_safety_check", True):
-                            # Normalize keypoints for safe area checking
                             normalized_keypoints = normalize_keypoints(obj.points, img.width(), img.height())
-                            
-                            # Check if person is in safe area
                             is_safe = safety_checker.body_in_safe_zone(normalized_keypoints, SAFETY_CHECK_METHOD)
                             
                             if not is_safe:
@@ -390,12 +545,10 @@ while not app.need_exit():
                             elif track.id in unsafe_ids:
                                 unsafe_ids.remove(track.id)
                         else:
-                            # If not lying down or safety check disabled, remove from unsafe_ids
                             if track.id in unsafe_ids:
                                 unsafe_ids.remove(track.id)
 
                     # Draw
-                    # Determine status and color based on fall detection and safety check
                     if track.id in fall_ids:
                         msg = f"[{track.id}] FALL"
                         color = image.COLOR_RED
@@ -410,13 +563,12 @@ while not app.need_exit():
                     detector.draw_pose(img, obj.points, 8 if detector.input_width() > 480 else 4, color=color)
                     
                     if is_recording:
-                        # Save safety status: 0=normal, 1=fall, 2=unsafe
                         safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
                         skeleton_saver_2d.add_keypoints(frame_id, track.id, obj.points, safety_status)
                     
-                    break  # no need to check other objs
+                    break
 
-    # Draw safe area polygons for visualization (if enabled)
+    # Draw safe area polygons
     if USE_SAFETY_CHECK and flags.get("show_safe_area", False):
         for polygon in safety_checker.safe_polygons:
             points = []
@@ -425,7 +577,6 @@ while not app.need_exit():
                 y_pixel = int(y_norm * img.height())
                 points.append((x_pixel, y_pixel))
             
-            # Draw polygon
             for i in range(len(points)):
                 start_point = points[i]
                 end_point = points[(i + 1) % len(points)]
@@ -436,11 +587,19 @@ while not app.need_exit():
     if is_recording:
         recorder.add_frame(img)
     
-    # Draw recording status on display
+    # Draw recording status
     if is_recording:
         recording_time = (time.ticks_ms() - recording_start_time) // 1000
         status_text = f"REC {recording_time}s"
         img.draw_string(10, 10, status_text, color=image.COLOR_RED, scale=0.5)
+    
+    # Draw operation mode
+    mode_text = f"Mode: {OPERATION_MODE}"
+    img.draw_string(10, 20, mode_text, color=image.Color.from_rgb(0, 255, 255), scale=0.5)
+    
+    if REMOTE_ACCESS_MODE:
+        access_text = "REMOTE ACCESS"
+        img.draw_string(10, 70, access_text, color=image.COLOR_YELLOW, scale=0.5)
     
     disp.show(img)
     
@@ -453,3 +612,6 @@ while not app.need_exit():
 # Final cleanup
 if is_recording:
     stop_recording()
+if mqtt_client:
+    mqtt_client.loop_stop()
+    mqtt_client.disconnect()
