@@ -4,43 +4,39 @@ from tools.wifi_connect import connect_wifi
 from tools.video_record import VideoRecorder
 from tools.time_utils import get_timestamp_str
 from tools.skeleton_saver import SkeletonSaver2D
-from pose.judge_fall import get_fall_info
-from tools.web_server import web_server
+from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
 from tools.safe_area import BodySafetyChecker, CheckMethod
 import queue
 import numpy as np
 import os
 import json
-import paho.mqtt.client as mqtt
-import base64
-import pickle
-import ssl
+import requests
+import gc
+import socket
+import threading
+import select
 
 # Image Paths
 BACKGROUND_PATH = "/root/static/background.jpg"
 SAFE_AREA_FILE = "/root/safe_areas.json"
+STATE_FILE = "/root/camera_state.json"
 
-# Wi-Fi Setup
-SSID = "GEREJA AL-IKHLAS (UMI MARIA)"
-PASSWORD = "susugedhe"
-server_ip = connect_wifi(SSID, PASSWORD)
+# Analytics Server Setup
+ANALYTICS_SERVER_IP = "10.128.10.130"  # Your analytics server IP
+CAMERA_ID = "maixcam_001"
+ANALYTICS_HTTP_URL = f"http://{ANALYTICS_SERVER_IP}:8000"
 
-# HiveMQ MQTT Setup
-MQTT_BROKER = "3e065ffaa6084b219bc6553c8659b067.s1.eu.hivemq.cloud"
-MQTT_PORT = 8883
-MQTT_USERNAME = "PatientMonitor"
-MQTT_PASSWORD = "Patientmonitor1"
-MQTT_TOPIC_SKELETAL = "patient_monitor/skeletal_data"
-MQTT_TOPIC_DIAGNOSIS = "patient_monitor/diagnosis"
-MQTT_TOPIC_CONTROL = "patient_monitor/control"
+# Local server for receiving commands (runs on MaixCAM)
+LOCAL_PORT = 8080
 
-# Web Server Setup
-web_server.start_servers()
-print("\nServer started. Connect to MaixCAM in your browser:")
-print(f"   → http://{server_ip}:{web_server.HTTP_PORT}/")
+# Connect to WiFi
+server_ip = connect_wifi("MaixCAM-Wifi", "maixcamwifi")
+print(f"Camera IP: {server_ip}")
+print(f"Analytics server: {ANALYTICS_HTTP_URL}")
 
-# Ensure static dir exist
+# Ensure directories exist
 os.makedirs("/root/static", exist_ok=True)
+os.makedirs("/root/recordings", exist_ok=True)
 
 # Initialize detectors
 detector = nn.YOLO11(model="/root/models/yolo11n_pose.mud", dual_buff=True)
@@ -55,9 +51,6 @@ image.load_font("sourcehansans", "/maixapp/share/font/SourceHanSansCN-Regular.ot
 image.set_default_font("sourcehansans")
 
 # Skeleton Saver and Recorder setup
-video_dir = "/root/recordings"
-os.makedirs(video_dir, exist_ok=True)
-
 recorder = VideoRecorder()
 skeleton_saver_2d = SkeletonSaver2D()
 frame_id = 0
@@ -88,152 +81,190 @@ safety_checker = BodySafetyChecker()
 SAFETY_CHECK_METHOD = CheckMethod.TORSO_HEAD
 USE_SAFETY_CHECK = True
 
-# MQTT Client setup
-mqtt_client = None
-OPERATION_MODE = "encrypted_analytics"  # "local_analysis" or "encrypted_analytics"
-REMOTE_ACCESS_MODE = False
+# Camera control flags (fetched from analytics)
+control_flags = {
+    "record": False,
+    "show_raw": False,
+    "set_background": False,
+    "auto_update_bg": False,
+    "show_safe_area": False,
+    "use_safety_check": True
+}
 
-def setup_mqtt():
-    """Setup MQTT client for communication with analytics server"""
-    global mqtt_client
+# Frame sending
+FRAME_SEND_INTERVAL_MS = 200  # 5 FPS
+last_frame_sent_time = time.ticks_ms()
+
+# State reporting
+STATE_REPORT_INTERVAL_MS = 30000
+last_state_report = time.ticks_ms()
+
+# Connection management
+connection_error_count = 0
+MAX_CONNECTION_ERRORS = 10
+
+# Command server for receiving commands from analytics
+command_server_running = True
+received_commands = []
+commands_lock = threading.Lock()
+
+def save_control_flags():
+    """Save control flags to file"""
     try:
-        mqtt_client = mqtt.Client()
-        
-        # Set username and password for authentication
-        mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-        mqtt_client.tls_set(cert_reqs=ssl.CERT_NONE)
-        
-        mqtt_client.on_connect = on_mqtt_connect
-        mqtt_client.on_message = on_mqtt_message
-        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        mqtt_client.loop_start()
-        print("MQTT client configured for HiveMQ Cloud")
+        with open(STATE_FILE, 'w') as f:
+            json.dump({
+                "control_flags": control_flags,
+                "timestamp": time.ticks_ms()
+            }, f)
     except Exception as e:
-        print(f"MQTT connection failed: {e}")
+        print(f"Error saving control flags: {e}")
 
-def on_mqtt_connect(client, userdata, flags, rc):
-    """Callback for when MQTT client connects"""
-    if rc == 0:
-        print("Connected to MQTT broker")
-        client.subscribe(MQTT_TOPIC_DIAGNOSIS)
-        client.subscribe(MQTT_TOPIC_CONTROL)
-    else:
-        print(f"Failed to connect to MQTT broker, return code {rc}")
-        if rc == 5:
-            print("Authentication failed - check username and password")
+def load_control_flags():
+    """Load control flags from file"""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                data = json.load(f)
+                if "control_flags" in data:
+                    control_flags.update(data["control_flags"])
+                    print(f"Loaded control flags from file")
+    except Exception as e:
+        print(f"Error loading control flags: {e}")
 
-def on_mqtt_message(client, userdata, msg):
-    """Callback for when MQTT message is received"""
-    global OPERATION_MODE, REMOTE_ACCESS_MODE
+def check_server_connection():
+    """Check if analytics server is reachable"""
+    try:
+        response = requests.get(f"{ANALYTICS_HTTP_URL}/", timeout=2)
+        print(f"Analytics server connection successful: {response.status_code}")
+        return True
+    except Exception as e:
+        print(f"Analytics server connection failed: {e}")
+        return False
+
+def send_frame_simple(img):
+    """Simple frame upload to analytics server"""
+    global connection_error_count
     
     try:
-        payload = json.loads(msg.payload.decode())
+        # Convert to JPEG with lower quality for faster transmission
+        jpeg_img = img.to_format(image.Format.FMT_JPEG)
+        jpeg_bytes = jpeg_img.to_bytes()
         
-        if msg.topic == MQTT_TOPIC_DIAGNOSIS:
-            handle_analytics_diagnosis(payload)
-        elif msg.topic == MQTT_TOPIC_CONTROL:
-            handle_control_message(payload)
-            
-    except Exception as e:
-        print(f"Error processing MQTT message: {e}")
-
-def handle_analytics_diagnosis(payload):
-    """Handle diagnosis received from analytics server"""
-    # Placeholder for handling encrypted diagnosis from analytics
-    diagnosis = payload.get("diagnosis", {})
-    timestamp = payload.get("timestamp")
-    signature = payload.get("signature")  # For verification
-    
-    print(f"Received diagnosis from analytics: {diagnosis}")
-    
-    # Verify signature and process diagnosis
-    if verify_diagnosis_signature(payload):
-        # Merge with local diagnosis if needed
-        fused_diagnosis = fuse_diagnoses(local_diagnosis, diagnosis)
-        trigger_appropriate_actions(fused_diagnosis)
-
-def handle_control_message(payload):
-    """Handle control messages from analytics server or caregiver"""
-    global OPERATION_MODE, REMOTE_ACCESS_MODE
-    
-    command = payload.get("command")
-    
-    if command == "switch_mode":
-        new_mode = payload.get("mode")
-        if new_mode in ["local_analysis", "encrypted_analytics"]:
-            OPERATION_MODE = new_mode
-            print(f"Switched to {OPERATION_MODE} mode")
-    
-    elif command == "remote_access":
-        REMOTE_ACCESS_MODE = payload.get("enable", False)
-        if REMOTE_ACCESS_MODE:
-            print("Remote access enabled")
-            # Start streaming reduced video/skeletal data
-            start_remote_streaming()
+        # Upload to analytics server
+        response = requests.post(
+            f"{ANALYTICS_HTTP_URL}/upload_frame",
+            data=jpeg_bytes,
+            headers={
+                'Content-Type': 'image/jpeg', 
+                'X-Camera-ID': CAMERA_ID
+            },
+            timeout=1.0
+        )
+        
+        if response.status_code == 200:
+            connection_error_count = 0
+            return True
         else:
-            print("Remote access disabled")
-            stop_remote_streaming()
-    
-    elif command == "trigger_recording":
-        # Trigger recording based on analytics decision
-        start_new_recording()
+            print(f"Frame upload failed: HTTP {response.status_code}")
+            connection_error_count += 1
+            return False
+        
+    except Exception as e:
+        connection_error_count += 1
+        if connection_error_count % 10 == 0:  # Print every 10 errors
+            print(f"Frame upload error ({connection_error_count}): {e}")
+        return False
 
-def verify_diagnosis_signature(payload):
-    """Verify the signature of the diagnosis from analytics"""
-    # Placeholder for signature verification
-    # This ensures the diagnosis hasn't been tampered with
-    return True  # Implement proper verification
-
-def fuse_diagnoses(local_diagnosis, analytics_diagnosis):
-    """Fuse local and analytics diagnoses for better accuracy"""
-    # Placeholder for diagnosis fusion logic
-    return analytics_diagnosis  # For now, trust analytics
-
-def trigger_appropriate_actions(diagnosis):
-    """Trigger appropriate actions based on diagnosis"""
-    # Placeholder for action triggering
-    if diagnosis.get("alert_level") == "high":
-        # Trigger emergency protocols
-        pass
-
-def start_remote_streaming():
-    """Start streaming reduced video/skeletal data for remote access"""
-    # Placeholder for remote streaming implementation
-    print("Starting remote streaming...")
-
-def stop_remote_streaming():
-    """Stop remote streaming"""
-    # Placeholder for stopping remote streaming
-    print("Stopping remote streaming...")
-
-def send_skeletal_data_to_analytics(keypoints, bbox, track_id, timestamp):
-    """Send skeletal data to analytics server via MQTT"""
-    if mqtt_client and OPERATION_MODE == "encrypted_analytics":
-        try:
-            # Encrypt skeletal data before sending
-            encrypted_data = encrypt_skeletal_data({
-                "keypoints": keypoints,
-                "bbox": bbox,
-                "track_id": track_id,
-                "timestamp": timestamp,
-                "device_id": "maixcam_001"  # Unique device identifier
-            })
+def fetch_control_flags():
+    """Fetch control flags from analytics server"""
+    try:
+        response = requests.get(
+            f"{ANALYTICS_HTTP_URL}/camera_state?camera_id={CAMERA_ID}",
+            timeout=2.0
+        )
+        
+        if response.status_code == 200:
+            flags = response.json()
+            # Update control flags (ignore metadata)
+            for key in control_flags.keys():
+                if key in flags:
+                    control_flags[key] = flags[key]
+            return True
+        else:
+            print(f"Failed to fetch flags: HTTP {response.status_code}")
+            return False
             
-            mqtt_client.publish(MQTT_TOPIC_SKELETAL, json.dumps(encrypted_data))
-        except Exception as e:
-            print(f"Error sending skeletal data to analytics: {e}")
+    except Exception as e:
+        print(f"Error fetching control flags: {e}")
+        return False
 
-def encrypt_skeletal_data(data):
-    """Encrypt skeletal data for secure transmission"""
-    # Placeholder for encryption implementation
-    # Use proper encryption like AES or RSA
-    return {
-        "encrypted_data": base64.b64encode(pickle.dumps(data)).decode(),
-        "encryption_method": "placeholder",
-        "timestamp": time.time()
+def report_camera_state():
+    """Report state to analytics server"""
+    state = {
+        "camera_id": CAMERA_ID,
+        "control_flags": control_flags,
+        "safe_areas": safety_checker.safe_polygons,
+        "ip_address": server_ip,
+        "timestamp": time.ticks_ms()
     }
+    
+    try:
+        response = requests.post(
+            f"{ANALYTICS_HTTP_URL}/camera_state",
+            json=state,
+            timeout=2.0
+        )
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"State report failed: HTTP {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"Error reporting state: {e}")
+        return False
 
-# Load safe areas from file or use default
+def send_frame_to_analytics(img):
+    """Send frame to analytics server"""
+    global last_frame_sent_time
+    
+    current_time = time.ticks_ms()
+    time_since_last = current_time - last_frame_sent_time
+
+    if time_since_last >= FRAME_SEND_INTERVAL_MS:
+        success = send_frame_simple(img)
+        last_frame_sent_time = current_time
+        return success
+    
+    return True  # Don't send this frame, rate limited
+
+def send_data_via_http(data_type, data):
+    """Send JSON data to analytics server"""
+    try:
+        url = f"{ANALYTICS_HTTP_URL}/upload_data"
+        payload = {
+            "type": data_type,
+            "camera_id": CAMERA_ID,
+            "timestamp": time.ticks_ms(),
+            "data": data
+        }
+        
+        response = requests.post(
+            url,
+            json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=2.0
+        )
+        
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Data upload failed: HTTP {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"HTTP data upload error: {e}")
+        return False
+
 def load_safe_areas():
     """Load safe areas from JSON file"""
     try:
@@ -253,31 +284,62 @@ def update_safety_checker_polygons(safe_areas=None):
     """Update the safety checker with safe areas"""
     try:
         if safe_areas is None:
-            safe_areas = web_server.get_safe_areas()
+            safe_areas = load_safe_areas()
+        
         safety_checker.clear_safe_polygons()
         for polygon in safe_areas:
             safety_checker.add_safe_polygon(polygon)
         print(f"Updated safety checker with {len(safe_areas)} polygon(s)")
+        
+        # Save to file
+        with open(SAFE_AREA_FILE, 'w') as f:
+            json.dump(safe_areas, f)
+            
+        # Report updated state
+        report_camera_state()
+            
     except Exception as e:
         print(f"Error updating safety checker: {e}")
 
-# Set callback for safe areas updates
-web_server.set_safe_areas_callback(update_safety_checker_polygons)
-
-# Load initial safe areas
-initial_safe_areas = load_safe_areas()
-update_safety_checker_polygons(initial_safe_areas)
+def handle_command(command, value):
+    """Handle command from analytics server"""
+    global control_flags
+    
+    print(f"Processing command: {command} = {value}")
+    
+    if command == "toggle_record":
+        control_flags["record"] = bool(value)
+    elif command == "toggle_raw":
+        control_flags["show_raw"] = bool(value)
+    elif command == "auto_update_bg":
+        control_flags["auto_update_bg"] = bool(value)
+    elif command == "set_background":
+        control_flags["set_background"] = bool(value)
+        if value:
+            print("Background update requested")
+    elif command == "toggle_safe_area_display":
+        control_flags["show_safe_area"] = bool(value)
+    elif command == "toggle_safety_check":
+        control_flags["use_safety_check"] = bool(value)
+    elif command == "update_safe_areas":
+        if isinstance(value, list):
+            update_safety_checker_polygons(value)
+    
+    save_control_flags()
 
 def start_new_recording():
     global frame_id, recording_start_time, is_recording
     
     timestamp = get_timestamp_str()
-    video_path = os.path.join(video_dir, f"{timestamp}.mp4")
+    video_path = os.path.join("/root/recordings", f"{timestamp}.mp4")
     recorder.start(video_path, detector.input_width(), detector.input_height())
     skeleton_saver_2d.start_new_log(timestamp)
     frame_id = 0
     recording_start_time = time.ticks_ms()
     is_recording = True
+    
+    # Notify analytics
+    send_data_via_http("recording_started", {"timestamp": timestamp})
     
     print(f"Started recording: {timestamp}")
     return recording_start_time
@@ -289,6 +351,10 @@ def stop_recording():
         recorder.end()
         skeleton_saver_2d.save_to_csv()
         is_recording = False
+        
+        # Notify analytics
+        send_data_via_http("recording_stopped", {})
+        
         print("Stopped recording")
 
 def to_keypoints_np(obj_points):
@@ -350,6 +416,117 @@ def update_background(bg, current, objs):
 
     return bg
 
+class CommandServer(threading.Thread):
+    """Simple HTTP server to receive commands from analytics"""
+    
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = True
+        self.sock = None
+        
+    def run(self):
+        """Run command server"""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            self.sock.bind(('0.0.0.0', LOCAL_PORT))
+            self.sock.listen(5)
+            self.sock.settimeout(0.5)  # Non-blocking with timeout
+            print(f"Command server listening on port {LOCAL_PORT}")
+            
+            while self.running:
+                try:
+                    readable, _, _ = select.select([self.sock], [], [], 0.5)
+                    if readable:
+                        conn, addr = self.sock.accept()
+                        conn.settimeout(1.0)
+                        
+                        # Handle connection in separate thread
+                        client_thread = threading.Thread(
+                            target=self.handle_client, 
+                            args=(conn, addr),
+                            daemon=True
+                        )
+                        client_thread.start()
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"Command server accept error: {e}")
+                    time.sleep_ms(100)
+                    
+        except Exception as e:
+            print(f"Failed to start command server: {e}")
+        finally:
+            if self.sock:
+                self.sock.close()
+    
+    def handle_client(self, conn, addr):
+        """Handle client connection"""
+        try:
+            # Read request
+            request = b""
+            try:
+                while True:
+                    chunk = conn.recv(1024)
+                    if not chunk:
+                        break
+                    request += chunk
+                    if b"\r\n\r\n" in request:
+                        break
+            except socket.timeout:
+                pass
+            
+            if request:
+                try:
+                    # Parse request
+                    request_str = request.decode('utf-8', errors='ignore')
+                    
+                    # Check if it's a POST command
+                    if "POST /command" in request_str:
+                        # Find body
+                        body_start = request_str.find("\r\n\r\n")
+                        if body_start != -1:
+                            body = request_str[body_start + 4:]
+                            if body:
+                                data = json.loads(body.strip())
+                                with commands_lock:
+                                    received_commands.append(data)
+                                
+                                # Send response
+                                response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+                                response += json.dumps({"status": "success"})
+                                conn.send(response.encode())
+                                print(f"Received command from {addr[0]}: {data.get('command')}")
+                    else:
+                        # Send 404 for other paths
+                        response = "HTTP/1.1 404 Not Found\r\n\r\n"
+                        conn.send(response.encode())
+                        
+                except Exception as e:
+                    print(f"Command parsing error: {e}")
+                    response = "HTTP/1.1 400 Bad Request\r\n\r\nError"
+                    conn.send(response.encode())
+            
+            conn.close()
+            
+        except Exception as e:
+            print(f"Client handling error: {e}")
+            try:
+                conn.close()
+            except:
+                pass
+    
+    def stop(self):
+        """Stop the server"""
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+
 # Tracker and fall detection setup
 fallParam = {
     "v_bbox_y": 0.43,
@@ -364,7 +541,6 @@ online_targets = {
     "points": []
 }
 
-fall_down = False
 fall_ids = set()
 unsafe_ids = set()
 
@@ -387,33 +563,72 @@ def yolo_objs_to_tracker_objs(objs, valid_class_id=[0]):
 # Initialize background
 if os.path.exists(BACKGROUND_PATH):
     background_img = image.load(BACKGROUND_PATH, format=image.Format.FMT_RGB888)
+    print("Loaded background image from file")
 else:
     background_img = cam.read().copy()
     background_img.save(BACKGROUND_PATH)
+    print("Created new background image")
 
-# Setup MQTT
-setup_mqtt()
+# Load initial control flags and safe areas
+load_control_flags()
+initial_safe_areas = load_safe_areas()
+update_safety_checker_polygons(initial_safe_areas)
+
+# Start command server
+command_server = CommandServer()
+command_server.start()
+
+# Test connection to analytics server
+print(f"Analytics server: {ANALYTICS_HTTP_URL}")
+
+if not check_server_connection():
+    print("Warning: Cannot connect to analytics server")
+    print("Will continue with local operation and try to reconnect periodically")
+else:
+    print("Analytics server connection successful")
+    # Initial state report
+    report_camera_state()
+    # Fetch initial flags
+    fetch_control_flags()
+
+print("Starting camera stream...")
 
 # === Main loop ===
+frame_counter = 0
+last_gc_time = time.ticks_ms()
+GC_INTERVAL_MS = 10000
+
 while not app.need_exit():
     raw_img = cam.read()
-    flags = web_server.get_control_flags()
-
-    # Check for safe areas updates
-    if web_server.safe_areas_have_updates():
-        pass
-
+    
+    # Process received commands
+    with commands_lock:
+        while received_commands:
+            cmd_data = received_commands.pop(0)
+            handle_command(cmd_data.get("command"), cmd_data.get("value"))
+    
+    # Periodically fetch control flags from analytics
+    if frame_counter % 30 == 0:  # Every ~30 frames
+        fetch_control_flags()
+    
+    # Check for background update request
+    if control_flags.get("set_background", False):
+        background_img = raw_img.copy()
+        background_img.save(BACKGROUND_PATH)
+        control_flags["set_background"] = False
+        save_control_flags()
+        print("Background updated from analytics request")
+    
     # Run segmentation for background updates and human detection
     objs_seg = segmentor.detect(raw_img, conf_th=0.5, iou_th=0.45)
     current_human_present = any(segmentor.labels[obj.class_id] in ["person", "human"] for obj in objs_seg)
     bg_updated = False
 
     # Background update logic
-    if flags["auto_update_bg"]:
+    if control_flags.get("auto_update_bg", False):
         if prev_human_present and not current_human_present:
             no_human_counter += 1
             if no_human_counter >= NO_HUMAN_CONFIRM_FRAMES:
-                print("Confirmed human absence for 5 frames — updating background.")
                 background_img = raw_img.copy()
                 background_img.save(BACKGROUND_PATH)
                 last_update_ms = time.ticks_ms()
@@ -438,7 +653,7 @@ while not app.need_exit():
         prev_human_present = current_human_present
 
     # Prepare display image
-    if flags["show_raw"]:
+    if control_flags.get("show_raw", False):
         img = raw_img.copy()
     else:
         if background_img is not None:
@@ -457,7 +672,7 @@ while not app.need_exit():
         human_presence_history.pop(0)
     
     # Recording logic
-    if flags["record"]:
+    if control_flags.get("record", False):
         now = time.ticks_ms()
         
         if not is_recording:
@@ -486,7 +701,15 @@ while not app.need_exit():
 
     if is_recording:
         frame_id += 1
-    
+
+    # Variables to store current fall counters and pose data for display
+    current_fall_counter_old = 0
+    current_fall_counter_new = 0
+    current_fall_detected_old = False
+    current_fall_detected_new = False
+    current_torso_angle = None
+    current_thigh_uprightness = None
+
     for track in tracks:
         if track.lost:
             continue
@@ -496,14 +719,28 @@ while not app.need_exit():
                     keypoints_np = to_keypoints_np(obj.points)
                     timestamp = time.ticks_ms()
 
-                    # Send skeletal data to analytics if in encrypted mode
-                    if OPERATION_MODE == "encrypted_analytics":
-                        send_skeletal_data_to_analytics(
-                            obj.points, 
-                            [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
-                            track.id,
-                            timestamp
-                        )
+                    # Get pose estimation data
+                    pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
+
+                    # Send skeletal data to analytics
+                    skeletal_data = {
+                        "keypoints": obj.points,
+                        "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
+                        "track_id": track.id,
+                        "pose_data": pose_data,
+                        "timestamp": timestamp
+                    }
+                    send_data_via_http("skeletal_data", skeletal_data)
+
+                    # Send alerts for fall detection
+                    if track.id in fall_ids:
+                        alert_data = {
+                            "track_id": track.id,
+                            "alert_type": "fall_detected",
+                            "timestamp": timestamp,
+                            "pose_data": pose_data
+                        }
+                        send_data_via_http("pose_alert", alert_data)
 
                     # Assign ID
                     if track.id not in online_targets["id"]:
@@ -520,35 +757,66 @@ while not app.need_exit():
                     online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
                     online_targets["points"][idx].put(obj.points)
 
-                    # Local fall detection
-                    if online_targets["bbox"][idx].qsize() == queue_size:
-                        if get_fall_info(tracker_obj, online_targets, idx, fallParam, queue_size, fps):
+                    # Enhanced fall detection with pose data
+                    skip_fall_judgment = (pose_data is None or 
+                                         (isinstance(pose_data, dict) and pose_data.get('label') == "None"))
+                    
+                    if online_targets["bbox"][idx].qsize() == queue_size and not skip_fall_judgment:
+                        fall_detected_old, counter_old, fall_detected_new, counter_new = get_fall_info(
+                            tracker_obj, online_targets, idx, fallParam, queue_size, fps, pose_data
+                        )
+                        
+                        # Store current counter values for display
+                        current_fall_counter_old = counter_old
+                        current_fall_counter_new = counter_new
+                        current_fall_detected_old = fall_detected_old
+                        current_fall_detected_new = fall_detected_new
+                        
+                        if fall_detected_old or fall_detected_new:
                             fall_ids.add(track.id)
                         elif track.id in fall_ids:
                             fall_ids.remove(track.id)
+                    elif skip_fall_judgment:
+                        # Reset fall counters when skipping fall judgment
+                        current_fall_counter_old = 0
+                        current_fall_counter_new = 0
+                        current_fall_detected_old = False
+                        current_fall_detected_new = False
+                        if track.id in fall_ids:
+                            fall_ids.remove(track.id)
 
                     # Safety area check
-                    status_str = pose_estimator.evaluate_pose(keypoints_np)
                     is_lying_down = False
-                    if status_str:
-                        if status_str is not str:
-                            status_str = str(status_str)
-                        is_lying_down = "lying" in status_str.lower() or "fall" in status_str.lower()
+                    status_str = "unknown"
+                    
+                    if pose_data:
+                        status_str = pose_data.get('label', 'unknown')
+                        is_lying_down = ("lying" in status_str.lower())
+                        current_torso_angle = pose_data.get('torso_angle')
+                        current_thigh_uprightness = pose_data.get('thigh_uprightness')
                             
                     if is_lying_down:
-                        if USE_SAFETY_CHECK and flags.get("use_safety_check", True):
+                        if control_flags.get("use_safety_check", True):
                             normalized_keypoints = normalize_keypoints(obj.points, img.width(), img.height())
                             is_safe = safety_checker.body_in_safe_zone(normalized_keypoints, SAFETY_CHECK_METHOD)
                             
                             if not is_safe:
                                 unsafe_ids.add(track.id)
+                                # Send unsafe alert to analytics
+                                alert_data = {
+                                    "track_id": track.id,
+                                    "alert_type": "unsafe_position",
+                                    "timestamp": timestamp,
+                                    "pose_data": pose_data
+                                }
+                                send_data_via_http("pose_alert", alert_data)
                             elif track.id in unsafe_ids:
                                 unsafe_ids.remove(track.id)
                         else:
                             if track.id in unsafe_ids:
                                 unsafe_ids.remove(track.id)
 
-                    # Draw
+                    # Draw tracking info
                     if track.id in fall_ids:
                         msg = f"[{track.id}] FALL"
                         color = image.COLOR_RED
@@ -568,8 +836,41 @@ while not app.need_exit():
                     
                     break
 
+    # Display fall counters and pose data with smaller font
+    y_position = 30
+    font_scale = 0.4
+
+    # Fall counters display with detection status
+    fall_old_text = f"Fall Old: {current_fall_counter_old}/{FALL_COUNT_THRES}"
+    fall_new_text = f"Fall New: {current_fall_counter_new}/{FALL_COUNT_THRES}"
+    
+    old_color = image.COLOR_RED if current_fall_detected_old else image.COLOR_WHITE
+    new_color = image.COLOR_RED if current_fall_detected_new else image.COLOR_WHITE
+
+    img.draw_string(10, y_position, fall_old_text, color=old_color, scale=font_scale)
+    y_position += 15
+    img.draw_string(10, y_position, fall_new_text, color=new_color, scale=font_scale)
+    y_position += 15
+
+    # Add detection status text
+    if current_fall_detected_old:
+        img.draw_string(150, 30, "DETECTED!", color=image.COLOR_RED, scale=font_scale)
+    if current_fall_detected_new:
+        img.draw_string(150, 45, "DETECTED!", color=image.COLOR_RED, scale=font_scale)
+
+    # Pose data display
+    if current_torso_angle is not None:
+        torso_text = f"Torso: {current_torso_angle:.1f}°"
+        img.draw_string(10, y_position, torso_text, color=image.COLOR_CYAN, scale=font_scale)
+        y_position += 15
+
+    if current_thigh_uprightness is not None:
+        thigh_text = f"Thigh: {current_thigh_uprightness:.1f}°"
+        img.draw_string(10, y_position, thigh_text, color=image.COLOR_CYAN, scale=font_scale)
+        y_position += 15
+
     # Draw safe area polygons
-    if USE_SAFETY_CHECK and flags.get("show_safe_area", False):
+    if control_flags.get("show_safe_area", False):
         for polygon in safety_checker.safe_polygons:
             points = []
             for x_norm, y_norm in polygon:
@@ -586,32 +887,54 @@ while not app.need_exit():
 
     if is_recording:
         recorder.add_frame(img)
-    
+
     # Draw recording status
     if is_recording:
         recording_time = (time.ticks_ms() - recording_start_time) // 1000
         status_text = f"REC {recording_time}s"
-        img.draw_string(10, 10, status_text, color=image.COLOR_RED, scale=0.5)
-    
+        
+        font_scale = 0.5
+        approx_char_width = 10
+        text_width = len(status_text) * approx_char_width
+        right_margin = 15
+        top_margin = 10
+        
+        text_x = img.width() - text_width - right_margin
+        text_y = top_margin
+        
+        text_x = max(5, min(text_x, img.width() - text_width - 5))
+        
+        img.draw_string(int(text_x), int(text_y), status_text, color=image.COLOR_RED, scale=font_scale)
+
     # Draw operation mode
-    mode_text = f"Mode: {OPERATION_MODE}"
-    img.draw_string(10, 20, mode_text, color=image.Color.from_rgb(0, 255, 255), scale=0.5)
+    mode_text = "Mode: Analytics"
+    img.draw_string(10, 15, mode_text, color=image.Color.from_rgb(0, 255, 255), scale=0.5)
     
-    if REMOTE_ACCESS_MODE:
-        access_text = "REMOTE ACCESS"
-        img.draw_string(10, 70, access_text, color=image.COLOR_YELLOW, scale=0.5)
-    
+    # Draw connection status
+    if connection_error_count > 5:
+        conn_text = f"CONN: {connection_error_count} errors"
+        img.draw_string(img.width() - 200, 15, conn_text, color=image.COLOR_YELLOW, scale=0.4)
+
     disp.show(img)
     
-    web_server.send_frame(img)
-
-    if flags["set_background"]:
-        web_server.confirm_background(BACKGROUND_PATH)
-        web_server.reset_set_background_flag()
+    # Send frame to analytics server
+    send_frame_to_analytics(img)
+    
+    # Periodically report state
+    current_time = time.ticks_ms()
+    if current_time - last_state_report > STATE_REPORT_INTERVAL_MS:
+        report_camera_state()
+        last_state_report = current_time
+    
+    # Periodic garbage collection
+    if current_time - last_gc_time > GC_INTERVAL_MS:
+        gc.collect()
+        last_gc_time = current_time
+    
+    frame_counter += 1
 
 # Final cleanup
+command_server.stop()
 if is_recording:
     stop_recording()
-if mqtt_client:
-    mqtt_client.loop_stop()
-    mqtt_client.disconnect()
+print("Camera stream stopped")
