@@ -138,19 +138,35 @@ class WiFiConnector:
 # Global frame storage
 camera_frames = {}
 frame_lock = threading.Lock()
-placeholder_frame = None
+placeholder_frames = {}  # Store placeholder per camera
 
-def create_placeholder_frame():
-    """Create a placeholder frame for when no camera is connected"""
-    global placeholder_frame
-    img = np.ones((240, 320, 3), dtype=np.uint8) * 50
-    cv2.putText(img, "No Camera Connected", (40, 120), 
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-    cv2.putText(img, "Waiting for MaixCAM...", (30, 150), 
-               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-    _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
-    placeholder_frame = jpeg.tobytes()
-    return placeholder_frame
+def create_placeholder_frame(camera_id="default"):
+    """Create a placeholder frame for when camera is not connected"""
+    global placeholder_frames
+    
+    if camera_id not in placeholder_frames:
+        img = np.ones((240, 320, 3), dtype=np.uint8) * 50
+        cv2.putText(img, f"Camera {camera_id}", (50, 100), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        cv2.putText(img, "Not Connected", (60, 130), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.putText(img, "Waiting for connection...", (30, 160), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        placeholder_frames[camera_id] = jpeg.tobytes()
+    
+    return placeholder_frames[camera_id]
+
+def get_camera_status(camera_id):
+    """Check if camera is currently connected"""
+    with frame_lock:
+        frame_info = camera_frames.get(camera_id, {})
+        if frame_info:
+            last_seen = frame_info.get('timestamp', 0)
+            # Camera is considered connected if seen in last 30 seconds
+            if time.time() - last_seen < 30:
+                return "connected"
+    return "disconnected"
 
 class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
     """HTTP request handler for analytics server"""
@@ -190,6 +206,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 self.get_camera_list()
             elif path == '/camera_state':
                 self.get_camera_state(camera_id)
+            elif path == '/camera_status':
+                self.get_camera_status(camera_id)
             elif path == '/stats':
                 self.get_stats()
             elif path == '/server_info':
@@ -275,12 +293,14 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             with frame_lock:
                 frame_info = camera_frames.get(camera_id, {})
                 frame_data = frame_info.get('frame')
+                last_seen = frame_info.get('timestamp', 0)
             
-            if frame_data is None:
-                # Use placeholder
-                if placeholder_frame is None:
-                    create_placeholder_frame()
-                frame_data = placeholder_frame
+            # Check if camera is connected (seen in last 30 seconds)
+            camera_connected = time.time() - last_seen < 30
+            
+            if frame_data is None or not camera_connected:
+                # Use placeholder with connection status
+                frame_data = create_placeholder_frame(camera_id)
             
             self.send_response(200)
             self.send_header('Content-Type', 'image/jpeg')
@@ -314,7 +334,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                     'frame': body,
                     'timestamp': time.time(),
                     'size': len(body),
-                    'source_addr': self.client_address[0]
+                    'source_addr': self.client_address[0],
+                    'last_upload': time.time()
                 }
             
             logger.debug(f"Received frame from {camera_id} ({len(body)} bytes)")
@@ -323,7 +344,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             response = {
                 "status": "success", 
                 "message": f"Frame received ({len(body)} bytes)",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "camera_id": camera_id
             }
             
             self.send_json_response(200, response)
@@ -358,7 +380,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                         "use_safety_check": True
                     },
                     "safe_areas": [],
-                    "last_command": time.time()
+                    "last_command": time.time(),
+                    "connected": False
                 }
             
             # Update control flag
@@ -414,7 +437,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "safe_areas": state.get("safe_areas", []),
                 "ip_address": state.get("ip_address"),
                 "last_seen": time.time(),
-                "last_report": time.time()
+                "last_report": time.time(),
+                "connected": True
             })
             
             logger.debug(f"Updated state for camera {camera_id}")
@@ -434,18 +458,40 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             with frame_lock:
                 for cam_id, frame_info in camera_frames.items():
                     last_seen = frame_info.get('timestamp', 0)
-                    # Camera is active if seen in last 2 minutes
-                    if current_time - last_seen < 120:
-                        active_cameras.append({
-                            "camera_id": cam_id,
-                            "last_seen": last_seen,
-                            "ip_address": frame_info.get('source_addr', 'unknown'),
-                            "online": True
-                        })
+                    # Camera is active if seen in last 30 seconds
+                    if current_time - last_seen < 30:
+                        status = "connected"
+                        online = True
+                    else:
+                        status = "disconnected"
+                        online = False
+                    
+                    active_cameras.append({
+                        "camera_id": cam_id,
+                        "last_seen": last_seen,
+                        "ip_address": frame_info.get('source_addr', 'unknown'),
+                        "online": online,
+                        "status": status,
+                        "age_seconds": current_time - last_seen
+                    })
+            
+            # Also include cameras in states but not in frames
+            for cam_id, state in self.analytics.camera_states.items():
+                if cam_id not in [c["camera_id"] for c in active_cameras]:
+                    last_seen = state.get("last_seen", 0)
+                    active_cameras.append({
+                        "camera_id": cam_id,
+                        "last_seen": last_seen,
+                        "ip_address": state.get("ip_address", "unknown"),
+                        "online": False,
+                        "status": "disconnected",
+                        "age_seconds": current_time - last_seen
+                    })
             
             response = {
                 "cameras": active_cameras,
                 "count": len(active_cameras),
+                "connected_count": len([c for c in active_cameras if c["online"]]),
                 "timestamp": current_time
             }
             
@@ -461,14 +507,43 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             state = self.analytics.camera_states.get(camera_id, {})
             flags = state.get("control_flags", {})
             
-            # Add metadata
+            # Add metadata and connection status
+            with frame_lock:
+                frame_info = camera_frames.get(camera_id, {})
+                last_seen = frame_info.get('timestamp', 0)
+                connected = time.time() - last_seen < 30
+            
             flags["_timestamp"] = time.time()
             flags["_camera_id"] = camera_id
+            flags["_connected"] = connected
+            flags["_last_seen"] = last_seen
             
             self.send_json_response(200, flags)
             
         except Exception as e:
             logger.error(f"Camera state error for {camera_id}: {e}")
+            self.send_error(500, "Internal Server Error")
+    
+    def get_camera_status(self, camera_id):
+        """Return camera connection status"""
+        try:
+            with frame_lock:
+                frame_info = camera_frames.get(camera_id, {})
+                last_seen = frame_info.get('timestamp', 0)
+            
+            connected = time.time() - last_seen < 30
+            
+            response = {
+                "camera_id": camera_id,
+                "connected": connected,
+                "last_seen": last_seen,
+                "status": "connected" if connected else "disconnected"
+            }
+            
+            self.send_json_response(200, response)
+            
+        except Exception as e:
+            logger.error(f"Camera status error for {camera_id}: {e}")
             self.send_error(500, "Internal Server Error")
     
     def get_safe_areas(self, camera_id):
@@ -536,12 +611,13 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
         try:
             with frame_lock:
                 frame_count = len(camera_frames)
+                connected_cameras = sum(1 for cam_id in camera_frames 
+                                      if time.time() - camera_frames[cam_id].get('timestamp', 0) < 30)
             
             stats = {
-                "cameras": frame_count,
+                "total_cameras": len(self.analytics.camera_states),
+                "connected_cameras": connected_cameras,
                 "diagnoses": len(self.analytics.diagnosis_history),
-                "active_cameras": len([c for c in self.analytics.camera_states.values() 
-                                      if time.time() - c.get("last_seen", 0) < 120]),
                 "wifi_connected": self.analytics.wifi_connector.connected,
                 "wifi_ssid": self.analytics.wifi_connector.ssid,
                 "timestamp": time.time()
@@ -563,7 +639,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "wifi_ssid": self.analytics.wifi_connector.ssid,
                 "wifi_connected": self.analytics.wifi_connector.connected,
                 "port": self.analytics.http_port,
-                "uptime": getattr(self.analytics, 'start_time', time.time())
+                "uptime": getattr(self.analytics, 'start_time', time.time()),
+                "cameras_registered": len(self.analytics.camera_states)
             }
             
             self.send_json_response(200, info)
@@ -583,7 +660,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                             'size': info.get('size', 0),
                             'timestamp': info.get('timestamp', 0),
                             'age_seconds': time.time() - info.get('timestamp', 0) if info.get('timestamp') else None,
-                            'source': info.get('source_addr', 'unknown')
+                            'source': info.get('source_addr', 'unknown'),
+                            'connected': time.time() - info.get('timestamp', 0) < 30 if info.get('timestamp') else False
                         }
                         for cam_id, info in camera_frames.items()
                     },
@@ -591,7 +669,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                         cam_id: {
                             'last_seen': state.get('last_seen', 0),
                             'age_seconds': time.time() - state.get('last_seen', 0),
-                            'has_flags': bool(state.get('control_flags'))
+                            'has_flags': bool(state.get('control_flags')),
+                            'connected': state.get('connected', False)
                         }
                         for cam_id, state in self.analytics.camera_states.items()
                     }
@@ -632,8 +711,8 @@ class PatientAnalytics:
         self.http_port = port
         self.http_server = None
         
-        # Create placeholder frame
-        create_placeholder_frame()
+        # Create default placeholder frame
+        create_placeholder_frame("default")
         
         # Start time
         self.start_time = time.time()
@@ -684,6 +763,11 @@ class PatientAnalytics:
             with frame_lock:
                 frame_info = camera_frames.get(camera_id, {})
                 camera_ip = frame_info.get('source_addr')
+            
+            if not camera_ip:
+                # Try to get IP from camera state
+                state = self.camera_states.get(camera_id, {})
+                camera_ip = state.get('ip_address')
             
             if not camera_ip:
                 logger.debug(f"No IP known for camera {camera_id}")

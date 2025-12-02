@@ -1,4 +1,4 @@
-// script.js - Analytics Dashboard with auto-refreshing stream
+// script.js - Multi-Camera Analytics Dashboard
 
 // DOM Elements
 const streamImg = document.getElementById('stream');
@@ -9,7 +9,6 @@ const showSafeArea = document.getElementById('showSafeArea');
 const useSafetyCheck = document.getElementById('useSafetyCheck');
 const setBackgroundBtn = document.getElementById('setBackgroundBtn');
 const editSafeAreaBtn = document.getElementById('editSafeAreaBtn');
-const refreshCamerasBtn = document.getElementById('refreshCamerasBtn');
 
 // Popup elements
 const popup = document.getElementById('popup');
@@ -50,32 +49,215 @@ let isConnected = false;
 let lastUpdateTime = null;
 let cameraStateTimer = null;
 let cameraListTimer = null;
+let cameraStatusTimer = null;
+
+// Multi-camera state
+let availableCameras = [];
+let cameraConnectionStatus = {};
+
+// Status elements (will be created dynamically)
+let statusIndicator = null;
+let cameraSelect = null;
+let cameraInfoSpan = null;
+let refreshCamerasBtn = null;
+
+// ============================================
+// UI SETUP - CREATE DYNAMIC ELEMENTS
+// ============================================
+
+function setupDynamicUI() {
+    // Create camera selection container
+    const cameraContainer = document.createElement('div');
+    cameraContainer.id = 'cameraControls';
+    cameraContainer.style.cssText = `
+        margin: 15px 0;
+        padding: 10px;
+        background: #f5f5f5;
+        border-radius: 5px;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px;
+    `;
+    
+    // Create camera select
+    const cameraLabel = document.createElement('label');
+    cameraLabel.textContent = '📷 Camera: ';
+    cameraLabel.style.cssText = 'font-weight: bold; margin-right: 5px;';
+    
+    cameraSelect = document.createElement('select');
+    cameraSelect.id = 'cameraSelect';
+    cameraSelect.style.cssText = 'padding: 5px 10px; border-radius: 4px; border: 1px solid #ccc;';
+    cameraSelect.innerHTML = '<option value="maixcam_001">Camera 1</option>';
+    
+    refreshCamerasBtn = document.createElement('button');
+    refreshCamerasBtn.textContent = '🔄 Refresh List';
+    refreshCamerasBtn.style.cssText = 'padding: 5px 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;';
+    refreshCamerasBtn.onclick = loadCameraList;
+    
+    cameraInfoSpan = document.createElement('span');
+    cameraInfoSpan.id = 'camera-info';
+    cameraInfoSpan.style.cssText = 'font-size: 13px; color: #666; margin-left: 10px;';
+    cameraInfoSpan.textContent = 'Loading...';
+    
+    cameraContainer.appendChild(cameraLabel);
+    cameraContainer.appendChild(cameraSelect);
+    cameraContainer.appendChild(refreshCamerasBtn);
+    cameraContainer.appendChild(cameraInfoSpan);
+    
+    // Create status indicator
+    statusIndicator = document.createElement('div');
+    statusIndicator.id = 'stream-status';
+    statusIndicator.style.cssText = `
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        z-index: 1000;
+        background: #777;
+        color: white;
+        font-weight: bold;
+        min-width: 160px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    `;
+    statusIndicator.textContent = `Camera: ${currentCameraId}`;
+    
+    // Create status panel
+    const statusPanel = document.createElement('div');
+    statusPanel.id = 'statusPanel';
+    statusPanel.style.cssText = `
+        margin: 15px 0;
+        padding: 12px;
+        background: #e9ecef;
+        border-radius: 5px;
+        border: 1px solid #dee2e6;
+        font-size: 13px;
+    `;
+    
+    const statusGrid = document.createElement('div');
+    statusGrid.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;';
+    
+    const statusItems = [
+        { id: 'serverStatus', label: 'Server Status', value: 'Connecting...' },
+        { id: 'cameraStatus', label: 'Camera Status', value: 'Unknown' },
+        { id: 'connectedCamera', label: 'Active Camera', value: currentCameraId },
+        { id: 'lastUpdate', label: 'Last Frame', value: 'Never' }
+    ];
+    
+    statusItems.forEach(item => {
+        const statusItem = document.createElement('div');
+        const label = document.createElement('strong');
+        label.textContent = `${item.label}: `;
+        label.style.marginRight = '5px';
+        
+        const value = document.createElement('span');
+        value.id = item.id;
+        value.textContent = item.value;
+        
+        statusItem.appendChild(label);
+        statusItem.appendChild(value);
+        statusGrid.appendChild(statusItem);
+    });
+    
+    statusPanel.appendChild(statusGrid);
+    
+    // Insert elements into DOM
+    const h1 = document.querySelector('h1');
+    if (h1 && h1.nextSibling) {
+        h1.parentNode.insertBefore(cameraContainer, h1.nextSibling);
+        cameraContainer.parentNode.insertBefore(statusPanel, cameraContainer.nextSibling);
+    } else {
+        document.body.insertBefore(cameraContainer, document.body.firstChild);
+        document.body.insertBefore(statusPanel, cameraContainer.nextSibling);
+    }
+    
+    document.body.appendChild(statusIndicator);
+    
+    // Set up camera select event
+    cameraSelect.onchange = () => {
+        currentCameraId = cameraSelect.value;
+        console.log(`Switched to camera: ${currentCameraId}`);
+        
+        // Check connection status for this camera
+        const cameraInfo = availableCameras.find(cam => cam.camera_id === currentCameraId);
+        updateConnectionStatus(currentCameraId, cameraInfo?.online || false);
+        
+        // Update active camera display
+        const connectedCameraElement = document.getElementById('connectedCamera');
+        if (connectedCameraElement) {
+            connectedCameraElement.textContent = currentCameraId;
+        }
+        
+        // Restart stream with new camera
+        startStream();
+        
+        // Load new camera's state
+        fetchCameraState(currentCameraId);
+        
+        // Update safe areas for new camera
+        loadSafeAreasForCamera(currentCameraId);
+    };
+}
 
 // ============================================
 // STREAM FUNCTIONS - SIMPLE AUTO-REFRESH
 // ============================================
 
-function createStatusIndicator() {
-    const status = document.createElement('div');
-    status.id = 'stream-status';
-    status.style.cssText = `
-        position: fixed;
-        top: 10px;
-        right: 10px;
-        padding: 5px 10px;
-        border-radius: 3px;
-        font-size: 12px;
-        z-index: 1000;
-        background: #4CAF50;
-        color: white;
-        font-weight: bold;
-    `;
-    status.textContent = `Stream: ${currentCameraId}`;
-    document.body.appendChild(status);
-    return status;
+function updateConnectionStatus(cameraId, connected, ageSeconds = null) {
+    cameraConnectionStatus[cameraId] = {
+        connected: connected,
+        lastUpdate: new Date(),
+        ageSeconds: ageSeconds
+    };
+    
+    // Update current camera status if it's this camera
+    if (cameraId === currentCameraId) {
+        const statusColor = connected ? '#4CAF50' : '#ff4444';
+        const statusText = connected ? 'Connected' : 'Disconnected';
+        
+        statusIndicator.textContent = `${cameraId}: ${statusText}`;
+        statusIndicator.style.background = statusColor;
+        
+        // Also update camera status in status panel
+        const cameraStatusElement = document.getElementById('cameraStatus');
+        if (cameraStatusElement) {
+            cameraStatusElement.textContent = statusText;
+            cameraStatusElement.style.color = statusColor;
+        }
+        
+        // Update isConnected flag
+        isConnected = connected;
+        
+        // Update UI controls based on connection
+        updateUIControls({}); // Will disable/enable based on isConnected
+    }
 }
 
-const statusIndicator = createStatusIndicator();
+async function checkCameraConnection(cameraId) {
+    try {
+        const response = await fetch(`${ANALYTICS_HTTP_URL}/camera_status?camera_id=${cameraId}`, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            updateConnectionStatus(cameraId, data.connected, data.age_seconds);
+            return data.connected;
+        }
+        updateConnectionStatus(cameraId, false);
+        return false;
+    } catch (error) {
+        console.error(`Error checking connection for ${cameraId}:`, error);
+        updateConnectionStatus(cameraId, false);
+        return false;
+    }
+}
 
 function startStream() {
     stopStream(); // Clear any existing refresh
@@ -83,13 +265,14 @@ function startStream() {
     if (streamImg) {
         console.log(`Starting auto-refresh stream for ${currentCameraId} at ${REFRESH_INTERVAL_MS}ms interval`);
         
+        // Check connection status first
+        checkCameraConnection(currentCameraId);
+        
         // Initial load
         refreshStreamImage();
         
         // Set up auto-refresh
         streamRefreshInterval = setInterval(refreshStreamImage, REFRESH_INTERVAL_MS);
-        
-        updateStatus(`Active (${currentCameraId})`, 'green');
     }
 }
 
@@ -120,15 +303,20 @@ function refreshStreamImage() {
     // Update status on successful load
     streamImg.onload = function() {
         errorCount = 0;
-        isConnected = true;
-        updateStatus(`Active (${currentCameraId})`, 'green');
+        updateLastUpdateDisplay();
+        
+        // Check if this is a placeholder (camera disconnected)
+        // We can't directly detect placeholder, but we check connection status
+        checkCameraConnection(currentCameraId);
     };
     
     // Handle errors
     streamImg.onerror = function() {
         errorCount++;
         console.error(`Stream error ${errorCount}/${MAX_ERRORS} for ${currentCameraId}`);
-        updateStatus(`Error ${errorCount}/${MAX_ERRORS} (${currentCameraId})`, 'red');
+        
+        // Mark as disconnected
+        updateConnectionStatus(currentCameraId, false);
         
         if (errorCount >= MAX_ERRORS) {
             console.error('Too many stream errors, trying to recover...');
@@ -137,19 +325,6 @@ function refreshStreamImage() {
             loadCameraList();
         }
     };
-}
-
-function updateStatus(text, color) {
-    const colors = {
-        'green': '#4CAF50',
-        'yellow': '#ff9800',
-        'red': '#ff4444',
-        'gray': '#777'
-    };
-    if (statusIndicator) {
-        statusIndicator.textContent = `Stream: ${text}`;
-        statusIndicator.style.background = colors[color] || colors.gray;
-    }
 }
 
 function updateLastUpdateDisplay() {
@@ -169,13 +344,12 @@ function updateLastUpdateDisplay() {
 }
 
 // ============================================
-// CAMERA MANAGEMENT
+// CAMERA MANAGEMENT - MULTI-CAMERA SUPPORT
 // ============================================
 
 async function loadCameraList() {
     try {
-        const infoSpan = document.getElementById('camera-info');
-        if (infoSpan) infoSpan.textContent = 'Loading cameras...';
+        if (cameraInfoSpan) cameraInfoSpan.textContent = 'Loading cameras...';
         
         const response = await fetch(`${ANALYTICS_HTTP_URL}/camera_list`, {
             method: 'GET',
@@ -186,76 +360,99 @@ async function loadCameraList() {
         
         if (response.ok) {
             const data = await response.json();
-            updateCameraSelect(data.cameras);
+            availableCameras = data.cameras || [];
+            updateCameraSelect(availableCameras);
             
-            if (infoSpan) {
-                infoSpan.textContent = `${data.count} camera(s) online`;
-                infoSpan.style.color = data.count > 0 ? '#4CAF50' : '#ff4444';
+            if (cameraInfoSpan) {
+                const connectedCount = data.connected_count || 0;
+                cameraInfoSpan.textContent = `${connectedCount}/${data.count} camera(s) connected`;
+                cameraInfoSpan.style.color = connectedCount > 0 ? '#4CAF50' : '#ff4444';
             }
             
-            // Update camera status
-            const cameraStatus = document.getElementById('cameraStatus');
-            if (cameraStatus) {
-                cameraStatus.textContent = data.count > 0 ? 'Connected' : 'No cameras';
-                cameraStatus.style.color = data.count > 0 ? '#4CAF50' : '#ff4444';
+            // Update server status
+            const serverStatusElement = document.getElementById('serverStatus');
+            if (serverStatusElement) {
+                serverStatusElement.textContent = `Connected to ${ANALYTICS_HTTP_URL}`;
+                serverStatusElement.style.color = '#4CAF50';
             }
+            
+            // Update connection status for all cameras
+            availableCameras.forEach(camera => {
+                updateConnectionStatus(camera.camera_id, camera.online, camera.age_seconds);
+            });
             
         } else {
             throw new Error(`HTTP ${response.status}`);
         }
     } catch (error) {
         console.error('Failed to load camera list:', error);
-        const infoSpan = document.getElementById('camera-info');
-        if (infoSpan) {
-            infoSpan.textContent = 'Connection error';
-            infoSpan.style.color = '#ff4444';
+        if (cameraInfoSpan) {
+            cameraInfoSpan.textContent = 'Connection error';
+            cameraInfoSpan.style.color = '#ff4444';
         }
         
-        const cameraStatus = document.getElementById('cameraStatus');
-        if (cameraStatus) {
-            cameraStatus.textContent = 'Disconnected';
-            cameraStatus.style.color = '#ff4444';
+        const serverStatusElement = document.getElementById('serverStatus');
+        if (serverStatusElement) {
+            serverStatusElement.textContent = 'Connection error';
+            serverStatusElement.style.color = '#ff4444';
         }
     }
 }
 
 function updateCameraSelect(cameras) {
-    const select = document.getElementById('cameraSelect');
-    if (!select) return;
+    if (!cameraSelect) return;
     
-    const currentValue = select.value;
+    const currentValue = cameraSelect.value;
     
     // Clear and add placeholder
-    select.innerHTML = '<option value="" disabled>Select a camera</option>';
+    cameraSelect.innerHTML = '<option value="" disabled>Select a camera</option>';
     
     if (!cameras || cameras.length === 0) {
         const option = document.createElement('option');
         option.value = "maixcam_001";
         option.textContent = "Camera 1 (offline)";
-        select.appendChild(option);
-        select.value = "maixcam_001";
+        cameraSelect.appendChild(option);
+        cameraSelect.value = "maixcam_001";
         return;
     }
     
-    // Add active cameras
-    cameras.forEach(cam => {
+    // Add cameras with connection status
+    cameras.forEach(camera => {
         const option = document.createElement('option');
-        option.value = cam.camera_id;
+        option.value = camera.camera_id;
         
-        const timeAgo = Math.round((Date.now()/1000 - cam.last_seen));
-        const status = cam.online ? '✓' : '✗';
-        option.textContent = `${cam.camera_id} ${status} (${timeAgo}s ago)`;
+        const timeAgo = Math.round(camera.age_seconds || 0);
+        const status = camera.online ? '✓' : '✗';
+        const statusText = camera.online ? 'Connected' : 'Disconnected';
+        option.textContent = `${camera.camera_id} ${status} (${statusText}, ${timeAgo}s ago)`;
         
-        select.appendChild(option);
+        // Color code based on connection status
+        option.style.color = camera.online ? '#4CAF50' : '#ff4444';
+        
+        cameraSelect.appendChild(option);
     });
     
     // Keep current selection if possible
     if (currentValue && cameras.some(cam => cam.camera_id === currentValue)) {
-        select.value = currentValue;
+        cameraSelect.value = currentValue;
+        currentCameraId = currentValue;
     } else if (cameras.length > 0) {
-        select.value = cameras[0].camera_id;
-        currentCameraId = cameras[0].camera_id;
-        updateStatus(`Active (${currentCameraId})`, 'green');
+        // Try to find a connected camera first
+        const connectedCamera = cameras.find(cam => cam.online);
+        if (connectedCamera) {
+            cameraSelect.value = connectedCamera.camera_id;
+            currentCameraId = connectedCamera.camera_id;
+        } else {
+            cameraSelect.value = cameras[0].camera_id;
+            currentCameraId = cameras[0].camera_id;
+        }
+        updateConnectionStatus(currentCameraId, cameras.find(cam => cam.camera_id === currentCameraId)?.online || false);
+    }
+    
+    // Update active camera display
+    const connectedCameraElement = document.getElementById('connectedCamera');
+    if (connectedCameraElement) {
+        connectedCameraElement.textContent = currentCameraId;
     }
 }
 
@@ -275,6 +472,12 @@ async function fetchCameraState(cameraId) {
         if (response.ok) {
             const flags = await response.json();
             updateUIControls(flags);
+            
+            // Update connection status from flags
+            if (flags._connected !== undefined) {
+                updateConnectionStatus(cameraId, flags._connected);
+            }
+            
             return flags;
         }
     } catch (error) {
@@ -289,22 +492,56 @@ function updateUIControls(flags) {
     // Update checkboxes only for actual control flags
     if (typeof flags.record === 'boolean') {
         toggleRecord.checked = flags.record;
+        toggleRecord.disabled = !isConnected;
     }
     if (typeof flags.show_raw === 'boolean') {
         toggleRaw.checked = flags.show_raw;
+        toggleRaw.disabled = !isConnected;
     }
     if (typeof flags.auto_update_bg === 'boolean') {
         autoUpdateBg.checked = flags.auto_update_bg;
+        autoUpdateBg.disabled = !isConnected;
     }
     if (typeof flags.show_safe_area === 'boolean') {
         showSafeArea.checked = flags.show_safe_area;
+        showSafeArea.disabled = !isConnected;
     }
     if (typeof flags.use_safety_check === 'boolean') {
         useSafetyCheck.checked = flags.use_safety_check;
+        useSafetyCheck.disabled = !isConnected;
     }
+    
+    // Disable/enable buttons based on connection
+    setBackgroundBtn.disabled = !isConnected;
+    editSafeAreaBtn.disabled = !isConnected;
+    
+    // Style disabled controls
+    const styleDisabled = (element, disabled) => {
+        if (disabled) {
+            element.style.opacity = '0.6';
+            element.style.cursor = 'not-allowed';
+        } else {
+            element.style.opacity = '1';
+            element.style.cursor = 'pointer';
+        }
+    };
+    
+    styleDisabled(toggleRecord, !isConnected);
+    styleDisabled(toggleRaw, !isConnected);
+    styleDisabled(autoUpdateBg, !isConnected);
+    styleDisabled(showSafeArea, !isConnected);
+    styleDisabled(useSafetyCheck, !isConnected);
+    styleDisabled(setBackgroundBtn, !isConnected);
+    styleDisabled(editSafeAreaBtn, !isConnected);
 }
 
 function sendCommand(command, value = null) {
+    if (!isConnected) {
+        console.warn(`Cannot send command to disconnected camera: ${currentCameraId}`);
+        alert('Camera is disconnected. Please connect a camera first.');
+        return;
+    }
+    
     console.log(`Sending command to ${currentCameraId}: ${command}=${value}`);
     
     fetch(`${ANALYTICS_HTTP_URL}/command`, {
@@ -325,14 +562,12 @@ function sendCommand(command, value = null) {
             setTimeout(() => fetchCameraState(currentCameraId), 300);
         } else {
             console.error(`Command failed: HTTP ${response.status}`);
-            updateStatus(`Command failed (${currentCameraId})`, 'yellow');
-            setTimeout(() => updateStatus(`Active (${currentCameraId})`, 'green'), 2000);
+            updateConnectionStatus(currentCameraId, false);
         }
     })
     .catch(error => {
         console.error('Command error:', error);
-        updateStatus(`Network error (${currentCameraId})`, 'red');
-        setTimeout(() => updateStatus(`Active (${currentCameraId})`, 'green'), 2000);
+        updateConnectionStatus(currentCameraId, false);
     });
 }
 
@@ -386,27 +621,6 @@ if (editSafeAreaBtn) {
     };
 }
 
-if (refreshCamerasBtn) {
-    refreshCamerasBtn.onclick = loadCameraList;
-}
-
-const cameraSelect = document.getElementById('cameraSelect');
-if (cameraSelect) {
-    cameraSelect.onchange = () => {
-        currentCameraId = cameraSelect.value;
-        console.log(`Switched to camera: ${currentCameraId}`);
-        
-        // Restart stream with new camera
-        startStream();
-        
-        // Load new camera's state
-        fetchCameraState(currentCameraId);
-        
-        // Update safe areas for new camera
-        loadSafeAreasForCamera(currentCameraId);
-    };
-}
-
 // ============================================
 // SAFE AREA EDITOR
 // ============================================
@@ -430,6 +644,11 @@ async function loadSafeAreasForCamera(cameraId) {
 }
 
 async function showSafeAreaEditor() {
+    if (!isConnected) {
+        alert('Camera is disconnected. Cannot edit safe areas.');
+        return;
+    }
+    
     try {
         // Load current safe areas
         await loadSafeAreasForCamera(currentCameraId);
@@ -715,12 +934,8 @@ document.addEventListener('DOMContentLoaded', function() {
     ANALYTICS_HTTP_URL = window.location.origin;
     console.log(`Connected to analytics server: ${ANALYTICS_HTTP_URL}`);
     
-    // Update server status
-    const serverStatusElement = document.getElementById('serverStatus');
-    if (serverStatusElement) {
-        serverStatusElement.textContent = `Connected to ${ANALYTICS_HTTP_URL}`;
-        serverStatusElement.style.color = '#4CAF50';
-    }
+    // Set up dynamic UI elements
+    setupDynamicUI();
     
     // Initialize stream
     startStream();
@@ -733,6 +948,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Set up periodic updates
     cameraListTimer = setInterval(loadCameraList, 30000); // Update camera list every 30 seconds
     cameraStateTimer = setInterval(() => fetchCameraState(currentCameraId), 10000); // Update state every 10 seconds
+    cameraStatusTimer = setInterval(() => checkCameraConnection(currentCameraId), 5000); // Check connection every 5 seconds
     
     // Update time display every second
     setInterval(updateLastUpdateDisplay, 1000);
