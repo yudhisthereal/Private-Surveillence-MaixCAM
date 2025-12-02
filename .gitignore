@@ -1,3 +1,4 @@
 model/yolo11n_pose.mud
 model/yolo11n-pose_320x224_int8.cvimodel
-LaTeX/*
+LaTeX/
+playground/
