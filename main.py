@@ -1,3 +1,5 @@
+# main.py
+
 from maix import camera, display, app, nn, image, time, tracker
 from pose.pose_estimation import PoseEstimation
 from tools.wifi_connect import connect_wifi
@@ -20,9 +22,10 @@ import select
 BACKGROUND_PATH = "/root/static/background.jpg"
 SAFE_AREA_FILE = "/root/safe_areas.json"
 STATE_FILE = "/root/camera_state.json"
+LOCAL_FLAGS_FILE = "/root/control_flags.json"
 
 # Analytics Server Setup
-ANALYTICS_SERVER_IP = "10.128.10.130"  # Your analytics server IP
+ANALYTICS_SERVER_IP = "10.128.10.130"
 CAMERA_ID = "maixcam_001"
 ANALYTICS_HTTP_URL = f"http://{ANALYTICS_SERVER_IP}:8000"
 
@@ -45,7 +48,7 @@ segmentor = nn.YOLO11(model="/root/models/yolo11n_seg.mud", dual_buff=True)
 cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format(), fps=60)
 disp = display.Display()
 
-pose_estimator = PoseEstimation()
+pose_estimator = PoseEstimation()  # Only used in local mode
 
 image.load_font("sourcehansans", "/maixapp/share/font/SourceHanSansCN-Regular.otf", size=32)
 image.set_default_font("sourcehansans")
@@ -81,18 +84,20 @@ safety_checker = BodySafetyChecker()
 SAFETY_CHECK_METHOD = CheckMethod.TORSO_HEAD
 USE_SAFETY_CHECK = True
 
-# Camera control flags (fetched from analytics)
+# Camera control flags
 control_flags = {
     "record": False,
     "show_raw": False,
     "set_background": False,
     "auto_update_bg": False,
     "show_safe_area": False,
-    "use_safety_check": True
+    "use_safety_check": True,
+    "analytics_mode": True,
+    "fall_algorithm": 3
 }
 
 # Frame sending
-FRAME_SEND_INTERVAL_MS = 200  # 5 FPS
+FRAME_SEND_INTERVAL_MS = 200
 last_frame_sent_time = time.ticks_ms()
 
 # State reporting
@@ -103,41 +108,122 @@ last_state_report = time.ticks_ms()
 connection_error_count = 0
 MAX_CONNECTION_ERRORS = 10
 
+# Analytics server connection status
+analytics_server_available = False
+CONNECTION_RETRY_INTERVAL_MS = 10000
+last_connection_check = 0
+
 # Command server for receiving commands from analytics
 command_server_running = True
 received_commands = []
 commands_lock = threading.Lock()
 
+# Track when flags were last changed locally to prevent sync overwriting
+flag_last_changed = {}  # key -> timestamp in ms
+FLAG_SYNC_PROTECTION_MS = 5000  # Don't sync flags changed within last 5 seconds
+
 def save_control_flags():
-    """Save control flags to file"""
+    """Save control flags to local storage"""
     try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump({
-                "control_flags": control_flags,
-                "timestamp": time.ticks_ms()
-            }, f)
+        flags_data = {
+            "control_flags": control_flags,
+            "timestamp": time.ticks_ms(),
+            "camera_id": CAMERA_ID,
+            "saved_locally": True
+        }
+        
+        with open(LOCAL_FLAGS_FILE, 'w') as f:
+            json.dump(flags_data, f, indent=2)
+        print(f"Control flags saved locally to {LOCAL_FLAGS_FILE}")
+        
     except Exception as e:
         print(f"Error saving control flags: {e}")
 
 def load_control_flags():
-    """Load control flags from file"""
+    """Load control flags from local storage or analytics server"""
+    local_flags_loaded = False
+    
     try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
+        if os.path.exists(LOCAL_FLAGS_FILE):
+            with open(LOCAL_FLAGS_FILE, 'r') as f:
                 data = json.load(f)
                 if "control_flags" in data:
-                    control_flags.update(data["control_flags"])
-                    print(f"Loaded control flags from file")
+                    for key in control_flags.keys():
+                        if key in data["control_flags"]:
+                            control_flags[key] = data["control_flags"][key]
+                    local_flags_loaded = True
+                    print(f"Loaded control flags from local storage")
+                    return True
     except Exception as e:
-        print(f"Error loading control flags: {e}")
+        print(f"Error loading control flags from local file: {e}")
+    
+    return local_flags_loaded
+
+def sync_flags_with_server():
+    """Try to sync flags with analytics server, fall back to local if unavailable"""
+    global analytics_server_available
+    
+    if check_server_connection():
+        try:
+            response = requests.get(
+                f"{ANALYTICS_HTTP_URL}/camera_state?camera_id={CAMERA_ID}",
+                timeout=2.0
+            )
+            
+            if response.status_code == 200:
+                flags = response.json()
+                current_time = time.ticks_ms()
+                
+                for key in control_flags.keys():
+                    if key in flags:
+                        # Don't overwrite flags that were changed recently
+                        last_changed = flag_last_changed.get(key, 0)
+                        time_since_change = current_time - last_changed
+                        
+                        if time_since_change > FLAG_SYNC_PROTECTION_MS:
+                            # Safe to sync - flag wasn't changed recently
+                            control_flags[key] = flags[key]
+                        else:
+                            # Flag was changed recently, skip syncing this flag
+                            print(f"Skipping sync for {key} (changed {time_since_change}ms ago)")
+                
+                control_flags["analytics_mode"] = True
+                analytics_server_available = True
+                
+                save_control_flags()
+                
+                print("Synced flags from analytics server")
+                return True
+            else:
+                print(f"Server responded with non-200: {response.status_code}")
+                analytics_server_available = False
+                
+        except Exception as e:
+            print(f"Error fetching flags from server: {e}")
+            analytics_server_available = False
+    else:
+        analytics_server_available = False
+    
+    print("Using locally stored flags (server unavailable)")
+    return False
 
 def check_server_connection():
     """Check if analytics server is reachable"""
+    global analytics_server_available
+    
     try:
         response = requests.get(f"{ANALYTICS_HTTP_URL}/", timeout=2)
-        print(f"Analytics server connection successful: {response.status_code}")
-        return True
+        if response.status_code == 200:
+            analytics_server_available = True
+            connection_error_count = 0
+            print(f"Analytics server connection successful: {response.status_code}")
+            return True
+        else:
+            analytics_server_available = False
+            print(f"Analytics server responded with non-200: {response.status_code}")
+            return False
     except Exception as e:
+        analytics_server_available = False
         print(f"Analytics server connection failed: {e}")
         return False
 
@@ -146,11 +232,9 @@ def send_frame_simple(img):
     global connection_error_count
     
     try:
-        # Convert to JPEG with lower quality for faster transmission
         jpeg_img = img.to_format(image.Format.FMT_JPEG)
         jpeg_bytes = jpeg_img.to_bytes()
         
-        # Upload to analytics server
         response = requests.post(
             f"{ANALYTICS_HTTP_URL}/upload_frame",
             data=jpeg_bytes,
@@ -171,35 +255,15 @@ def send_frame_simple(img):
         
     except Exception as e:
         connection_error_count += 1
-        if connection_error_count % 10 == 0:  # Print every 10 errors
+        if connection_error_count % 10 == 0:
             print(f"Frame upload error ({connection_error_count}): {e}")
-        return False
-
-def fetch_control_flags():
-    """Fetch control flags from analytics server"""
-    try:
-        response = requests.get(
-            f"{ANALYTICS_HTTP_URL}/camera_state?camera_id={CAMERA_ID}",
-            timeout=2.0
-        )
-        
-        if response.status_code == 200:
-            flags = response.json()
-            # Update control flags (ignore metadata)
-            for key in control_flags.keys():
-                if key in flags:
-                    control_flags[key] = flags[key]
-            return True
-        else:
-            print(f"Failed to fetch flags: HTTP {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"Error fetching control flags: {e}")
         return False
 
 def report_camera_state():
     """Report state to analytics server"""
+    if not analytics_server_available:
+        return False
+    
     state = {
         "camera_id": CAMERA_ID,
         "control_flags": control_flags,
@@ -224,8 +288,11 @@ def report_camera_state():
         return False
 
 def send_frame_to_analytics(img):
-    """Send frame to analytics server"""
+    """Send frame to analytics server if connected"""
     global last_frame_sent_time
+    
+    if not analytics_server_available or not control_flags.get("analytics_mode", True):
+        return False
     
     current_time = time.ticks_ms()
     time_since_last = current_time - last_frame_sent_time
@@ -235,10 +302,34 @@ def send_frame_to_analytics(img):
         last_frame_sent_time = current_time
         return success
     
-    return True  # Don't send this frame, rate limited
+    return True
+
+def get_pose_analysis_from_analytics():
+    """Get pose analysis from analytics server"""
+    if not analytics_server_available or not control_flags.get("analytics_mode", True):
+        return None
+    
+    try:
+        response = requests.get(
+            f"{ANALYTICS_HTTP_URL}/pose_analysis?camera_id={CAMERA_ID}",
+            timeout=2.0
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Pose analysis request failed: HTTP {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"Error getting pose analysis: {e}")
+        return None
 
 def send_data_via_http(data_type, data):
-    """Send JSON data to analytics server"""
+    """Send JSON data to analytics server if connected"""
+    if not analytics_server_available or not control_flags.get("analytics_mode", True):
+        return False
+    
     try:
         url = f"{ANALYTICS_HTTP_URL}/upload_data"
         payload = {
@@ -291,39 +382,62 @@ def update_safety_checker_polygons(safe_areas=None):
             safety_checker.add_safe_polygon(polygon)
         print(f"Updated safety checker with {len(safe_areas)} polygon(s)")
         
-        # Save to file
         with open(SAFE_AREA_FILE, 'w') as f:
             json.dump(safe_areas, f)
             
-        # Report updated state
-        report_camera_state()
+        if analytics_server_available and control_flags.get("analytics_mode", True):
+            report_camera_state()
             
     except Exception as e:
         print(f"Error updating safety checker: {e}")
 
 def handle_command(command, value):
-    """Handle command from analytics server"""
+    """Handle command from analytics server or local input"""
     global control_flags
     
     print(f"Processing command: {command} = {value}")
+    current_time = time.ticks_ms()
     
     if command == "toggle_record":
         control_flags["record"] = bool(value)
+        flag_last_changed["record"] = current_time
     elif command == "toggle_raw":
         control_flags["show_raw"] = bool(value)
+        flag_last_changed["show_raw"] = current_time
     elif command == "auto_update_bg":
         control_flags["auto_update_bg"] = bool(value)
+        flag_last_changed["auto_update_bg"] = current_time
     elif command == "set_background":
         control_flags["set_background"] = bool(value)
+        flag_last_changed["set_background"] = current_time
         if value:
             print("Background update requested")
     elif command == "toggle_safe_area_display":
         control_flags["show_safe_area"] = bool(value)
+        flag_last_changed["show_safe_area"] = current_time
     elif command == "toggle_safety_check":
         control_flags["use_safety_check"] = bool(value)
+        flag_last_changed["use_safety_check"] = current_time
     elif command == "update_safe_areas":
         if isinstance(value, list):
             update_safety_checker_polygons(value)
+    elif command == "toggle_analytics_mode":
+        control_flags["analytics_mode"] = bool(value)
+        flag_last_changed["analytics_mode"] = current_time
+        if not control_flags["analytics_mode"]:
+            print("Switched to local analysis mode")
+        else:
+            print("Switched to analytics mode")
+    elif command == "set_fall_algorithm":  # This is already correct
+        algorithm = int(value) if isinstance(value, (int, float)) else 3
+        if algorithm in [1, 2, 3]:
+            control_flags["fall_algorithm"] = algorithm
+            flag_last_changed["fall_algorithm"] = current_time
+            print(f"Fall algorithm set to Method {algorithm}")
+        else:
+            print(f"Invalid fall algorithm: {value}, defaulting to 3")
+            control_flags["fall_algorithm"] = 3
+            flag_last_changed["fall_algorithm"] = current_time
     
     save_control_flags()
 
@@ -338,8 +452,8 @@ def start_new_recording():
     recording_start_time = time.ticks_ms()
     is_recording = True
     
-    # Notify analytics
-    send_data_via_http("recording_started", {"timestamp": timestamp})
+    if analytics_server_available and control_flags.get("analytics_mode", True):
+        send_data_via_http("recording_started", {"timestamp": timestamp})
     
     print(f"Started recording: {timestamp}")
     return recording_start_time
@@ -352,8 +466,8 @@ def stop_recording():
         skeleton_saver_2d.save_to_csv()
         is_recording = False
         
-        # Notify analytics
-        send_data_via_http("recording_stopped", {})
+        if analytics_server_available and control_flags.get("analytics_mode", True):
+            send_data_via_http("recording_stopped", {})
         
         print("Stopped recording")
 
@@ -432,7 +546,7 @@ class CommandServer(threading.Thread):
         try:
             self.sock.bind(('0.0.0.0', LOCAL_PORT))
             self.sock.listen(5)
-            self.sock.settimeout(0.5)  # Non-blocking with timeout
+            self.sock.settimeout(0.5)
             print(f"Command server listening on port {LOCAL_PORT}")
             
             while self.running:
@@ -442,7 +556,6 @@ class CommandServer(threading.Thread):
                         conn, addr = self.sock.accept()
                         conn.settimeout(1.0)
                         
-                        # Handle connection in separate thread
                         client_thread = threading.Thread(
                             target=self.handle_client, 
                             args=(conn, addr),
@@ -465,7 +578,6 @@ class CommandServer(threading.Thread):
     def handle_client(self, conn, addr):
         """Handle client connection"""
         try:
-            # Read request
             request = b""
             try:
                 while True:
@@ -480,12 +592,9 @@ class CommandServer(threading.Thread):
             
             if request:
                 try:
-                    # Parse request
                     request_str = request.decode('utf-8', errors='ignore')
                     
-                    # Check if it's a POST command
                     if "POST /command" in request_str:
-                        # Find body
                         body_start = request_str.find("\r\n\r\n")
                         if body_start != -1:
                             body = request_str[body_start + 4:]
@@ -494,13 +603,11 @@ class CommandServer(threading.Thread):
                                 with commands_lock:
                                     received_commands.append(data)
                                 
-                                # Send response
                                 response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
                                 response += json.dumps({"status": "success"})
                                 conn.send(response.encode())
                                 print(f"Received command from {addr[0]}: {data.get('command')}")
                     else:
-                        # Send 404 for other paths
                         response = "HTTP/1.1 404 Not Found\r\n\r\n"
                         conn.send(response.encode())
                         
@@ -560,6 +667,30 @@ def yolo_objs_to_tracker_objs(objs, valid_class_id=[0]):
             out.append(tracker.Object(obj.x, obj.y, obj.w, obj.h, obj.class_id, obj.score))
     return out
 
+def check_and_fallback_to_local():
+    """Check analytics server connection and fall back to local mode if needed"""
+    global analytics_server_available, last_connection_check
+    
+    current_time = time.ticks_ms()
+    
+    if current_time - last_connection_check > CONNECTION_RETRY_INTERVAL_MS:
+        was_available = analytics_server_available
+        check_server_connection()
+        last_connection_check = current_time
+        
+        if was_available and not analytics_server_available:
+            print("Analytics server connection lost, falling back to local analysis mode")
+            control_flags["analytics_mode"] = False
+            save_control_flags()
+        
+        elif not was_available and analytics_server_available:
+            print("Analytics server connection restored, switching back to analytics mode")
+            control_flags["analytics_mode"] = True
+            save_control_flags()
+            sync_flags_with_server()
+    
+    return analytics_server_available
+
 # Initialize background
 if os.path.exists(BACKGROUND_PATH):
     background_img = image.load(BACKGROUND_PATH, format=image.Format.FMT_RGB888)
@@ -570,6 +701,7 @@ else:
     print("Created new background image")
 
 # Load initial control flags and safe areas
+print("\n=== Loading Configuration ===")
 load_control_flags()
 initial_safe_areas = load_safe_areas()
 update_safety_checker_polygons(initial_safe_areas)
@@ -578,28 +710,41 @@ update_safety_checker_polygons(initial_safe_areas)
 command_server = CommandServer()
 command_server.start()
 
-# Test connection to analytics server
+# Test connection to analytics server and sync flags
+print(f"\n=== Testing Analytics Server Connection ===")
 print(f"Analytics server: {ANALYTICS_HTTP_URL}")
 
-if not check_server_connection():
+if not sync_flags_with_server():
     print("Warning: Cannot connect to analytics server")
-    print("Will continue with local operation and try to reconnect periodically")
+    print("Using locally stored configuration")
+    control_flags["analytics_mode"] = False
+    save_control_flags()
 else:
     print("Analytics server connection successful")
-    # Initial state report
-    report_camera_state()
-    # Fetch initial flags
-    fetch_control_flags()
+    control_flags["analytics_mode"] = True
+    save_control_flags()
 
-print("Starting camera stream...")
+print(f"\n=== Starting with Configuration ===")
+print(f"Analytics Mode: {'ENABLED' if control_flags['analytics_mode'] else 'DISABLED'}")
+print(f"Recording: {'ENABLED' if control_flags['record'] else 'DISABLED'}")
+
+print("\nStarting camera stream...")
 
 # === Main loop ===
 frame_counter = 0
 last_gc_time = time.ticks_ms()
 GC_INTERVAL_MS = 10000
+last_pose_analysis_time = 0
+POSE_ANALYSIS_INTERVAL_MS = 500  # Get pose analysis every 500ms
+
+# Store latest pose analysis from server
+server_pose_analysis = {}
 
 while not app.need_exit():
     raw_img = cam.read()
+    
+    # Check analytics server connection and handle fallback
+    check_and_fallback_to_local()
     
     # Process received commands
     with commands_lock:
@@ -607,9 +752,18 @@ while not app.need_exit():
             cmd_data = received_commands.pop(0)
             handle_command(cmd_data.get("command"), cmd_data.get("value"))
     
-    # Periodically fetch control flags from analytics
-    if frame_counter % 30 == 0:  # Every ~30 frames
-        fetch_control_flags()
+    # Periodically sync flags with analytics server if in analytics mode
+    if control_flags["analytics_mode"] and frame_counter % 60 == 0:
+        sync_flags_with_server()
+    
+    # Periodically get pose analysis from analytics server
+    if control_flags["analytics_mode"]:
+        current_time = time.ticks_ms()
+        if current_time - last_pose_analysis_time > POSE_ANALYSIS_INTERVAL_MS:
+            analysis_data = get_pose_analysis_from_analytics()
+            if analysis_data and analysis_data.get("status") != "no_data":
+                server_pose_analysis = analysis_data
+            last_pose_analysis_time = current_time
     
     # Check for background update request
     if control_flags.get("set_background", False):
@@ -617,7 +771,7 @@ while not app.need_exit():
         background_img.save(BACKGROUND_PATH)
         control_flags["set_background"] = False
         save_control_flags()
-        print("Background updated from analytics request")
+        print("Background updated from request")
     
     # Run segmentation for background updates and human detection
     objs_seg = segmentor.detect(raw_img, conf_th=0.5, iou_th=0.45)
@@ -702,11 +856,10 @@ while not app.need_exit():
     if is_recording:
         frame_id += 1
 
-    # Variables to store current fall counters and pose data for display
-    current_fall_counter_old = 0
-    current_fall_counter_new = 0
-    current_fall_detected_old = False
-    current_fall_detected_new = False
+    # Variables to store fall detection results for display
+    current_fall_counter = 0
+    current_fall_detected = False
+    current_fall_algorithm = control_flags.get("fall_algorithm", 3)
     current_torso_angle = None
     current_thigh_uprightness = None
 
@@ -719,21 +872,34 @@ while not app.need_exit():
                     keypoints_np = to_keypoints_np(obj.points)
                     timestamp = time.ticks_ms()
 
-                    # Get pose estimation data
-                    pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
-
-                    # Send skeletal data to analytics
-                    skeletal_data = {
-                        "keypoints": obj.points,
-                        "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
-                        "track_id": track.id,
-                        "pose_data": pose_data,
-                        "timestamp": timestamp
-                    }
-                    send_data_via_http("skeletal_data", skeletal_data)
-
-                    # Send alerts for fall detection
-                    if track.id in fall_ids:
+                    # Get pose data based on mode
+                    pose_data = None
+                    if control_flags["analytics_mode"]:
+                        # In analytics mode, use data from server or send raw data
+                        # Try to match track_id with server analysis
+                        server_track_id = server_pose_analysis.get("track_id")
+                        if server_track_id == track.id:
+                            pose_data = server_pose_analysis.get("pose_data")
+                            fall_detection = server_pose_analysis.get("fall_detection", {})
+                            current_fall_detected_old = fall_detection.get("fall_detected_old", False)
+                            current_fall_detected_new = fall_detection.get("fall_detected_new", False)
+                            current_fall_counter_old = fall_detection.get("counter_old", 0)
+                            current_fall_counter_new = fall_detection.get("counter_new", 0)
+                        
+                        # Always send raw skeletal data to analytics
+                        skeletal_data = {
+                            "keypoints": obj.points,
+                            "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
+                            "track_id": track.id,
+                            "timestamp": timestamp
+                        }
+                        send_data_via_http("skeletal_data", skeletal_data)
+                    else:
+                        # In local mode, do pose estimation locally
+                        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
+                    
+                    # Send alerts for fall detection (only in analytics mode)
+                    if control_flags["analytics_mode"] and track.id in fall_ids:
                         alert_data = {
                             "track_id": track.id,
                             "alert_type": "fall_detected",
@@ -757,35 +923,66 @@ while not app.need_exit():
                     online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
                     online_targets["points"][idx].put(obj.points)
 
-                    # Enhanced fall detection with pose data
+
+                    # Enhanced fall detection with pose data (only in local mode)
                     skip_fall_judgment = (pose_data is None or 
                                          (isinstance(pose_data, dict) and pose_data.get('label') == "None"))
                     
-                    if online_targets["bbox"][idx].qsize() == queue_size and not skip_fall_judgment:
-                        fall_detected_old, counter_old, fall_detected_new, counter_new = get_fall_info(
+                    if not control_flags["analytics_mode"] and online_targets["bbox"][idx].qsize() == queue_size and not skip_fall_judgment:
+                        # Get results from all three fall detection methods
+                        (fall_detected_bbox_only, counter_bbox_only,
+                         fall_detected_motion_pose_and, counter_motion_pose_and,
+                         fall_detected_flexible, counter_flexible) = get_fall_info(
                             tracker_obj, online_targets, idx, fallParam, queue_size, fps, pose_data
                         )
                         
-                        # Store current counter values for display
-                        current_fall_counter_old = counter_old
-                        current_fall_counter_new = counter_new
-                        current_fall_detected_old = fall_detected_old
-                        current_fall_detected_new = fall_detected_new
+                        # Store results based on selected algorithm
+                        current_fall_algorithm = control_flags.get("fall_algorithm", 3)
                         
-                        if fall_detected_old or fall_detected_new:
+                        if current_fall_algorithm == 1:
+                            current_fall_detected = fall_detected_bbox_only
+                            current_fall_counter = counter_bbox_only
+                        elif current_fall_algorithm == 2:
+                            current_fall_detected = fall_detected_motion_pose_and
+                            current_fall_counter = counter_motion_pose_and
+                        else:  # Algorithm 3
+                            current_fall_detected = fall_detected_flexible
+                            current_fall_counter = counter_flexible
+                        
+                        # Update fall_ids based on selected algorithm
+                        if current_fall_detected:
                             fall_ids.add(track.id)
+                            print(f"LOCAL ALERT: Fall detected (Algorithm {current_fall_algorithm}) for track_id {track.id}")
                         elif track.id in fall_ids:
                             fall_ids.remove(track.id)
-                    elif skip_fall_judgment:
+                    elif not control_flags["analytics_mode"] and skip_fall_judgment:
                         # Reset fall counters when skipping fall judgment
-                        current_fall_counter_old = 0
-                        current_fall_counter_new = 0
-                        current_fall_detected_old = False
-                        current_fall_detected_new = False
+                        current_fall_counter = 0
+                        current_fall_detected = False
                         if track.id in fall_ids:
                             fall_ids.remove(track.id)
+                    elif control_flags["analytics_mode"]:
+                        # Try to match track_id with server analysis
+                        server_track_id = server_pose_analysis.get("track_id")
+                        fall_detection = server_pose_analysis.get("fall_detection", {})
+                        
+                        # Get selected algorithm
+                        current_fall_algorithm = control_flags.get("fall_algorithm", 3)
+                        
+                        # Get detection and counter based on selected algorithm
+                        if current_fall_algorithm == 1:
+                            current_fall_detected = fall_detection.get("method1", {}).get("detected", False)
+                            current_fall_counter = fall_detection.get("method1", {}).get("counter", 0)
+                        elif current_fall_algorithm == 2:
+                            current_fall_detected = fall_detection.get("method2", {}).get("detected", False)
+                            current_fall_counter = fall_detection.get("method2", {}).get("counter", 0)
+                        else:
+                            current_fall_detected = fall_detection.get("method3", {}).get("detected", False)
+                            current_fall_counter = fall_detection.get("method3", {}).get("counter", 0)
+                        
+                        print(f"[DEBUG] Analytics Mode - Algorithm {current_fall_algorithm}, Detected: {current_fall_detected}, Counter: {current_fall_counter}")
 
-                    # Safety area check
+                    # Safety area check (uses pose_data from either mode)
                     is_lying_down = False
                     status_str = "unknown"
                     
@@ -802,14 +999,17 @@ while not app.need_exit():
                             
                             if not is_safe:
                                 unsafe_ids.add(track.id)
-                                # Send unsafe alert to analytics
-                                alert_data = {
-                                    "track_id": track.id,
-                                    "alert_type": "unsafe_position",
-                                    "timestamp": timestamp,
-                                    "pose_data": pose_data
-                                }
-                                send_data_via_http("pose_alert", alert_data)
+                                # Send unsafe alert to analytics if in analytics mode
+                                if control_flags["analytics_mode"]:
+                                    alert_data = {
+                                        "track_id": track.id,
+                                        "alert_type": "unsafe_position",
+                                        "timestamp": timestamp,
+                                        "pose_data": pose_data
+                                    }
+                                    send_data_via_http("pose_alert", alert_data)
+                                else:
+                                    print(f"LOCAL ALERT: Unsafe position for track_id {track.id} at {timestamp}")
                             elif track.id in unsafe_ids:
                                 unsafe_ids.remove(track.id)
                         else:
@@ -836,37 +1036,50 @@ while not app.need_exit():
                     
                     break
 
-    # Display fall counters and pose data with smaller font
+    # Display fall detection results for chosen algorithm
     y_position = 30
     font_scale = 0.4
-
-    # Fall counters display with detection status
-    fall_old_text = f"Fall Old: {current_fall_counter_old}/{FALL_COUNT_THRES}"
-    fall_new_text = f"Fall New: {current_fall_counter_new}/{FALL_COUNT_THRES}"
     
-    old_color = image.COLOR_RED if current_fall_detected_old else image.COLOR_WHITE
-    new_color = image.COLOR_RED if current_fall_detected_new else image.COLOR_WHITE
-
-    img.draw_string(10, y_position, fall_old_text, color=old_color, scale=font_scale)
+    # Determine algorithm name for display
+    algorithm_names = {
+        1: "BBox Only",
+        2: "Flexible",
+        3: "Conservative"
+    }
+    
+    # Show selected algorithm and counter
+    algorithm_name = algorithm_names.get(current_fall_algorithm, "Conservative")
+    fall_text = f"Fall ({algorithm_name}): {current_fall_counter}/{FALL_COUNT_THRES}"
+    
+    # Color based on detection status
+    text_color = image.COLOR_RED if current_fall_detected else image.COLOR_WHITE
+    
+    img.draw_string(10, y_position, fall_text, color=text_color, scale=font_scale)
     y_position += 15
-    img.draw_string(10, y_position, fall_new_text, color=new_color, scale=font_scale)
-    y_position += 15
-
+    
     # Add detection status text
-    if current_fall_detected_old:
+    if current_fall_detected:
         img.draw_string(150, 30, "DETECTED!", color=image.COLOR_RED, scale=font_scale)
-    if current_fall_detected_new:
-        img.draw_string(150, 45, "DETECTED!", color=image.COLOR_RED, scale=font_scale)
+    
+    # Add mode indicator
+    mode_text = "Analytics" if control_flags["analytics_mode"] else "Local"
+    mode_color = image.COLOR_BLUE if control_flags["analytics_mode"] else image.COLOR_YELLOW
+    img.draw_string(10, y_position, f"Mode: {mode_text}", color=mode_color, scale=font_scale)
+    y_position += 15
+    
+    # Show algorithm number
+    img.draw_string(10, y_position, f"Algorithm: {current_fall_algorithm}", color=image.COLOR_GREEN, scale=font_scale)
+    y_position += 15
 
-    # Pose data display
+    # Pose data display (if available)
     if current_torso_angle is not None:
         torso_text = f"Torso: {current_torso_angle:.1f}°"
-        img.draw_string(10, y_position, torso_text, color=image.COLOR_CYAN, scale=font_scale)
+        img.draw_string(10, y_position, torso_text, color=image.COLOR_BLUE, scale=font_scale)
         y_position += 15
 
     if current_thigh_uprightness is not None:
         thigh_text = f"Thigh: {current_thigh_uprightness:.1f}°"
-        img.draw_string(10, y_position, thigh_text, color=image.COLOR_CYAN, scale=font_scale)
+        img.draw_string(10, y_position, thigh_text, color=image.COLOR_BLUE, scale=font_scale)
         y_position += 15
 
     # Draw safe area polygons
@@ -906,27 +1119,39 @@ while not app.need_exit():
         
         img.draw_string(int(text_x), int(text_y), status_text, color=image.COLOR_RED, scale=font_scale)
 
-    # Draw operation mode
-    mode_text = "Mode: Analytics"
-    img.draw_string(10, 15, mode_text, color=image.Color.from_rgb(0, 255, 255), scale=0.5)
+    # Draw operation mode and algorithm
+    if control_flags["analytics_mode"]:
+        mode_text = f"Mode: Analytics (Alg:{current_fall_algorithm})"
+        mode_color = image.Color.from_rgb(0, 255, 255)  # Cyan
+    else:
+        mode_text = f"Mode: Local (Alg:{current_fall_algorithm})"
+        mode_color = image.Color.from_rgb(255, 165, 0)  # Orange
+    
+    img.draw_string(10, 15, mode_text, color=mode_color, scale=0.5)
     
     # Draw connection status
-    if connection_error_count > 5:
+    if control_flags["analytics_mode"] and not analytics_server_available:
+        conn_text = "ANALYTICS OFFLINE"
+        img.draw_string(img.width() - 200, 15, conn_text, color=image.COLOR_YELLOW, scale=0.4)
+    elif control_flags["analytics_mode"] and connection_error_count > 5:
         conn_text = f"CONN: {connection_error_count} errors"
         img.draw_string(img.width() - 200, 15, conn_text, color=image.COLOR_YELLOW, scale=0.4)
 
     disp.show(img)
     
-    # Send frame to analytics server
-    send_frame_to_analytics(img)
+    # Send frame to analytics server if in analytics mode
+    if control_flags["analytics_mode"] and analytics_server_available:
+        send_frame_to_analytics(img)
     
-    # Periodically report state
-    current_time = time.ticks_ms()
-    if current_time - last_state_report > STATE_REPORT_INTERVAL_MS:
-        report_camera_state()
-        last_state_report = current_time
+    # Periodically report state if in analytics mode and connected
+    if control_flags["analytics_mode"] and analytics_server_available:
+        current_time = time.ticks_ms()
+        if current_time - last_state_report > STATE_REPORT_INTERVAL_MS:
+            report_camera_state()
+            last_state_report = current_time
     
     # Periodic garbage collection
+    current_time = time.ticks_ms()
     if current_time - last_gc_time > GC_INTERVAL_MS:
         gc.collect()
         last_gc_time = current_time
@@ -937,4 +1162,11 @@ while not app.need_exit():
 command_server.stop()
 if is_recording:
     stop_recording()
+
+# Save final state before exit
+save_control_flags()
+print("\n=== Final Configuration Saved ===")
+print(f"Analytics Mode: {'ENABLED' if control_flags['analytics_mode'] else 'DISABLED'}")
+print(f"Recording: {'ENABLED' if control_flags['record'] else 'DISABLED'}")
+
 print("Camera stream stopped")

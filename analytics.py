@@ -1,3 +1,5 @@
+# analytics.py
+
 import asyncio
 import json
 import base64
@@ -18,6 +20,10 @@ import errno
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import mimetypes
+
+# Import the same pose modules as MaixCAM
+from pose.pose_estimation import PoseEstimation
+from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
 
 # Configure logging
 logging.basicConfig(
@@ -140,6 +146,21 @@ camera_frames = {}
 frame_lock = threading.Lock()
 placeholder_frames = {}  # Store placeholder per camera
 
+# Track history for fall detection
+camera_track_history = {}  # camera_id -> {track_id -> history}
+track_history_lock = threading.Lock()
+
+# Pose estimator (same as MaixCAM)
+pose_estimator = PoseEstimation()
+
+# Fall detection parameters (same as MaixCAM)
+fallParam = {
+    "v_bbox_y": 0.43,
+    "angle": 70
+}
+queue_size = 5
+fps = 30  # Default FPS for analytics server
+
 def create_placeholder_frame(camera_id="default"):
     """Create a placeholder frame for when camera is not connected"""
     global placeholder_frames
@@ -167,6 +188,96 @@ def get_camera_status(camera_id):
             if time.time() - last_seen < 30:
                 return "connected"
     return "disconnected"
+
+def to_keypoints_np(obj_points):
+    """Convert flat list [x1, y1, x2, y2, ...] to numpy array (same as MaixCAM)"""
+    keypoints = np.array(obj_points)
+    return keypoints.reshape(-1, 2)
+
+def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
+    """Perform pose analysis on the server using the same logic as MaixCAM"""
+    try:
+        if not keypoints_flat or len(keypoints_flat) < 10:
+            return None
+        
+        # Initialize track history for this camera if needed
+        with track_history_lock:
+            if camera_id not in camera_track_history:
+                camera_track_history[camera_id] = {}
+            
+            if track_id not in camera_track_history[camera_id]:
+                camera_track_history[camera_id][track_id] = {
+                    "id": [],
+                    "bbox": [],
+                    "points": []
+                }
+            
+            track_history = camera_track_history[camera_id][track_id]
+            
+            # Add track to history
+            if track_id not in track_history["id"]:
+                track_history["id"].append(track_id)
+                track_history["bbox"].append([])  # Will be populated as queue
+                track_history["points"].append([])
+            
+            idx = track_history["id"].index(track_id)
+            
+            # Initialize queues if needed
+            if not track_history["bbox"][idx]:
+                import queue
+                track_history["bbox"][idx] = queue.Queue(maxsize=queue_size)
+                track_history["points"][idx] = queue.Queue(maxsize=queue_size)
+            
+            # Add current data to queue
+            if track_history["bbox"][idx].qsize() >= queue_size:
+                track_history["bbox"][idx].get()
+                track_history["points"][idx].get()
+            
+            track_history["bbox"][idx].put(bbox)
+            track_history["points"][idx].put(keypoints_flat)
+        
+        # Convert to numpy for pose estimation
+        keypoints_np = to_keypoints_np(keypoints_flat)
+        
+        # Get pose estimation data (same as MaixCAM)
+        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
+        
+        # Check if we have enough history for fall detection
+        if track_history["bbox"][idx].qsize() == queue_size:
+            # Create a tracker object similar to MaixCAM
+            class MockTrackerObj:
+                def __init__(self, x, y, w, h):
+                    self.x = x
+                    self.y = y
+                    self.w = w
+                    self.h = h
+            
+            tracker_obj = MockTrackerObj(bbox[0], bbox[1], bbox[2], bbox[3])
+            
+            # Get fall info using the new function that returns 6 values
+            (fall_detected_method1, counter_method1,
+             fall_detected_method2, counter_method2,
+             fall_detected_method3, counter_method3) = get_fall_info(
+                tracker_obj, track_history, idx, fallParam, queue_size, fps, pose_data
+            )
+            
+            # Add fall detection results to pose data
+            if pose_data:
+                pose_data["fall_detected_method1"] = fall_detected_method1
+                pose_data["fall_detected_method2"] = fall_detected_method2
+                pose_data["fall_detected_method3"] = fall_detected_method3
+                pose_data["fall_counter_method1"] = counter_method1
+                pose_data["fall_counter_method2"] = counter_method2
+                pose_data["fall_counter_method3"] = counter_method3
+                pose_data["fall_threshold"] = FALL_COUNT_THRES
+                # Use method 3 as the primary alert (most conservative)
+                pose_data["fall_alert"] = fall_detected_method3
+        
+        return pose_data
+        
+    except Exception as e:
+        logger.error(f"Error in server-side pose analysis: {e}")
+        return None
 
 class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
     """HTTP request handler for analytics server"""
@@ -214,6 +325,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 self.get_server_info()
             elif path == '/debug':
                 self.get_debug_info()
+            elif path == '/pose_analysis':
+                self.get_pose_analysis(camera_id)
             else:
                 # Try to serve static file
                 if os.path.exists(os.path.join('static', path[1:])):
@@ -317,6 +430,63 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             logger.error(f"Error serving frame for {camera_id}: {e}")
             self.send_error(500, "Internal Server Error")
     
+    def get_pose_analysis(self, camera_id):
+        """Get current pose analysis for camera"""
+        try:
+            # Get latest skeletal data for this camera
+            skeletal_data = self.analytics.get_latest_skeletal_data(camera_id)
+            
+            if not skeletal_data:
+                response = {
+                    "camera_id": camera_id,
+                    "status": "no_data",
+                    "timestamp": time.time()
+                }
+                self.send_json_response(200, response)
+                return
+            
+            pose_data = skeletal_data.get("pose_data")
+            
+            response = {
+                "camera_id": camera_id,
+                "pose_data": pose_data,
+                "fall_detection": {
+                    "method1": {
+                        "detected": pose_data.get("fall_detected_method1", False),
+                        "counter": pose_data.get("fall_counter_method1", 0),
+                        "description": "BBox Motion only"
+                    },
+                    "method2": {
+                        "detected": pose_data.get("fall_detected_method2", False),
+                        "counter": pose_data.get("fall_counter_method2", 0),
+                        "description": "BBox+Pose AND"
+                    },
+                    "method3": {
+                        "detected": pose_data.get("fall_detected_method3", False),
+                        "counter": pose_data.get("fall_counter_method3", 0),
+                        "description": "Flexible Verification"
+                    },
+                    "threshold": FALL_COUNT_THRES,
+                    "primary_alert": pose_data.get("fall_alert", False)
+                },
+                "track_id": skeletal_data.get("track_id"),
+                "timestamp": skeletal_data.get("timestamp"),
+                "server_analysis_time": time.time(),
+                # Add metadata about available algorithms
+                "algorithms_available": [1, 2, 3],
+                "algorithm_descriptions": {
+                    1: "BBox Motion only",
+                    2: "BBox+Pose AND",
+                    3: "Flexible Verification"
+                }
+            }
+            
+            self.send_json_response(200, response)
+            
+        except Exception as e:
+            logger.error(f"Pose analysis error for {camera_id}: {e}")
+            self.send_error(500, "Internal Server Error")
+    
     def handle_frame_upload(self, body):
         """Handle frame upload from MaixCAM"""
         try:
@@ -377,7 +547,9 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                         "set_background": False,
                         "auto_update_bg": False,
                         "show_safe_area": False,
-                        "use_safety_check": True
+                        "use_safety_check": True,
+                        "analytics_mode": True,
+                        "fall_algorithm": 3
                     },
                     "safe_areas": [],
                     "last_command": time.time(),
@@ -397,6 +569,16 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 self.analytics.camera_states[camera_id]["control_flags"]["show_safe_area"] = bool(value)
             elif command == "toggle_safety_check":
                 self.analytics.camera_states[camera_id]["control_flags"]["use_safety_check"] = bool(value)
+            elif command == "toggle_analytics_mode":
+                self.analytics.camera_states[camera_id]["control_flags"]["analytics_mode"] = bool(value)
+            elif command == "set_fall_algorithm":
+                algorithm = int(value) if isinstance(value, (int, float)) else 3
+                if algorithm in [1, 2, 3]:
+                    self.analytics.camera_states[camera_id]["control_flags"]["fall_algorithm"] = algorithm
+                    logger.info(f"Fall algorithm set to {algorithm} for {camera_id}")
+                else:
+                    logger.warning(f"Invalid fall algorithm: {value}, defaulting to 3")
+                    self.analytics.camera_states[camera_id]["control_flags"]["fall_algorithm"] = 3
             elif command == "update_safe_areas":
                 self.analytics.camera_states[camera_id]["safe_areas"] = value
             
@@ -589,13 +771,27 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             data = json.loads(body.decode())
             camera_id = data.get("camera_id", "unknown_camera")
             data_type = data.get("type")
+            upload_data = data.get("data", {})
             
             if data_type == "skeletal_data":
-                self.analytics.process_skeletal_data(camera_id, data.get("data", {}))
+                # Also perform server-side analysis for verification
+                if "keypoints" in upload_data and "bbox" in upload_data:
+                    track_id = upload_data.get("track_id", 0)
+                    pose_data = analyze_pose_on_server(
+                        upload_data["keypoints"],
+                        upload_data["bbox"],
+                        track_id,
+                        camera_id
+                    )
+                    
+                    # Add server analysis to the data
+                    upload_data["server_analysis"] = pose_data
+                
+                self.analytics.process_skeletal_data(camera_id, upload_data)
             elif data_type == "pose_alert":
-                self.analytics.process_pose_alert(camera_id, data.get("data", {}))
+                self.analytics.process_pose_alert(camera_id, upload_data)
             elif data_type == "recording_started":
-                logger.info(f"Recording started on camera {camera_id}")
+                logger.info(f"Recording started on camera {camera_id}: {upload_data.get('timestamp')}")
             elif data_type == "recording_stopped":
                 logger.info(f"Recording stopped on camera {camera_id}")
             
@@ -620,7 +816,10 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "diagnoses": len(self.analytics.diagnosis_history),
                 "wifi_connected": self.analytics.wifi_connector.connected,
                 "wifi_ssid": self.analytics.wifi_connector.ssid,
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "fall_threshold": FALL_COUNT_THRES,
+                "queue_size": queue_size,
+                "fps": fps
             }
             
             self.send_json_response(200, stats)
@@ -640,7 +839,10 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "wifi_connected": self.analytics.wifi_connector.connected,
                 "port": self.analytics.http_port,
                 "uptime": getattr(self.analytics, 'start_time', time.time()),
-                "cameras_registered": len(self.analytics.camera_states)
+                "cameras_registered": len(self.analytics.camera_states),
+                "pose_estimator": "Available" if pose_estimator else "Not available",
+                "fall_detection": "Available (using same logic as MaixCAM)",
+                "fall_threshold": FALL_COUNT_THRES
             }
             
             self.send_json_response(200, info)
@@ -703,6 +905,7 @@ class PatientAnalytics:
         self.connected_cameras: Dict = {}
         self.diagnosis_history = []
         self.camera_states = {}  # camera_id -> control_flags, safe_areas, etc.
+        self.latest_skeletal_data = {}  # camera_id -> latest skeletal data
         
         # WiFi connection
         self.wifi_connector = WiFiConnector("MaixCAM-Wifi", "maixcamwifi")
@@ -717,6 +920,10 @@ class PatientAnalytics:
         # Start time
         self.start_time = time.time()
         
+    def get_latest_skeletal_data(self, camera_id):
+        """Get latest skeletal data for a camera"""
+        return self.latest_skeletal_data.get(camera_id)
+    
     def start_http_server(self):
         """Start HTTP server"""
         try:
@@ -741,6 +948,11 @@ class PatientAnalytics:
                 os.makedirs('static', exist_ok=True)
                 logger.info("Please place index.html, style.css, and script.js in the static/ directory")
             
+            # Log pose estimation status
+            logger.info(f"Pose Estimator: {'Available' if pose_estimator else 'Not available'}")
+            logger.info(f"Fall Detection: Available (using same logic as MaixCAM)")
+            logger.info(f"Fall Threshold: {FALL_COUNT_THRES}")
+            
             # Start server in background thread
             server_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
             server_thread.start()
@@ -749,6 +961,7 @@ class PatientAnalytics:
             logger.info("📊 Analytics Gateway Service Started Successfully!")
             logger.info(f"🌐 Analytics IP: {ip}")
             logger.info(f"🖥️  Dashboard: http://{ip}:{self.http_port}")
+            logger.info(f"🎯 Using same pose/fall detection as MaixCAM")
             logger.info("=" * 60)
             
             return True
@@ -807,8 +1020,14 @@ class PatientAnalytics:
     def process_skeletal_data(self, camera_id: str, data: dict):
         """Process skeletal data from camera via HTTP"""
         try:
-            # Perform analytics
-            diagnosis = self.perform_advanced_analysis(camera_id, data)
+            # Store latest data
+            self.latest_skeletal_data[camera_id] = data
+            
+            # Get pose data (use server analysis if available, otherwise use camera data)
+            pose_data = data.get("server_analysis") or data.get("pose_data")
+            
+            # Perform analytics using server-side analysis
+            diagnosis = self.perform_advanced_analysis(camera_id, pose_data, data)
             
             # Store diagnosis
             if diagnosis:
@@ -824,69 +1043,92 @@ class PatientAnalytics:
         try:
             alert_type = data.get("alert_type")
             track_id = data.get("track_id")
+            pose_data = data.get("pose_data", {})
             
-            logger.warning(f"Pose alert from {camera_id}: {alert_type} for track {track_id}")
+            # Get server analysis if available
+            server_analysis = data.get("server_analysis")
+            
+            if alert_type == "fall_detected" and server_analysis:
+                method1_detected = server_analysis.get("fall_detected_method1", False)
+                method2_detected = server_analysis.get("fall_detected_method2", False)
+                method3_detected = server_analysis.get("fall_detected_method3", False)
+                counter1 = server_analysis.get("fall_counter_method1", 0)
+                counter2 = server_analysis.get("fall_counter_method2", 0)
+                counter3 = server_analysis.get("fall_counter_method3", 0)
+                
+                logger.warning(f"FALL DETECTION from {camera_id} (track {track_id}):")
+                logger.warning(f"  Method 1 (BBox only): {'DETECTED' if method1_detected else 'no'} (counter={counter1})")
+                logger.warning(f"  Method 2 (Flexible): {'DETECTED' if method2_detected else 'no'} (counter={counter2})")
+                logger.warning(f"  Method 3 (Conservative): {'DETECTED' if method3_detected else 'no'} (counter={counter3})")
+                logger.warning(f"  Threshold: {FALL_COUNT_THRES}")
+            else:
+                logger.warning(f"Pose alert from {camera_id}: {alert_type} for track {track_id}")
             
         except Exception as e:
             logger.error(f"Error processing pose alert from {camera_id}: {e}")
 
-    def perform_advanced_analysis(self, camera_id: str, skeletal_data: dict):
-        """Perform advanced analytics on skeletal data"""
+    def perform_advanced_analysis(self, camera_id: str, pose_data: dict, full_data: dict):
+        """Perform advanced analytics on skeletal data using server-side analysis"""
         try:
-            keypoints = skeletal_data.get("keypoints")
-            pose_data = skeletal_data.get("pose_data", {})
-            timestamp = skeletal_data.get("timestamp")
+            timestamp = full_data.get("timestamp", time.time())
             
-            # Enhanced fall detection
-            fall_risk = self.enhanced_fall_detection(keypoints, pose_data)
+            # Get fall detection info from server analysis if available
+            fall_detected = False
+            fall_confidence = 0.0
             
-            # Activity classification
+            if pose_data:
+                fall_detected_old = pose_data.get("fall_detected_old", False)
+                fall_detected_new = pose_data.get("fall_detected_new", False)
+                fall_detected = fall_detected_old or fall_detected_new
+                
+                # Calculate fall confidence based on counters
+                counter_old = pose_data.get("fall_counter_old", 0)
+                counter_new = pose_data.get("fall_counter_new", 0)
+                fall_threshold = pose_data.get("fall_threshold", FALL_COUNT_THRES)
+                
+                if fall_detected:
+                    fall_confidence = max(counter_old, counter_new) / max(fall_threshold, 1)
+                else:
+                    fall_confidence = min(counter_old, counter_new) / max(fall_threshold, 1)
+            
+            # Activity classification from pose data
             activity = pose_data.get('label', 'unknown') if pose_data else 'unknown'
             
-            # Risk assessment
-            overall_risk = self.assess_overall_risk(fall_risk, activity)
+            # Enhanced risk assessment using server-side fall detection
+            overall_risk = self.assess_overall_risk(fall_confidence, activity, fall_detected)
             
             diagnosis = {
                 "camera_id": camera_id,
                 "timestamp": timestamp,
                 "analysis_time": datetime.now().isoformat(),
-                "fall_risk": fall_risk,
+                "fall_detected": fall_detected,
+                "fall_confidence": fall_confidence,
+                "fall_threshold": FALL_COUNT_THRES,
                 "detected_activity": activity,
+                "pose_data": pose_data,
                 "overall_risk": overall_risk,
-                "alert_level": self.determine_alert_level(overall_risk),
-                "recommendations": self.generate_recommendations(overall_risk, activity),
-                "confidence": 0.85
+                "alert_level": self.determine_alert_level(overall_risk, fall_detected),
+                "recommendations": self.generate_recommendations(overall_risk, activity, fall_detected),
+                "confidence": 0.9 if fall_detected else 0.7,
+                "analysis_source": "server_side" if full_data.get("server_analysis") else "camera_side"
             }
             
-            logger.info(f"Generated diagnosis for {camera_id}: {diagnosis['alert_level']}")
+            logger.info(f"Generated diagnosis for {camera_id}: {diagnosis['alert_level']} (Fall: {fall_detected})")
             return diagnosis
             
         except Exception as e:
             logger.error(f"Error in advanced analysis for {camera_id}: {e}")
             return None
 
-    def enhanced_fall_detection(self, keypoints, pose_data):
-        """Enhanced fall detection using pose data"""
-        fall_probability = 0.0
-        
-        if pose_data:
-            torso_angle = pose_data.get('torso_angle')
-            thigh_uprightness = pose_data.get('thigh_uprightness')
-            
-            if torso_angle is not None and thigh_uprightness is not None:
-                if torso_angle > 80 and thigh_uprightness > 60:
-                    fall_probability = 0.9
-                elif torso_angle > 70 and thigh_uprightness > 50:
-                    fall_probability = 0.7
-                elif torso_angle > 60:
-                    fall_probability = 0.5
-        
-        return min(fall_probability, 1.0)
-
-    def assess_overall_risk(self, fall_risk, activity):
+    def assess_overall_risk(self, fall_confidence, activity, fall_detected):
         """Assess overall risk"""
         activity_risk = self.activity_risk(activity)
-        overall_risk = (fall_risk * 0.7) + (activity_risk * 0.3)
+        
+        if fall_detected:
+            overall_risk = 0.8 + (fall_confidence * 0.2)  # Base 0.8 for detected fall
+        else:
+            overall_risk = (fall_confidence * 0.7) + (activity_risk * 0.3)
+        
         return min(overall_risk, 1.0)
 
     def activity_risk(self, activity):
@@ -903,9 +1145,11 @@ class PatientAnalytics:
         }
         return risk_map.get(activity, 0.5)
 
-    def determine_alert_level(self, overall_risk):
-        """Determine alert level based on risk score"""
-        if overall_risk >= 0.8:
+    def determine_alert_level(self, overall_risk, fall_detected):
+        """Determine alert level based on risk score and fall detection"""
+        if fall_detected:
+            return "critical"
+        elif overall_risk >= 0.8:
             return "critical"
         elif overall_risk >= 0.6:
             return "high"
@@ -916,14 +1160,20 @@ class PatientAnalytics:
         else:
             return "normal"
 
-    def generate_recommendations(self, overall_risk, activity):
-        """Generate recommendations based on risk and activity"""
+    def generate_recommendations(self, overall_risk, activity, fall_detected):
+        """Generate recommendations based on risk, activity, and fall detection"""
         recommendations = []
         
-        if overall_risk >= 0.8:
+        if fall_detected:
+            recommendations.extend([
+                "FALL DETECTED - Immediate caregiver attention required!",
+                "Check patient position and vital signs immediately",
+                "Emergency response may be needed"
+            ])
+        elif overall_risk >= 0.8:
             recommendations.extend([
                 "Immediate caregiver attention required",
-                "Check patient position and vital signs"
+                "High fall risk detected - monitor closely"
             ])
         elif overall_risk >= 0.6:
             recommendations.extend([
@@ -935,6 +1185,8 @@ class PatientAnalytics:
             recommendations.append("Monitor for prolonged immobility")
         elif activity == "falling":
             recommendations.append("Emergency response needed")
+        elif activity == "transitioning":
+            recommendations.append("Assist with position changes")
             
         return recommendations
 

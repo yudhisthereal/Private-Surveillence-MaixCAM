@@ -9,6 +9,7 @@ const showSafeArea = document.getElementById('showSafeArea');
 const useSafetyCheck = document.getElementById('useSafetyCheck');
 const setBackgroundBtn = document.getElementById('setBackgroundBtn');
 const editSafeAreaBtn = document.getElementById('editSafeAreaBtn');
+const fallAlgorithmSelect = document.getElementById('fallAlgorithmSelect');
 
 // Popup elements
 const popup = document.getElementById('popup');
@@ -473,6 +474,11 @@ async function fetchCameraState(cameraId) {
             const flags = await response.json();
             updateUIControls(flags);
             
+            // Update algorithm selection
+            if (flags.fall_algorithm !== undefined) {
+                updateAlgorithmSelection(flags.fall_algorithm, false);
+            }
+            
             // Update connection status from flags
             if (flags._connected !== undefined) {
                 updateConnectionStatus(cameraId, flags._connected);
@@ -510,6 +516,10 @@ function updateUIControls(flags) {
         useSafetyCheck.checked = flags.use_safety_check;
         useSafetyCheck.disabled = !isConnected;
     }
+    if (typeof flags.fall_algorithm === 'number') {
+        fallAlgorithmSelect.value = flags.fall_algorithm;
+        fallAlgorithmSelect.disabled = !isConnected;
+    }
     
     // Disable/enable buttons based on connection
     setBackgroundBtn.disabled = !isConnected;
@@ -531,6 +541,7 @@ function updateUIControls(flags) {
     styleDisabled(autoUpdateBg, !isConnected);
     styleDisabled(showSafeArea, !isConnected);
     styleDisabled(useSafetyCheck, !isConnected);
+    styleDisabled(fallAlgorithmSelect, !isConnected);
     styleDisabled(setBackgroundBtn, !isConnected);
     styleDisabled(editSafeAreaBtn, !isConnected);
 }
@@ -569,6 +580,32 @@ function sendCommand(command, value = null) {
         console.error('Command error:', error);
         updateConnectionStatus(currentCameraId, false);
     });
+}
+
+function updateAlgorithmSelection(algorithmValue, updateCamera = true) {
+    // Convert to string for comparison
+    const algorithmStr = algorithmValue.toString();
+    
+    // Update dropdown
+    if (fallAlgorithmSelect) {
+        fallAlgorithmSelect.value = algorithmStr;
+    }
+    
+    // Update algorithm cards
+    const algorithmCards = document.querySelectorAll('.card');
+    algorithmCards.forEach(card => {
+        if (card.dataset.algorithm === algorithmStr) {
+            card.dataset.active = 'true';
+        } else {
+            delete card.dataset.active;
+        }
+    });
+    
+    // Send command to camera if requested
+    if (updateCamera && isConnected && window.sendCommand) {
+        console.log(`Setting fall algorithm to: ${algorithmStr}`);
+        window.sendCommand("set_fall_algorithm", parseInt(algorithmStr));
+    }
 }
 
 // ============================================
@@ -618,6 +655,13 @@ if (setBackgroundBtn) {
 if (editSafeAreaBtn) {
     editSafeAreaBtn.onclick = () => {
         showSafeAreaEditor();
+    };
+}
+
+if (fallAlgorithmSelect) {
+    fallAlgorithmSelect.onchange = () => {
+        const algorithm = parseInt(fallAlgorithmSelect.value);
+        sendCommand("set_fall_algorithm", algorithm);
     };
 }
 

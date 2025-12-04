@@ -2,31 +2,32 @@
 
 FALL_COUNT_THRES = 2  # how many consecutive falls required to confirm
 
-# persistent counter for consecutive falls
-fall_counter = 0  # the current method (bbox only)
-fall_counter_new = 0 # experimental method (bbox + pose)
+# persistent counters for consecutive falls for different algorithms
+counter_bbox_only = 0        # Algorithm 1: BBox motion only
+counter_motion_pose_and = 0  # Algorithm 2: BBox motion AND strict pose
+# Algorithm 3 uses the other two counters
 
 def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_size, fps, pose_data=None):
-    global fall_counter
-    global fall_counter_new
+    global counter_bbox_only, counter_motion_pose_and
 
-    fall_down_old = False
-    fall_down_new = False
+    fall_detected_bbox_only = False      # Algorithm 1
+    fall_detected_motion_pose_and = False # Algorithm 2
+    fall_detected_flexible = False       # Algorithm 3
 
     # Skip fall judgment entirely if pose_data is None or label is "None"
     if pose_data is None or (isinstance(pose_data, dict) and pose_data.get('label') == "None"):
-        # Reset counters when pose data is invalid
-        fall_counter = max(0, fall_counter - 1)
-        fall_counter_new = max(0, fall_counter_new - 1)
-        return False, fall_counter, False, fall_counter_new
+        # Reset all counters when pose data is invalid
+        counter_bbox_only = max(0, counter_bbox_only - 1)
+        counter_motion_pose_and = max(0, counter_motion_pose_and - 1)
+        return fall_detected_bbox_only, counter_bbox_only, fall_detected_motion_pose_and, counter_motion_pose_and, fall_detected_flexible, 0
 
     # Case: no detection available
     if online_targets["bbox"][index].empty():
-        if fall_counter > 0:
-            fall_counter = max(0, fall_counter - 1)
-            fall_counter_new = max(0, fall_counter_new - 1)
-            return True, fall_counter, False, fall_counter_new  # still report fall during detection gaps
-        return False, fall_counter, False, fall_counter_new
+        if counter_bbox_only > 0:
+            counter_bbox_only = max(0, counter_bbox_only - 1)
+            counter_motion_pose_and = max(0, counter_motion_pose_and - 1)
+            return True, counter_bbox_only, False, counter_motion_pose_and, False, 0  # still report bbox_only during detection gaps
+        return False, counter_bbox_only, False, counter_motion_pose_and, False, 0
 
     # Get current and previous bounding boxes
     cur_bbox = [online_targets_det.x, online_targets_det.y, online_targets_det.w, online_targets_det.h]
@@ -46,56 +47,68 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     print(f"[DEBUG] v_top = {v_top:.6f}, v_height = {v_height:.6f}, threshold = {fallParam['v_bbox_y']}")
 
     # Extract pose information if available
-    is_lying_down = False
     torso_angle = None
     thigh_uprightness = None
     
     if pose_data and isinstance(pose_data, dict):
         torso_angle = pose_data.get('torso_angle')
         thigh_uprightness = pose_data.get('thigh_uprightness')
-        pose_label = pose_data.get('label', '')
+        print(f"[DEBUG POSE] torso_angle={torso_angle}, thigh_uprightness={thigh_uprightness}")
+
+    # Calculate bbox motion evidence
+    bbox_motion_detected = (v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"])
+    
+    # Calculate pose conditions
+    strict_pose_condition = False
+    flexible_pose_condition = False
+    
+    if torso_angle is not None and thigh_uprightness is not None:
+        # Strict condition: clearly lying down
+        strict_pose_condition = (torso_angle > 80 and thigh_uprightness > 60)
         
-        # Determine if lying down based on both angles and label
-        if torso_angle is not None and thigh_uprightness is not None:
-            is_lying_down = (torso_angle > 80 and thigh_uprightness > 60)
-        else:
-            is_lying_down = ("lying" in pose_label.lower())
-            
-        print(f"[DEBUG POSE] torso_angle={torso_angle}, thigh_uprightness={thigh_uprightness}, is_lying_down={is_lying_down}, label={pose_label}")
-    elif pose_data and isinstance(pose_data, str):
-        # If we only have the pose label
-        is_lying_down = ("lying" in pose_data.lower())
-        print(f"[DEBUG POSE] pose_label={pose_data}, is_lying_down={is_lying_down}")
-
-    # Original method: only bounding box dynamics
-    if v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"]:
-        fall_counter = min(FALL_COUNT_THRES, fall_counter + 1)
-    else:
-        fall_counter = max(0, fall_counter - 1)
-
-    # New method: bounding box dynamics + pose confirmation
-    bbox_fall_detected = (v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"])
+        # Flexible condition: various falling/lying positions
+        if torso_angle > 80:
+            flexible_pose_condition = True
+        elif 30 < torso_angle < 80 and thigh_uprightness > 60:
+            flexible_pose_condition = True
     
-    if bbox_fall_detected and is_lying_down:
-        # Strong evidence: both motion and pose indicate fall
-        fall_counter_new = min(FALL_COUNT_THRES, fall_counter_new + 2)  # faster confirmation
-    elif bbox_fall_detected:
-        # Only motion detected - moderate evidence
-        fall_counter_new = min(FALL_COUNT_THRES, fall_counter_new + 1)
-    elif is_lying_down and torso_angle is not None and thigh_uprightness is not None:
-        # Only pose detected - weak evidence (only if we have angle data)
-        fall_counter_new = min(FALL_COUNT_THRES, fall_counter_new + 1)
+    # Algorithm 1: BBox Only
+    if bbox_motion_detected:
+        counter_bbox_only = min(FALL_COUNT_THRES, counter_bbox_only + 1)
     else:
-        # No evidence - decay counter
-        fall_counter_new = max(0, fall_counter_new - 1)
+        counter_bbox_only = max(0, counter_bbox_only - 1)
 
-    # Determine fall status
-    if fall_counter >= FALL_COUNT_THRES:
-        print(f"[FALL] Confirmed fall (counter={fall_counter})")
-        fall_down_old = True
+    # Algorithm 2: BBox Motion AND Strict Pose
+    if bbox_motion_detected and strict_pose_condition:
+        # Strong evidence: both motion AND clearly lying down
+        counter_motion_pose_and = min(FALL_COUNT_THRES, counter_motion_pose_and + 2)
+    elif bbox_motion_detected or strict_pose_condition:
+        # Moderate evidence: one or the other
+        counter_motion_pose_and = min(FALL_COUNT_THRES, counter_motion_pose_and + 1)
+    else:
+        # No evidence
+        counter_motion_pose_and = max(0, counter_motion_pose_and - 1)
+
+    # Algorithm 3: Flexible Verification (uses counters from other algorithms)
+    # Check if either counter meets threshold AND flexible pose condition is met
+    algorithm3_counter = max(counter_bbox_only, counter_motion_pose_and)
     
-    if fall_counter_new >= FALL_COUNT_THRES:
-        print(f"[FALL NEW] Confirmed fall (counter_new={fall_counter_new})")
-        fall_down_new = True
+    if flexible_pose_condition:
+        if algorithm3_counter >= FALL_COUNT_THRES:
+            fall_detected_flexible = True
+            print(f"[FLEXIBLE VERIFICATION] Fall detected using flexible verification")
 
-    return fall_down_old, fall_counter, fall_down_new, fall_counter_new
+    # Determine fall status for each algorithm
+    if counter_bbox_only >= FALL_COUNT_THRES:
+        print(f"[ALGORITHM 1] Fall detected (BBox only, counter={counter_bbox_only})")
+        fall_detected_bbox_only = True
+    
+    if counter_motion_pose_and >= FALL_COUNT_THRES:
+        print(f"[ALGORITHM 2] Fall detected (Motion+Pose AND, counter={counter_motion_pose_and})")
+        fall_detected_motion_pose_and = True
+
+    return (
+        fall_detected_bbox_only, counter_bbox_only,
+        fall_detected_motion_pose_and, counter_motion_pose_and,
+        fall_detected_flexible, algorithm3_counter
+    )
