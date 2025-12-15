@@ -1,5 +1,6 @@
 # analytics.py
 
+import traceback
 import asyncio
 import json
 import base64
@@ -20,6 +21,7 @@ import errno
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import mimetypes
+from debug_config import debug_print, log_pose_data, log_fall_detection
 
 # Import the same pose modules as MaixCAM
 from pose.pose_estimation import PoseEstimation
@@ -32,20 +34,45 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+USE_HME = False  # Global toggle for HME mode
 class WiFiConnector:
-    """Handle WiFi connection for analytics server"""
+    """Handle WiFi connection for analytics server with smart connection logic"""
     
     def __init__(self, ssid="MaixCAM-Wifi", password="maixcamwifi"):
         self.ssid = ssid
         self.password = password
         self.connected = False
         self.ip_address = None
+        self.current_ssid = None
+        self.reconnection_attempts = 0
+        self.MAX_RECONNECTION_ATTEMPTS = 3
+        self.last_connection_check = 0
+        self.CHECK_INTERVAL_SECONDS = 30  # Check connection every 30 seconds
     
     def connect_wifi(self):
-        """Connect to WiFi network"""
+        """Connect to WiFi network only if not already connected to the correct one"""
         system = platform.system().lower()
         
         try:
+            # First, check current connection status
+            self._check_current_connection(system)
+            
+            # If already connected to the correct WiFi, just update IP and return
+            if self.current_ssid == self.ssid:
+                logger.info(f"Already connected to target WiFi: {self.ssid}")
+                self.connected = True
+                self.ip_address = self._get_current_ip()
+                self.reconnection_attempts = 0
+                return self.ip_address
+            
+            # If connected to a different WiFi, check if we should switch
+            if self.current_ssid and self.current_ssid != self.ssid:
+                logger.info(f"Connected to different WiFi: {self.current_ssid}. Switching to {self.ssid}")
+                # We'll proceed to connect to the target WiFi
+            
+            # If not connected or connected to wrong network, connect to target WiFi
+            logger.info(f"Connecting to WiFi: {self.ssid}")
+            
             if system == "windows":
                 self._connect_wifi_windows()
             elif system == "linux":
@@ -54,92 +81,341 @@ class WiFiConnector:
                 self._connect_wifi_macos()
             else:
                 logger.warning(f"Unsupported OS: {system}")
-                return self._get_current_ip()
-                
+                self.ip_address = self._get_current_ip()
+                return self.ip_address
+            
+            # Verify connection after attempting to connect
+            time.sleep(3)  # Wait for connection to stabilize
+            self._verify_connection(system)
+            
         except Exception as e:
             logger.error(f"WiFi connection failed: {e}")
-            return self._get_current_ip()
+            self.ip_address = self._get_current_ip()
+        
+        return self.ip_address
+    
+    def _check_current_connection(self, system):
+        """Check what WiFi network we're currently connected to"""
+        try:
+            if system == "windows":
+                self._check_windows_connection()
+            elif system == "linux":
+                self._check_linux_connection()
+            elif system == "darwin":  # macOS
+                self._check_macos_connection()
+            else:
+                logger.warning(f"Unsupported OS for connection check: {system}")
+                self.current_ssid = None
+                
+        except Exception as e:
+            logger.error(f"Error checking current connection: {e}")
+            self.current_ssid = None
+    
+    def _check_windows_connection(self):
+        """Check WiFi connection on Windows"""
+        try:
+            # Use netsh to get current connection info
+            cmd = 'netsh wlan show interfaces'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                output = result.stdout
+                # Parse for SSID
+                for line in output.split('\n'):
+                    if 'SSID' in line and 'BSSID' not in line:
+                        parts = line.split(':')
+                        if len(parts) > 1:
+                            ssid = parts[1].strip()
+                            if ssid and ssid != "":
+                                self.current_ssid = ssid
+                                logger.debug(f"Windows: Currently connected to SSID: {self.current_ssid}")
+                                return
+            self.current_ssid = None
+            logger.debug("Windows: Not connected to any WiFi or could not determine SSID")
+        except Exception as e:
+            logger.error(f"Windows connection check error: {e}")
+            self.current_ssid = None
+    
+    def _check_linux_connection(self):
+        """Check WiFi connection on Linux"""
+        try:
+            # Try using nmcli first (NetworkManager)
+            cmd = 'nmcli -t -f active,ssid dev wifi | grep "^yes:"'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0 and result.stdout:
+                # Extract SSID from output (format: yes:SSID_NAME)
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if line.startswith('yes:'):
+                        self.current_ssid = line.split(':', 1)[1]
+                        logger.debug(f"Linux (nmcli): Currently connected to SSID: {self.current_ssid}")
+                        return
+            
+            # Fallback: check /proc/net/wireless or iwgetid
+            cmd = 'iwgetid -r'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                self.current_ssid = result.stdout.strip()
+                logger.debug(f"Linux (iwgetid): Currently connected to SSID: {self.current_ssid}")
+                return
+            
+            self.current_ssid = None
+            logger.debug("Linux: Not connected to any WiFi or could not determine SSID")
+        except Exception as e:
+            logger.error(f"Linux connection check error: {e}")
+            self.current_ssid = None
+    
+    def _check_macos_connection(self):
+        """Check WiFi connection on macOS"""
+        try:
+            # Use airport command or networksetup
+            cmd = '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                output = result.stdout
+                for line in output.split('\n'):
+                    if ' SSID:' in line:
+                        parts = line.split(':')
+                        if len(parts) > 1:
+                            self.current_ssid = parts[1].strip()
+                            logger.debug(f"macOS: Currently connected to SSID: {self.current_ssid}")
+                            return
+            
+            # Alternative method
+            cmd = 'networksetup -getairportnetwork en0'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                output = result.stdout
+                if 'Current Wi-Fi Network:' in output:
+                    parts = output.split(':')
+                    if len(parts) > 1:
+                        self.current_ssid = parts[1].strip()
+                        logger.debug(f"macOS (networksetup): Currently connected to SSID: {self.current_ssid}")
+                        return
+            
+            self.current_ssid = None
+            logger.debug("macOS: Not connected to any WiFi or could not determine SSID")
+        except Exception as e:
+            logger.error(f"macOS connection check error: {e}")
+            self.current_ssid = None
+    
+    def _verify_connection(self, system):
+        """Verify we're connected to the correct WiFi after attempting connection"""
+        # Check what we're actually connected to now
+        self._check_current_connection(system)
+        
+        if self.current_ssid == self.ssid:
+            self.connected = True
+            self.ip_address = self._get_current_ip()
+            self.reconnection_attempts = 0
+            logger.info(f"Successfully connected to WiFi: {self.ssid}")
+            logger.info(f"IP Address: {self.ip_address}")
+        else:
+            self.connected = False
+            self.reconnection_attempts += 1
+            logger.warning(f"Failed to connect to {self.ssid}. Currently connected to: {self.current_ssid or 'nothing'}")
+            
+            if self.reconnection_attempts < self.MAX_RECONNECTION_ATTEMPTS:
+                logger.info(f"Will retry connection (attempt {self.reconnection_attempts + 1}/{self.MAX_RECONNECTION_ATTEMPTS})")
+            else:
+                logger.error(f"Max reconnection attempts reached. Staying with current connection.")
+                self.ip_address = self._get_current_ip()
+    
+    def maintain_connection(self):
+        """Periodically check and maintain WiFi connection"""
+        current_time = time.time()
+        
+        if current_time - self.last_connection_check > self.CHECK_INTERVAL_SECONDS:
+            self.last_connection_check = current_time
+            
+            # Check current connection
+            system = platform.system().lower()
+            self._check_current_connection(system)
+            
+            # If not connected to target WiFi, try to reconnect
+            if self.current_ssid != self.ssid:
+                logger.warning(f"Not connected to target WiFi. Current: {self.current_ssid}, Target: {self.ssid}")
+                logger.info("Attempting to reconnect to target WiFi...")
+                self.connect_wifi()
+            else:
+                # Just update IP address
+                new_ip = self._get_current_ip()
+                if new_ip != self.ip_address:
+                    logger.info(f"WiFi IP address updated: {new_ip}")
+                    self.ip_address = new_ip
+    
+    # Keep the original connection methods but update them slightly
     
     def _connect_wifi_windows(self):
         """Connect to WiFi on Windows"""
         try:
-            # Use netsh to connect to WiFi
+            # Check if already connected to target SSID
+            if self.current_ssid == self.ssid:
+                logger.info(f"Windows: Already connected to {self.ssid}")
+                return
+            
+            # Try to connect
             connect_cmd = f'netsh wlan connect name="{self.ssid}"'
+            logger.debug(f"Windows: Executing command: {connect_cmd}")
             result = subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode == 0:
-                logger.info(f"Connected to WiFi: {self.ssid}")
-                self.connected = True
-                time.sleep(5)  # Wait for connection to stabilize
-                self.ip_address = self._get_current_ip()
+                logger.info(f"Windows: Connected to WiFi: {self.ssid}")
             else:
-                logger.warning(f"Could not connect to {self.ssid}. Using current network.")
-                self.ip_address = self._get_current_ip()
+                logger.warning(f"Windows: Could not connect to {self.ssid}: {result.stderr}")
+                # Try adding the profile first if it doesn't exist
+                self._add_wifi_profile_windows()
                 
         except Exception as e:
             logger.error(f"Windows WiFi connection error: {e}")
-            self.ip_address = self._get_current_ip()
+    
+    def _add_wifi_profile_windows(self):
+        """Add WiFi profile on Windows if it doesn't exist"""
+        try:
+            # Check if profile exists
+            check_cmd = f'netsh wlan show profiles name="{self.ssid}"'
+            result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+            
+            if "is not found on the system" in result.stdout or result.returncode != 0:
+                # Create XML profile
+                xml_profile = f'''<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{self.ssid}</name>
+    <SSIDConfig>
+        <SSID>
+            <name>{self.ssid}</name>
+        </SSID>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <MSM>
+        <security>
+            <authEncryption>
+                <authentication>WPA2PSK</authentication>
+                <encryption>AES</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+            <sharedKey>
+                <keyType>passPhrase</keyType>
+                <protected>false</protected>
+                <keyMaterial>{self.password}</keyMaterial>
+            </sharedKey>
+        </security>
+    </MSM>
+</WLANProfile>'''
+                
+                # Save to temp file
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+                    f.write(xml_profile)
+                    temp_file = f.name
+                
+                # Add profile
+                add_cmd = f'netsh wlan add profile filename="{temp_file}"'
+                result = subprocess.run(add_cmd, shell=True, capture_output=True, text=True)
+                
+                # Clean up
+                import os
+                os.unlink(temp_file)
+                
+                if result.returncode == 0:
+                    logger.info(f"Windows: Added WiFi profile for {self.ssid}")
+                    # Now try connecting again
+                    connect_cmd = f'netsh wlan connect name="{self.ssid}"'
+                    subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
+        except Exception as e:
+            logger.error(f"Windows profile creation error: {e}")
     
     def _connect_wifi_linux(self):
         """Connect to WiFi on Linux"""
         try:
-            # Try using nmcli (NetworkManager)
+            # Check if already connected to target SSID
+            if self.current_ssid == self.ssid:
+                logger.info(f"Linux: Already connected to {self.ssid}")
+                return
+            
+            # Try using nmcli
             connect_cmd = f'nmcli device wifi connect "{self.ssid}" password "{self.password}"'
+            logger.debug(f"Linux: Executing command: {connect_cmd}")
             result = subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode == 0:
-                logger.info(f"Connected to WiFi: {self.ssid}")
-                self.connected = True
-                time.sleep(5)
-                self.ip_address = self._get_current_ip()
+                logger.info(f"Linux: Connected to WiFi: {self.ssid}")
             else:
-                logger.warning(f"Could not connect to {self.ssid}. Using current network.")
-                self.ip_address = self._get_current_ip()
+                logger.warning(f"Linux: Could not connect to {self.ssid}: {result.stderr}")
                 
         except Exception as e:
             logger.error(f"Linux WiFi connection error: {e}")
-            self.ip_address = self._get_current_ip()
     
     def _connect_wifi_macos(self):
         """Connect to WiFi on macOS"""
         try:
+            # Check if already connected to target SSID
+            if self.current_ssid == self.ssid:
+                logger.info(f"macOS: Already connected to {self.ssid}")
+                return
+            
             # Try using networksetup
             connect_cmd = f'networksetup -setairportnetwork en0 "{self.ssid}" "{self.password}"'
+            logger.debug(f"macOS: Executing command: {connect_cmd}")
             result = subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode == 0:
-                logger.info(f"Connected to WiFi: {self.ssid}")
-                self.connected = True
-                time.sleep(5)
-                self.ip_address = self._get_current_ip()
+                logger.info(f"macOS: Connected to WiFi: {self.ssid}")
             else:
-                logger.warning(f"Could not connect to {self.ssid}. Using current network.")
-                self.ip_address = self._get_current_ip()
+                logger.warning(f"macOS: Could not connect to {self.ssid}: {result.stderr}")
                 
         except Exception as e:
             logger.error(f"macOS WiFi connection error: {e}")
-            self.ip_address = self._get_current_ip()
     
     def _get_current_ip(self):
-        """Get current IP address"""
+        """Get current IP address with better error handling"""
         try:
-            # Method 1: Get local IP
+            # Method 1: Get local IP using socket
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            logger.info(f"Current IP address: {ip}")
-            return ip
-        except:
+            s.settimeout(1)
             try:
-                # Method 2: Get hostname IP
+                # Connect to Google DNS
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                s.close()
+                return ip
+            except socket.error:
+                s.close()
+            
+            # Method 2: Get from hostname
+            try:
                 hostname = socket.gethostname()
                 ip = socket.gethostbyname(hostname)
-                logger.info(f"Hostname IP: {ip}")
+                if ip.startswith("127."):
+                    # Loopback address, not useful
+                    raise socket.error
                 return ip
-            except:
-                logger.warning("Could not determine IP address")
-                return "0.0.0.0"
+            except socket.error:
+                pass
+            
+            # Method 3: Try to get from network interfaces
+            if platform.system().lower() == "linux":
+                try:
+                    import netifaces
+                    for interface in netifaces.interfaces():
+                        addresses = netifaces.ifaddresses(interface)
+                        if netifaces.AF_INET in addresses:
+                            for addr in addresses[netifaces.AF_INET]:
+                                ip = addr.get('addr')
+                                if ip and not ip.startswith("127."):
+                                    return ip
+                except ImportError:
+                    pass
+            
+            logger.warning("Could not determine IP address")
+            return "0.0.0.0"
+            
+        except Exception as e:
+            logger.error(f"Error getting IP address: {e}")
+            return "0.0.0.0"
 
 # Global frame storage
 camera_frames = {}
@@ -197,13 +473,17 @@ def to_keypoints_np(obj_points):
 def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
     """Perform pose analysis on the server using the same logic as MaixCAM"""
     try:
+        logger.debug(f"[DEBUG] analyze_pose_on_server called for camera {camera_id}, track {track_id}")
+        
         if not keypoints_flat or len(keypoints_flat) < 10:
+            logger.debug(f"[DEBUG] Insufficient keypoints: {len(keypoints_flat) if keypoints_flat else 0}")
             return None
         
         # Initialize track history for this camera if needed
         with track_history_lock:
             if camera_id not in camera_track_history:
                 camera_track_history[camera_id] = {}
+                logger.debug(f"[DEBUG] Created track history for camera {camera_id}")
             
             if track_id not in camera_track_history[camera_id]:
                 camera_track_history[camera_id][track_id] = {
@@ -211,6 +491,7 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                     "bbox": [],
                     "points": []
                 }
+                logger.debug(f"[DEBUG] Created track history for track {track_id}")
             
             track_history = camera_track_history[camera_id][track_id]
             
@@ -219,6 +500,7 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                 track_history["id"].append(track_id)
                 track_history["bbox"].append([])  # Will be populated as queue
                 track_history["points"].append([])
+                logger.debug(f"[DEBUG] Added track {track_id} to history")
             
             idx = track_history["id"].index(track_id)
             
@@ -227,14 +509,17 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                 import queue
                 track_history["bbox"][idx] = queue.Queue(maxsize=queue_size)
                 track_history["points"][idx] = queue.Queue(maxsize=queue_size)
+                logger.debug(f"[DEBUG] Initialized queues for track {track_id}")
             
             # Add current data to queue
             if track_history["bbox"][idx].qsize() >= queue_size:
                 track_history["bbox"][idx].get()
                 track_history["points"][idx].get()
+                logger.debug(f"[DEBUG] Removed oldest data from queues for track {track_id}")
             
             track_history["bbox"][idx].put(bbox)
             track_history["points"][idx].put(keypoints_flat)
+            logger.debug(f"[DEBUG] Added data to queues for track {track_id}. Queue size: {track_history['bbox'][idx].qsize()}")
         
         # Convert to numpy for pose estimation
         keypoints_np = to_keypoints_np(keypoints_flat)
@@ -242,8 +527,16 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
         # Get pose estimation data (same as MaixCAM)
         pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
         
+        if not pose_data:
+            logger.debug(f"[DEBUG] No pose data returned from pose_estimator")
+            return None
+        
+        logger.debug(f"[DEBUG] Pose data label: {pose_data.get('label')}")
+        
         # Check if we have enough history for fall detection
         if track_history["bbox"][idx].qsize() == queue_size:
+            logger.debug(f"[DEBUG] Queue full ({queue_size}), running fall detection for track {track_id}")
+            
             # Create a tracker object similar to MaixCAM
             class MockTrackerObj:
                 def __init__(self, x, y, w, h):
@@ -261,22 +554,36 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                 tracker_obj, track_history, idx, fallParam, queue_size, fps, pose_data
             )
             
-            # Add fall detection results to pose data
-            if pose_data:
-                pose_data["fall_detected_method1"] = fall_detected_method1
-                pose_data["fall_detected_method2"] = fall_detected_method2
-                pose_data["fall_detected_method3"] = fall_detected_method3
-                pose_data["fall_counter_method1"] = counter_method1
-                pose_data["fall_counter_method2"] = counter_method2
-                pose_data["fall_counter_method3"] = counter_method3
-                pose_data["fall_threshold"] = FALL_COUNT_THRES
-                # Use method 3 as the primary alert (most conservative)
-                pose_data["fall_alert"] = fall_detected_method3
+            logger.debug(f"[DEBUG] Fall detection results for track {track_id}:")
+            logger.debug(f"[DEBUG]   Method1: detected={fall_detected_method1}, counter={counter_method1}")
+            logger.debug(f"[DEBUG]   Method2: detected={fall_detected_method2}, counter={counter_method2}")
+            logger.debug(f"[DEBUG]   Method3: detected={fall_detected_method3}, counter={counter_method3}")
+            
+            # Add fall detection results to pose data with NEW naming
+            pose_data["fall_detected_method1"] = fall_detected_method1
+            pose_data["fall_detected_method2"] = fall_detected_method2
+            pose_data["fall_detected_method3"] = fall_detected_method3
+            pose_data["fall_counter_method1"] = counter_method1
+            pose_data["fall_counter_method2"] = counter_method2
+            pose_data["fall_counter_method3"] = counter_method3
+            pose_data["fall_threshold"] = FALL_COUNT_THRES
+            # Use method 3 as the primary alert (most conservative)
+            pose_data["fall_alert"] = fall_detected_method3
+            pose_data["server_analysis"] = True  # Mark as server-side analysis
+            
+            logger.info(f"[ANALYTICS] Pose analysis for camera {camera_id}, track {track_id}:")
+            logger.info(f"[ANALYTICS]   Activity: {pose_data.get('label')}")
+            logger.info(f"[ANALYTICS]   Fall Method1: {'DETECTED' if fall_detected_method1 else 'no'} (counter={counter_method1}/{FALL_COUNT_THRES})")
+            logger.info(f"[ANALYTICS]   Fall Method2: {'DETECTED' if fall_detected_method2 else 'no'} (counter={counter_method2}/{FALL_COUNT_THRES})")
+            logger.info(f"[ANALYTICS]   Fall Method3: {'DETECTED' if fall_detected_method3 else 'no'} (counter={counter_method3}/{FALL_COUNT_THRES})")
+        else:
+            logger.debug(f"[DEBUG] Queue not full ({track_history['bbox'][idx].qsize()}/{queue_size}), skipping fall detection")
         
         return pose_data
         
     except Exception as e:
         logger.error(f"Error in server-side pose analysis: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
@@ -436,55 +743,121 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             # Get latest skeletal data for this camera
             skeletal_data = self.analytics.get_latest_skeletal_data(camera_id)
             
+            # DEBUG: Log what we're getting
+            logger.debug(f"[DEBUG] get_pose_analysis for {camera_id}: skeletal_data = {skeletal_data is not None}")
+            
             if not skeletal_data:
                 response = {
                     "camera_id": camera_id,
                     "status": "no_data",
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "message": "No skeletal data available"
                 }
                 self.send_json_response(200, response)
                 return
             
             pose_data = skeletal_data.get("pose_data")
+            server_analysis = skeletal_data.get("server_analysis")
             
-            response = {
-                "camera_id": camera_id,
-                "pose_data": pose_data,
-                "fall_detection": {
+            # DEBUG: Log what data we have
+            logger.debug(f"[DEBUG] pose_data exists: {pose_data is not None}, server_analysis exists: {server_analysis is not None}")
+            
+            # Use server_analysis if available, otherwise use pose_data
+            analysis_data = server_analysis if server_analysis else pose_data
+            
+            if not analysis_data:
+                response = {
+                    "camera_id": camera_id,
+                    "status": "no_pose_data",
+                    "timestamp": time.time(),
+                    "message": "No pose analysis data available"
+                }
+                self.send_json_response(200, response)
+                return
+            
+            # Extract fall detection data with proper field names
+            fall_detection_data = {}
+            
+            # Check for new method naming (method1, method2, method3)
+            if analysis_data.get("fall_detected_method1") is not None:
+                # New naming scheme
+                fall_detection_data = {
                     "method1": {
-                        "detected": pose_data.get("fall_detected_method1", False),
-                        "counter": pose_data.get("fall_counter_method1", 0),
+                        "detected": bool(analysis_data.get("fall_detected_method1", False)),
+                        "counter": analysis_data.get("fall_counter_method1", 0),
                         "description": "BBox Motion only"
                     },
                     "method2": {
-                        "detected": pose_data.get("fall_detected_method2", False),
-                        "counter": pose_data.get("fall_counter_method2", 0),
+                        "detected": bool(analysis_data.get("fall_detected_method2", False)),
+                        "counter": analysis_data.get("fall_counter_method2", 0),
                         "description": "BBox+Pose AND"
                     },
                     "method3": {
-                        "detected": pose_data.get("fall_detected_method3", False),
-                        "counter": pose_data.get("fall_counter_method3", 0),
+                        "detected": bool(analysis_data.get("fall_detected_method3", False)),
+                        "counter": analysis_data.get("fall_counter_method3", 0),
                         "description": "Flexible Verification"
+                    }
+                }
+            # Check for old naming scheme (for backward compatibility)
+            elif analysis_data.get("fall_detected_old") is not None or analysis_data.get("fall_detected_new") is not None:
+                fall_detection_data = {
+                    "method1": {
+                        "detected": bool(analysis_data.get("fall_detected_old", False)),
+                        "counter": analysis_data.get("fall_counter_old", 0),
+                        "description": "Legacy Old Method"
                     },
-                    "threshold": FALL_COUNT_THRES,
-                    "primary_alert": pose_data.get("fall_alert", False)
-                },
-                "track_id": skeletal_data.get("track_id"),
-                "timestamp": skeletal_data.get("timestamp"),
+                    "method2": {
+                        "detected": bool(analysis_data.get("fall_detected_new", False)),
+                        "counter": analysis_data.get("fall_counter_new", 0),
+                        "description": "Legacy New Method"
+                    },
+                    "method3": {
+                        "detected": bool(analysis_data.get("fall_alert", False) or 
+                                        analysis_data.get("fall_detected_method3", False)),
+                        "counter": max(analysis_data.get("fall_counter_old", 0), 
+                                    analysis_data.get("fall_counter_new", 0)),
+                        "description": "Flexible (Consensus)"
+                    }
+                }
+            else:
+                # No fall detection data found
+                logger.warning(f"[DEBUG] No fall detection data found in analysis_data for {camera_id}")
+                logger.warning(f"[DEBUG] analysis_data keys: {list(analysis_data.keys())}")
+                fall_detection_data = {
+                    "method1": {"detected": False, "counter": 0, "description": "No data"},
+                    "method2": {"detected": False, "counter": 0, "description": "No data"},
+                    "method3": {"detected": False, "counter": 0, "description": "No data"}
+                }
+            
+            # DEBUG: Log fall detection data
+            logger.debug(f"[DEBUG] Fall detection data for {camera_id}: {fall_detection_data}")
+            
+            # Determine primary alert based on method3 (most conservative)
+            primary_alert = fall_detection_data.get("method3", {}).get("detected", False)
+            
+            response = {
+                "camera_id": camera_id,
+                "pose_data": analysis_data,
+                "fall_detection": fall_detection_data,
+                "track_id": skeletal_data.get("track_id", 0),
+                "timestamp": skeletal_data.get("timestamp", time.time()),
                 "server_analysis_time": time.time(),
+                "primary_alert": primary_alert,
                 # Add metadata about available algorithms
                 "algorithms_available": [1, 2, 3],
                 "algorithm_descriptions": {
                     1: "BBox Motion only",
                     2: "BBox+Pose AND",
                     3: "Flexible Verification"
-                }
+                },
+                "status": "success"
             }
             
             self.send_json_response(200, response)
             
         except Exception as e:
             logger.error(f"Pose analysis error for {camera_id}: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             self.send_error(500, "Internal Server Error")
     
     def handle_frame_upload(self, body):
@@ -774,18 +1147,39 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             upload_data = data.get("data", {})
             
             if data_type == "skeletal_data":
-                # Also perform server-side analysis for verification
-                if "keypoints" in upload_data and "bbox" in upload_data:
-                    track_id = upload_data.get("track_id", 0)
-                    pose_data = analyze_pose_on_server(
-                        upload_data["keypoints"],
-                        upload_data["bbox"],
-                        track_id,
-                        camera_id
-                    )
+                hme_mode = upload_data.get("hme_mode", False)
+                
+                if hme_mode and USE_HME:
+                    # HME mode: process encrypted features
+                    encrypted_features = upload_data.get("encrypted_features", {})
                     
-                    # Add server analysis to the data
-                    upload_data["server_analysis"] = pose_data
+                    # Analytics performs encrypted comparisons
+                    comparison_results = pose_estimator.perform_hme_comparisons(encrypted_features)
+                    
+                    if comparison_results:
+                        # Send comparison results to caregiver for decryption
+                        # In real implementation, this would be sent back to the caregiver
+                        # For now, we'll simulate the decryption locally
+                        pose_label = pose_estimator.decrypt_comparison_results(comparison_results)
+                        
+                        upload_data["server_analysis"] = {
+                            "label": pose_label,
+                            "hme_processed": True,
+                            "comparison_results": comparison_results
+                        }
+                        
+                        print(f"[HME] Processed encrypted features from {camera_id}, pose: {pose_label}")
+                else:
+                    # Plain mode: original server-side analysis
+                    if "keypoints" in upload_data and "bbox" in upload_data:
+                        track_id = upload_data.get("track_id", 0)
+                        pose_data = analyze_pose_on_server(
+                            upload_data["keypoints"],
+                            upload_data["bbox"],
+                            track_id,
+                            camera_id
+                        )
+                        upload_data["server_analysis"] = pose_data
                 
                 self.analytics.process_skeletal_data(camera_id, upload_data)
             elif data_type == "pose_alert":

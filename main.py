@@ -8,6 +8,7 @@ from tools.time_utils import get_timestamp_str
 from tools.skeleton_saver import SkeletonSaver2D
 from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
 from tools.safe_area import BodySafetyChecker, CheckMethod
+from debug_config import debug_print, log_pose_data, log_fall_detection
 import queue
 import numpy as np
 import os
@@ -17,6 +18,10 @@ import gc
 import socket
 import threading
 import select
+
+# Homomorphic Encryption
+USE_HME = False  # Global toggle for HME mode
+
 
 # Image Paths
 BACKGROUND_PATH = "/root/static/background.jpg"
@@ -307,22 +312,42 @@ def send_frame_to_analytics(img):
 def get_pose_analysis_from_analytics():
     """Get pose analysis from analytics server"""
     if not analytics_server_available or not control_flags.get("analytics_mode", True):
+        print(f"[DEBUG] Analytics server not available or not in analytics mode")
+        print(f"[DEBUG] analytics_server_available: {analytics_server_available}")
+        print(f"[DEBUG] analytics_mode flag: {control_flags.get('analytics_mode', True)}")
         return None
     
     try:
+        print(f"[DEBUG] Requesting pose analysis from analytics server...")
         response = requests.get(
             f"{ANALYTICS_HTTP_URL}/pose_analysis?camera_id={CAMERA_ID}",
             timeout=2.0
         )
         
+        print(f"[DEBUG] Pose analysis response status: {response.status_code}")
+        
         if response.status_code == 200:
-            return response.json()
+            analysis_data = response.json()
+            print(f"[DEBUG] Pose analysis data received: {analysis_data.get('status', 'unknown')}")
+            
+            # Check if we have valid data
+            if analysis_data.get("status") == "no_data" or analysis_data.get("status") == "no_pose_data":
+                print(f"[DEBUG] Analytics server has no pose data yet")
+                return None
+                
+            return analysis_data
         else:
-            print(f"Pose analysis request failed: HTTP {response.status_code}")
+            print(f"[DEBUG] Pose analysis request failed: HTTP {response.status_code}")
+            if response.status_code != 200:
+                try:
+                    error_body = response.text
+                    print(f"[DEBUG] Error response: {error_body[:100]}")
+                except:
+                    pass
             return None
             
     except Exception as e:
-        print(f"Error getting pose analysis: {e}")
+        print(f"[DEBUG] Error getting pose analysis: {e}")
         return None
 
 def send_data_via_http(data_type, data):
@@ -760,9 +785,26 @@ while not app.need_exit():
     if control_flags["analytics_mode"]:
         current_time = time.ticks_ms()
         if current_time - last_pose_analysis_time > POSE_ANALYSIS_INTERVAL_MS:
+            print(f"[DEBUG] Requesting pose analysis (interval reached)")
             analysis_data = get_pose_analysis_from_analytics()
-            if analysis_data and analysis_data.get("status") != "no_data":
+            if analysis_data:
+                print(f"[DEBUG] Received pose analysis: track_id={analysis_data.get('track_id')}, status={analysis_data.get('status')}")
+                print(f"[DEBUG] Primary alert: {analysis_data.get('primary_alert')}")
+                
+                # Check fall detection data
+                fall_detection = analysis_data.get("fall_detection", {})
+                print(f"[DEBUG] Fall detection methods available: {list(fall_detection.keys())}")
+                
+                for method_num in [1, 2, 3]:
+                    method_key = f"method{method_num}"
+                    if method_key in fall_detection:
+                        method_data = fall_detection[method_key]
+                        print(f"[DEBUG]   Method {method_num}: detected={method_data.get('detected')}, counter={method_data.get('counter')}")
+                
                 server_pose_analysis = analysis_data
+            else:
+                print(f"[DEBUG] No pose analysis data received from server")
+                server_pose_analysis = {}
             last_pose_analysis_time = current_time
     
     # Check for background update request
@@ -875,24 +917,27 @@ while not app.need_exit():
                     # Get pose data based on mode
                     pose_data = None
                     if control_flags["analytics_mode"]:
-                        # In analytics mode, use data from server or send raw data
-                        # Try to match track_id with server analysis
-                        server_track_id = server_pose_analysis.get("track_id")
-                        if server_track_id == track.id:
-                            pose_data = server_pose_analysis.get("pose_data")
-                            fall_detection = server_pose_analysis.get("fall_detection", {})
-                            current_fall_detected_old = fall_detection.get("fall_detected_old", False)
-                            current_fall_detected_new = fall_detection.get("fall_detected_new", False)
-                            current_fall_counter_old = fall_detection.get("counter_old", 0)
-                            current_fall_counter_new = fall_detection.get("counter_new", 0)
-                        
-                        # Always send raw skeletal data to analytics
+                        # In analytics mode, send data based on HME setting
                         skeletal_data = {
                             "keypoints": obj.points,
                             "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
                             "track_id": track.id,
                             "timestamp": timestamp
                         }
+                        
+                        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
+                        if USE_HME:
+                            # Get encrypted features from pose estimator
+                            if pose_data and 'encrypted_features' in pose_data:
+                                skeletal_data["encrypted_features"] = pose_data['encrypted_features']
+                                skeletal_data["hme_mode"] = True
+                                print(f"[HME] Sending encrypted features for track {track.id}")
+                        else:
+                            # Plain mode: send raw keypoints
+                            if pose_data:
+                                skeletal_data['pose_data'] = pose_data
+                                skeletal_data["hme_mode"] = False
+                        
                         send_data_via_http("skeletal_data", skeletal_data)
                     else:
                         # In local mode, do pose estimation locally
@@ -961,24 +1006,37 @@ while not app.need_exit():
                         current_fall_detected = False
                         if track.id in fall_ids:
                             fall_ids.remove(track.id)
+
                     elif control_flags["analytics_mode"]:
                         # Try to match track_id with server analysis
                         server_track_id = server_pose_analysis.get("track_id")
                         fall_detection = server_pose_analysis.get("fall_detection", {})
                         
+                        print(f"[DEBUG] Analytics Mode: server_track_id={server_track_id}, current_track_id={track.id}")
+                        print(f"[DEBUG] Fall detection data keys: {list(fall_detection.keys())}")
+                        
                         # Get selected algorithm
                         current_fall_algorithm = control_flags.get("fall_algorithm", 3)
                         
                         # Get detection and counter based on selected algorithm
-                        if current_fall_algorithm == 1:
-                            current_fall_detected = fall_detection.get("method1", {}).get("detected", False)
-                            current_fall_counter = fall_detection.get("method1", {}).get("counter", 0)
-                        elif current_fall_algorithm == 2:
-                            current_fall_detected = fall_detection.get("method2", {}).get("detected", False)
-                            current_fall_counter = fall_detection.get("method2", {}).get("counter", 0)
+                        method_key = f"method{current_fall_algorithm}"
+                        
+                        if method_key in fall_detection:
+                            method_data = fall_detection[method_key]
+                            current_fall_detected = method_data.get("detected", False)
+                            current_fall_counter = method_data.get("counter", 0)
+                            print(f"[DEBUG] Analytics Mode - Algorithm {current_fall_algorithm}, Detected: {current_fall_detected}, Counter: {current_fall_counter}")
+                            
+                            # Update fall_ids based on detection
+                            if current_fall_detected:
+                                fall_ids.add(track.id)
+                                print(f"[ANALYTICS ALERT] Fall detected (Algorithm {current_fall_algorithm}) for track_id {track.id}")
+                            elif track.id in fall_ids:
+                                fall_ids.remove(track.id)
                         else:
-                            current_fall_detected = fall_detection.get("method3", {}).get("detected", False)
-                            current_fall_counter = fall_detection.get("method3", {}).get("counter", 0)
+                            print(f"[DEBUG] Method {current_fall_algorithm} not found in fall_detection")
+                            current_fall_detected = False
+                            current_fall_counter = 0
                         
                         print(f"[DEBUG] Analytics Mode - Algorithm {current_fall_algorithm}, Detected: {current_fall_detected}, Counter: {current_fall_counter}")
 
