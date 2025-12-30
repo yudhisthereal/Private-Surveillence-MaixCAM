@@ -6,3 +6,6 @@ def get_timestamp_str():
     """
     tm = time.localtime()
     return f"{tm[0]:04d}-{tm[1]:02d}-{tm[2]:02d}_{tm[3]:02d}-{tm[4]:02d}-{tm[5]:02d}"
+
+def time_ms():
+    return round(time.time() * 1000)

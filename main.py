@@ -4,7 +4,7 @@ from maix import camera, display, app, nn, image, time, tracker
 from pose.pose_estimation import PoseEstimation
 from tools.wifi_connect import connect_wifi
 from tools.video_record import VideoRecorder
-from tools.time_utils import get_timestamp_str
+from tools.time_utils import get_timestamp_str, time_ms
 from tools.skeleton_saver import SkeletonSaver2D
 from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
 from tools.safe_area import BodySafetyChecker, CheckMethod
@@ -18,9 +18,162 @@ import gc
 import socket
 import threading
 import select
+import time
 
-# Homomorphic Encryption
-USE_HME = False  # Global toggle for HME mode
+# Async Worker Classes for Non-Blocking Operations
+class FlagSyncWorker(threading.Thread):
+    """Background thread for syncing flags from analytics server"""
+    
+    def __init__(self, flags_queue, analytics_url, camera_id, sync_interval_ms=500):
+        super().__init__(daemon=True)
+        self.flags_queue = flags_queue
+        self.analytics_url = analytics_url
+        self.camera_id = camera_id
+        self.sync_interval = sync_interval_ms / 1000.0  # Convert to seconds
+        self.running = True
+        self.connection_errors = 0
+        self.max_errors = 10
+        
+    def run(self):
+        while self.running:
+            try:
+                # Check server connection and get flags
+                response = requests.get(
+                    f"{self.analytics_url}/camera_state?camera_id={self.camera_id}",
+                    timeout=1.0
+                )
+                
+                if response.status_code == 200:
+                    flags = response.json()
+                    # Put flags in queue for main thread to consume
+                    self.flags_queue.put(("flags_update", flags))
+                    self.connection_errors = 0  # Reset error count on success
+                else:
+                    self.connection_errors += 1
+                    
+            except Exception as e:
+                self.connection_errors += 1
+                if self.connection_errors % 5 == 0:  # Log every 5th error
+                    print(f"[FlagSync] Connection error ({self.connection_errors}): {e}")
+            
+            # Sleep for sync interval
+            time.sleep(self.sync_interval)
+    
+    def stop(self):
+        self.running = False
+
+
+class FrameSenderWorker(threading.Thread):
+    """Background thread for sending frames to analytics server"""
+    
+    def __init__(self, frame_queue, analytics_url, camera_id, send_interval_ms=200):
+        super().__init__(daemon=True)
+        self.frame_queue = frame_queue
+        self.analytics_url = analytics_url
+        self.camera_id = camera_id
+        self.send_interval = send_interval_ms / 1000.0  # Convert to seconds
+        self.running = True
+        self.connection_errors = 0
+        self.max_errors = 10
+        
+    def run(self):
+        last_send_time = 0
+        
+        while self.running:
+            try:
+                current_time = time.time()
+                
+                # Only send if enough time has passed
+                if current_time - last_send_time >= self.send_interval:
+                    # Get frame from queue (non-blocking with timeout)
+                    try:
+                        img = self.frame_queue.get(timeout=0.1)
+                        
+                        # Convert image to JPEG and send
+                        jpeg_img = img.to_format(image.Format.FMT_JPEG)
+                        jpeg_bytes = jpeg_img.to_bytes()
+                        
+                        response = requests.post(
+                            f"{self.analytics_url}/upload_frame",
+                            data=jpeg_bytes,
+                            headers={
+                                'Content-Type': 'image/jpeg', 
+                                'X-Camera-ID': self.camera_id
+                            },
+                            timeout=1.0
+                        )
+                        
+                        if response.status_code == 200:
+                            self.connection_errors = 0  # Reset error count on success
+                            last_send_time = current_time
+                        else:
+                            self.connection_errors += 1
+                            
+                        # Mark task as done
+                        self.frame_queue.task_done()
+                        
+                    except queue.Empty:
+                        # No frame available, continue
+                        pass
+                    except Exception as e:
+                        self.connection_errors += 1
+                        if self.connection_errors % 5 == 0:
+                            print(f"[FrameSender] Send error ({self.connection_errors}): {e}")
+                else:
+                    # Sleep briefly to avoid busy waiting
+                    time.sleep(0.01)
+                    
+            except Exception as e:
+                print(f"[FrameSender] Unexpected error: {e}")
+                time.sleep(0.1)
+    
+    def stop(self):
+        self.running = False
+
+
+class StateReporterWorker(threading.Thread):
+    """Background thread for reporting camera state to analytics server"""
+    
+    def __init__(self, state_queue, analytics_url, camera_id, report_interval_ms=30000):
+        super().__init__(daemon=True)
+        self.state_queue = state_queue
+        self.analytics_url = analytics_url
+        self.camera_id = camera_id
+        self.report_interval = report_interval_ms / 1000.0  # Convert to seconds
+        self.running = True
+        
+    def run(self):
+        while self.running:
+            try:
+                # Get state data from queue
+                try:
+                    state_data = self.state_queue.get(timeout=1.0)
+                    
+                    response = requests.post(
+                        f"{self.analytics_url}/camera_state",
+                        json=state_data,
+                        timeout=2.0
+                    )
+                    
+                    if response.status_code == 200:
+                        print(f"[StateReporter] State reported successfully")
+                    else:
+                        print(f"[StateReporter] Failed: HTTP {response.status_code}")
+                        
+                    self.state_queue.task_done()
+                    
+                except queue.Empty:
+                    # No state data to report, continue
+                    pass
+                    
+            except Exception as e:
+                print(f"[StateReporter] Error: {e}")
+            
+            # Sleep for report interval
+            time.sleep(self.report_interval)
+    
+    def stop(self):
+        self.running = False
 
 
 # Image Paths
@@ -72,7 +225,7 @@ def save_camera_info(camera_id, camera_name, registration_status):
             "camera_id": camera_id,
             "camera_name": camera_name,
             "status": registration_status,
-            "saved_at": time.ticks_ms(),
+            "saved_at": time_ms(),
             "saved_locally": True
         }
         
@@ -116,12 +269,12 @@ def register_with_analytics(server_ip, existing_camera_id=None, server_port=8000
                 print("Please visit the analytics dashboard to name this camera.")
                 
                 # Wait for approval with timeout
-                start_time = time.ticks_ms()
+                start_time = time_ms()
                 timeout_ms = 300000  # 5 minutes
                 poll_interval_ms = 10000  # Check every 10 seconds
                 
-                while time.ticks_ms() - start_time < timeout_ms:
-                    print(f"Waiting for approval... ({((time.ticks_ms() - start_time) // 1000)}s elapsed)")
+                while time_ms() - start_time < timeout_ms:
+                    print(f"Waiting for approval... ({((time_ms() - start_time) // 1000)}s elapsed)")
                     time.sleep_ms(poll_interval_ms)
                     
                     # Try to get registration status
@@ -266,12 +419,11 @@ STEP = 8
 background_img = None
 prev_human_present = False
 no_human_counter = 0
-last_update_ms = time.ticks_ms()
+last_update_ms = time_ms()
 
 # Initialize Body Safety Checker
 safety_checker = BodySafetyChecker()
 SAFETY_CHECK_METHOD = CheckMethod.TORSO_HEAD
-USE_SAFETY_CHECK = True
 
 # Camera control flags
 control_flags = {
@@ -282,20 +434,20 @@ control_flags = {
     "show_safe_area": False,
     "use_safety_check": True,
     "analytics_mode": True,
-    "fall_algorithm": 3
+    "fall_algorithm": 3,
+    "hme": False
 }
 
 # Frame sending
 FRAME_SEND_INTERVAL_MS = 200
-last_frame_sent_time = time.ticks_ms()
+last_frame_sent_time = time_ms()
 
-# State reporting (informational only, doesn't update flags)
+# State reporting (informational only, doesn't update flags) - now handled by async worker
 STATE_REPORT_INTERVAL_MS = 30000
-last_state_report = time.ticks_ms()
+last_state_report = time_ms()
 
-# Flag syncing from analytics (read-only, every 500ms)
+# Flag syncing from analytics (read-only, every 500ms) - now handled by async worker
 FLAG_SYNC_INTERVAL_MS = 500
-last_flag_sync = 0
 flags_initialized = False
 
 # Connection management
@@ -307,6 +459,16 @@ analytics_server_available = False
 CONNECTION_RETRY_INTERVAL_MS = 10000
 last_connection_check = 0
 
+# Async queues for non-blocking operations
+flags_queue = queue.Queue(maxsize=10)
+frame_queue = queue.Queue(maxsize=5)
+state_queue = queue.Queue(maxsize=3)
+
+# Worker threads
+flag_sync_worker = None
+frame_sender_worker = None
+state_reporter_worker = None
+
 # Command server for receiving commands from analytics
 command_server_running = True
 received_commands = []
@@ -317,7 +479,7 @@ def save_control_flags():
     try:
         flags_data = {
             "control_flags": control_flags,
-            "timestamp": time.ticks_ms(),
+            "timestamp": time_ms(),
             "camera_id": CAMERA_ID,
             "saved_locally": True
         }
@@ -411,7 +573,7 @@ def report_camera_state():
         "control_flags": control_flags,  # Informational only, server won't use this to update flags
         "safe_areas": safety_checker.safe_polygons,
         "ip_address": server_ip,
-        "timestamp": time.ticks_ms()
+        "timestamp": time_ms()
     }
     
     try:
@@ -436,7 +598,7 @@ def send_frame_to_analytics(img):
     if not analytics_server_available or not control_flags.get("analytics_mode", True):
         return False
     
-    current_time = time.ticks_ms()
+    current_time = time_ms()
     time_since_last = current_time - last_frame_sent_time
 
     if time_since_last >= FRAME_SEND_INTERVAL_MS:
@@ -449,42 +611,31 @@ def send_frame_to_analytics(img):
 def get_pose_analysis_from_analytics():
     """Get pose analysis from analytics server"""
     if not analytics_server_available or not control_flags.get("analytics_mode", True):
-        # print(f"[DEBUG] Analytics server not available or not in analytics mode")
-        # print(f"[DEBUG] analytics_server_available: {analytics_server_available}")
-        # print(f"[DEBUG] analytics_mode flag: {control_flags.get('analytics_mode', True)}")
         return None
     
     try:
-        # print(f"[DEBUG] Requesting pose analysis from analytics server...")
         response = requests.get(
             f"{ANALYTICS_HTTP_URL}/pose_analysis?camera_id={CAMERA_ID}",
             timeout=2.0
         )
         
-        print(f"[DEBUG] Pose analysis response status: {response.status_code}")
-        
         if response.status_code == 200:
             analysis_data = response.json()
-            print(f"[DEBUG] Pose analysis data received: {analysis_data.get('status', 'unknown')}")
             
             # Check if we have valid data
             if analysis_data.get("status") == "no_data" or analysis_data.get("status") == "no_pose_data":
-                print(f"[DEBUG] Analytics server has no pose data yet")
                 return None
                 
             return analysis_data
         else:
-            print(f"[DEBUG] Pose analysis request failed: HTTP {response.status_code}")
             if response.status_code != 200:
                 try:
                     error_body = response.text
-                    print(f"[DEBUG] Error response: {error_body[:100]}")
                 except:
                     pass
             return None
             
     except Exception as e:
-        print(f"[DEBUG] Error getting pose analysis: {e}")
         return None
 
 def send_data_via_http(data_type, data):
@@ -497,7 +648,7 @@ def send_data_via_http(data_type, data):
         payload = {
             "type": data_type,
             "camera_id": CAMERA_ID,
-            "timestamp": time.ticks_ms(),
+            "timestamp": time_ms(),
             "data": data
         }
         
@@ -575,7 +726,7 @@ def start_new_recording():
     recorder.start(video_path, detector.input_width(), detector.input_height())
     skeleton_saver_2d.start_new_log(timestamp)
     frame_id = 0
-    recording_start_time = time.ticks_ms()
+    recording_start_time = time_ms()
     is_recording = True
     
     if analytics_server_available and control_flags.get("analytics_mode", True):
@@ -797,7 +948,7 @@ def check_and_fallback_to_local():
     """Check analytics server connection and fall back to local mode if needed"""
     global analytics_server_available, last_connection_check
     
-    current_time = time.ticks_ms()
+    current_time = time_ms()
     
     if current_time - last_connection_check > CONNECTION_RETRY_INTERVAL_MS:
         was_available = analytics_server_available
@@ -875,7 +1026,7 @@ print(f"\n=== Starting Camera: {CAMERA_NAME} ===")
 print(f"Camera ID: {CAMERA_ID}")
 print(f"Camera IP: {server_ip}")
 
-# Initial flag sync on connection establishment
+# Initial flag sync and start async workers
 if not sync_flags_from_server():
     print("Warning: Cannot connect to analytics server")
     print("Using locally stored configuration")
@@ -884,8 +1035,20 @@ if not sync_flags_from_server():
 else:
     print("Analytics server connection successful")
     control_flags["analytics_mode"] = True
-    # Initial sync done, flags will be synced every 500ms in main loop
-    last_flag_sync = time.ticks_ms()
+    
+    # Start async workers for non-blocking operations
+    print("Starting async workers...")
+    flag_sync_worker = FlagSyncWorker(flags_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
+    frame_sender_worker = FrameSenderWorker(frame_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
+    state_reporter_worker = StateReporterWorker(state_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
+    
+    flag_sync_worker.start()
+    frame_sender_worker.start()
+    state_reporter_worker.start()
+    
+    print("✅ Async workers started successfully")
+    
+    # Initial sync done, flags will be synced every 500ms in background thread
 
 print(f"\n=== Starting with Configuration ===")
 print(f"Analytics Mode: {'ENABLED' if control_flags['analytics_mode'] else 'DISABLED'}")
@@ -895,7 +1058,7 @@ print("\nStarting camera stream...")
 
 # === Main loop ===
 frame_counter = 0
-last_gc_time = time.ticks_ms()
+last_gc_time = time_ms()
 GC_INTERVAL_MS = 10000
 last_pose_analysis_time = 0
 POSE_ANALYSIS_INTERVAL_MS = 500  # Get pose analysis every 500ms
@@ -904,50 +1067,45 @@ POSE_ANALYSIS_INTERVAL_MS = 500  # Get pose analysis every 500ms
 server_pose_analysis = {}
 
 while not app.need_exit():
+    # Performance timing start
+    frame_start_time = time_ms()
+    
+    # 1. Camera Read
+    camera_start = time_ms()
     raw_img = cam.read()
+    camera_time = time_ms() - camera_start
     
     # Check analytics server connection and handle fallback
     check_and_fallback_to_local()
     
-    # Periodically sync flags from analytics server (every 500ms, read-only)
-    current_time = time.ticks_ms()
-    if analytics_server_available and (current_time - last_flag_sync >= FLAG_SYNC_INTERVAL_MS):
-        sync_flags_from_server()
-        last_flag_sync = current_time
+    # Process flag updates from async worker (non-blocking)
+    try:
+        while not flags_queue.empty():
+            msg_type, data = flags_queue.get_nowait()
+            if msg_type == "flags_update":
+                # Update control flags with server data
+                for key in control_flags.keys():
+                    if key in data:
+                        control_flags[key] = data[key]
+                print(f"[ASYNC] Flags synced from server")
+    except queue.Empty:
+        pass
     
     # Process received commands
     with commands_lock:
         while received_commands:
             cmd_data = received_commands.pop(0)
             handle_command(cmd_data.get("command"), cmd_data.get("value"))
-            # Trigger immediate flag sync after command to get latest flags faster
-            if analytics_server_available:
-                sync_flags_from_server()
-                last_flag_sync = time.ticks_ms()
+            # Commands are processed via async flag sync worker, no need for manual sync
     
     # Periodically get pose analysis from analytics server
     if control_flags["analytics_mode"]:
-        current_time = time.ticks_ms()
+        current_time = time_ms()
         if current_time - last_pose_analysis_time > POSE_ANALYSIS_INTERVAL_MS:
-            print(f"[DEBUG] Requesting pose analysis (interval reached)")
             analysis_data = get_pose_analysis_from_analytics()
             if analysis_data:
-                print(f"[DEBUG] Received pose analysis: track_id={analysis_data.get('track_id')}, status={analysis_data.get('status')}")
-                print(f"[DEBUG] Primary alert: {analysis_data.get('primary_alert')}")
-                
-                # Check fall detection data
-                fall_detection = analysis_data.get("fall_detection", {})
-                print(f"[DEBUG] Fall detection methods available: {list(fall_detection.keys())}")
-                
-                for method_num in [1, 2, 3]:
-                    method_key = f"method{method_num}"
-                    if method_key in fall_detection:
-                        method_data = fall_detection[method_key]
-                        print(f"[DEBUG]   Method {method_num}: detected={method_data.get('detected')}, counter={method_data.get('counter')}")
-                
                 server_pose_analysis = analysis_data
             else:
-                print(f"[DEBUG] No pose analysis data received from server")
                 server_pose_analysis = {}
             last_pose_analysis_time = current_time
     
@@ -959,9 +1117,11 @@ while not app.need_exit():
         save_control_flags()
         print("Background updated from request")
     
-    # Run segmentation for background updates and human detection
+    # 2. Segmentation (background update and human detection)
+    seg_start = time_ms()
     objs_seg = segmentor.detect(raw_img, conf_th=0.5, iou_th=0.45)
     current_human_present = any(segmentor.labels[obj.class_id] in ["person", "human"] for obj in objs_seg)
+    seg_time = time_ms() - seg_start
     bg_updated = False
 
     # Background update logic
@@ -971,23 +1131,29 @@ while not app.need_exit():
             if no_human_counter >= NO_HUMAN_CONFIRM_FRAMES:
                 background_img = raw_img.copy()
                 background_img.save(BACKGROUND_PATH)
-                last_update_ms = time.ticks_ms()
+                last_update_ms = time_ms()
                 no_human_counter = 0
                 bg_updated = True
         else:
             no_human_counter = 0
-            if time.ticks_ms() - last_update_ms > UPDATE_INTERVAL_MS:
+            if time_ms() - last_update_ms > UPDATE_INTERVAL_MS:
+                bg_update_start = time_ms()
                 background_img = update_background(background_img, raw_img, objs_seg)
                 background_img.save(BACKGROUND_PATH)
-                last_update_ms = time.ticks_ms()
+                bg_update_time = time_ms() - bg_update_start
+                print(f"[PERF] Background update: {bg_update_time}ms")
+                last_update_ms = time_ms()
                 bg_updated = True
 
         prev_human_present = current_human_present
 
-        if time.ticks_ms() - last_update_ms > UPDATE_INTERVAL_MS and not bg_updated:
+        if time_ms() - last_update_ms > UPDATE_INTERVAL_MS and not bg_updated:
+            bg_update_start = time_ms()
             background_img = update_background(background_img, raw_img, objs_seg)
             background_img.save(BACKGROUND_PATH)
-            last_update_ms = time.ticks_ms()
+            bg_update_time = time_ms() - bg_update_start
+            print(f"[PERF] Background update: {bg_update_time}ms")
+            last_update_ms = time_ms()
     else:
         no_human_counter = 0
         prev_human_present = current_human_present
@@ -1001,8 +1167,11 @@ while not app.need_exit():
         else:
             img = raw_img.copy()
 
-    # Pose detection and tracking
+    # 3. Pose detection and tracking
+    pose_start = time_ms()
     objs = detector.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
+    pose_time = time_ms() - pose_start
+    print(f"[PERF] Pose detection: {pose_time}ms, found {len(objs)} objects")
     
     pose_human_present = len(objs) > 0
     human_present = current_human_present or pose_human_present
@@ -1013,7 +1182,7 @@ while not app.need_exit():
     
     # Recording logic
     if control_flags.get("record", False):
-        now = time.ticks_ms()
+        now = time_ms()
         
         if not is_recording:
             if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
@@ -1036,8 +1205,11 @@ while not app.need_exit():
             stop_recording()
 
     # Process tracking and drawing
+    tracking_start = time_ms()
     out_bbox = yolo_objs_to_tracker_objs(objs)
     tracks = tracker0.update(out_bbox)
+    tracking_time = time_ms() - tracking_start
+    print(f"[PERF] Tracking: {tracking_time}ms, {len(tracks)} tracks")
 
     if is_recording:
         frame_id += 1
@@ -1056,10 +1228,15 @@ while not app.need_exit():
             for obj in objs:
                 if abs(obj.x - tracker_obj.x) < 10 and abs(obj.y - tracker_obj.y) < 10:
                     keypoints_np = to_keypoints_np(obj.points)
-                    timestamp = time.ticks_ms()
+                    timestamp = time_ms()
 
                     # Get pose data based on mode
                     pose_data = None
+                    pose_eval_start = time_ms()
+                    
+                    # Get HME flag from centralized control_flags
+                    use_hme = control_flags.get("hme", False)
+                    
                     if control_flags["analytics_mode"]:
                         # In analytics mode, send data based on HME setting
                         skeletal_data = {
@@ -1069,13 +1246,12 @@ while not app.need_exit():
                             "timestamp": timestamp
                         }
                         
-                        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
-                        if USE_HME:
+                        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten(), use_hme)
+                        if use_hme:
                             # Get encrypted features from pose estimator
                             if pose_data and 'encrypted_features' in pose_data:
                                 skeletal_data["encrypted_features"] = pose_data['encrypted_features']
                                 skeletal_data["hme_mode"] = True
-                                print(f"[HME] Sending encrypted features for track {track.id}")
                         else:
                             # Plain mode: send raw keypoints
                             if pose_data:
@@ -1085,7 +1261,11 @@ while not app.need_exit():
                         send_data_via_http("skeletal_data", skeletal_data)
                     else:
                         # In local mode, do pose estimation locally
-                        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
+                        pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten(), use_hme)
+                    
+                    pose_eval_time = time_ms() - pose_eval_start
+                    if pose_eval_time > 10:  # Only log if pose evaluation takes more than 10ms
+                        print(f"[PERF] Pose evaluation: {pose_eval_time}ms")
                     
                     # Send alerts for fall detection (only in analytics mode)
                     if control_flags["analytics_mode"] and track.id in fall_ids:
@@ -1122,7 +1302,7 @@ while not app.need_exit():
                         (fall_detected_bbox_only, counter_bbox_only,
                          fall_detected_motion_pose_and, counter_motion_pose_and,
                          fall_detected_flexible, counter_flexible) = get_fall_info(
-                            tracker_obj, online_targets, idx, fallParam, queue_size, fps, pose_data
+                            tracker_obj, online_targets, idx, fallParam, queue_size, fps, pose_data, use_hme
                         )
                         
                         # Store results based on selected algorithm
@@ -1156,9 +1336,6 @@ while not app.need_exit():
                         server_track_id = server_pose_analysis.get("track_id")
                         fall_detection = server_pose_analysis.get("fall_detection", {})
                         
-                        print(f"[DEBUG] Analytics Mode: server_track_id={server_track_id}, current_track_id={track.id}")
-                        print(f"[DEBUG] Fall detection data keys: {list(fall_detection.keys())}")
-                        
                         # Get selected algorithm
                         current_fall_algorithm = control_flags.get("fall_algorithm", 3)
                         
@@ -1169,20 +1346,15 @@ while not app.need_exit():
                             method_data = fall_detection[method_key]
                             current_fall_detected = method_data.get("detected", False)
                             current_fall_counter = method_data.get("counter", 0)
-                            print(f"[DEBUG] Analytics Mode - Algorithm {current_fall_algorithm}, Detected: {current_fall_detected}, Counter: {current_fall_counter}")
                             
                             # Update fall_ids based on detection
                             if current_fall_detected:
                                 fall_ids.add(track.id)
-                                print(f"[ANALYTICS ALERT] Fall detected (Algorithm {current_fall_algorithm}) for track_id {track.id}")
                             elif track.id in fall_ids:
                                 fall_ids.remove(track.id)
                         else:
-                            print(f"[DEBUG] Method {current_fall_algorithm} not found in fall_detection")
                             current_fall_detected = False
                             current_fall_counter = 0
-                        
-                        print(f"[DEBUG] Analytics Mode - Algorithm {current_fall_algorithm}, Detected: {current_fall_detected}, Counter: {current_fall_counter}")
 
                     # Safety area check (uses pose_data from either mode)
                     is_lying_down = False
@@ -1295,7 +1467,7 @@ while not app.need_exit():
 
     # Draw recording status
     if is_recording:
-        recording_time = (time.ticks_ms() - recording_start_time) // 1000
+        recording_time = (time_ms() - recording_start_time) // 1000
         status_text = f"REC {recording_time}s"
         
         font_scale = 0.5
@@ -1331,27 +1503,75 @@ while not app.need_exit():
 
     disp.show(img)
     
-    # Send frame to analytics server if in analytics mode
+    # 7. Send frame to analytics server if in analytics mode (async)
     if control_flags["analytics_mode"] and analytics_server_available:
-        send_frame_to_analytics(img)
+        # Add frame to queue for async worker to send
+        try:
+            frame_queue.put_nowait(img)
+        except queue.Full:
+            # Queue is full, skip this frame to avoid blocking
+            print("[ASYNC] Frame queue full, skipping frame")
     
-    # Periodically report state if in analytics mode and connected
+    # Periodically report state if in analytics mode and connected (async)
     if control_flags["analytics_mode"] and analytics_server_available:
-        current_time = time.ticks_ms()
+        current_time = time_ms()
         if current_time - last_state_report > STATE_REPORT_INTERVAL_MS:
-            report_camera_state()
-            last_state_report = current_time
+            # Prepare state data for async worker
+            state_data = {
+                "camera_id": CAMERA_ID,
+                "camera_name": CAMERA_NAME,
+                "control_flags": control_flags,  # Informational only, server won't use this to update flags
+                "safe_areas": safety_checker.safe_polygons,
+                "ip_address": server_ip,
+                "timestamp": time_ms()
+            }
+            
+            # Add to state queue for async worker to send
+            try:
+                state_queue.put_nowait(state_data)
+                last_state_report = current_time
+            except queue.Full:
+                print("[ASYNC] State queue full, skipping state report")
+    
+    # 8. Display rendering
+    display_start = time_ms()
+    disp.show(img)
+    display_time = time_ms() - display_start
+    
+    # 9. Frame timing summary (every 30 frames to avoid spam)
+    frame_total_time = time_ms() - frame_start_time
+    frame_counter += 1
+    
+    if frame_counter % 30 == 0:
+        # Ensure all timing variables are available
+        cam_time = camera_time if 'camera_time' in locals() else 0
+        seg_t = seg_time if 'seg_time' in locals() else 0
+        pose_t = pose_time if 'pose_time' in locals() else 0
+        track_t = tracking_time if 'tracking_time' in locals() else 0
+        disp_t = display_time if 'display_time' in locals() else 0
+        
+        print(f"[PERF] Frame {frame_counter}: Total={frame_total_time}ms, Camera={cam_time}ms, Seg={seg_t}ms, Pose={pose_t}ms, Track={track_t}ms, Display={disp_t}ms")
     
     # Periodic garbage collection
-    current_time = time.ticks_ms()
+    current_time = time_ms()
     if current_time - last_gc_time > GC_INTERVAL_MS:
+        gc_start = time_ms()
         gc.collect()
+        gc_time = time_ms() - gc_start
+        print(f"[PERF] Garbage collection: {gc_time}ms")
         last_gc_time = current_time
-    
-    frame_counter += 1
 
 # Final cleanup
 command_server.stop()
+
+# Stop async workers
+if 'flag_sync_worker' in locals() and flag_sync_worker:
+    flag_sync_worker.stop()
+if 'frame_sender_worker' in locals() and frame_sender_worker:
+    frame_sender_worker.stop()
+if 'state_reporter_worker' in locals() and state_reporter_worker:
+    state_reporter_worker.stop()
+
 if is_recording:
     stop_recording()
 

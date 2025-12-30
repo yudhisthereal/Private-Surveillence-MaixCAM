@@ -12,7 +12,6 @@ class SkeletonSaver2D:
 
     def add_keypoints(self, frame_id, person_id, keypoints_flat, fall_status=0):
         if not keypoints_flat:
-            # print(f"[DEBUG] No keypoints for frame {frame_id}")
             return
 
         # Convert flat list to pairs
@@ -20,12 +19,10 @@ class SkeletonSaver2D:
         num_points = len(pairs)
         flat_coords = keypoints_flat  # already flattened
 
-        # print(f"[DEBUG] Frame {frame_id} – saving {num_points} keypoints")
         self.data_buffer.append([frame_id, person_id] + flat_coords + [fall_status])
 
     def save_to_csv(self):
         if not self.log_filename:
-            # print("[DEBUG] specify log file name first!")
             return
         
         """Save buffered keypoints to CSV using video filename as base"""
@@ -37,7 +34,6 @@ class SkeletonSaver2D:
         os.makedirs(self.log_dir, exist_ok=True)
 
         if not self.data_buffer:
-            print("[WARNING] No keypoints to save.")
             return
 
         num_kp = (len(self.data_buffer[0]) - 3) // 2
@@ -48,5 +44,4 @@ class SkeletonSaver2D:
             writer.writerow(header)
             writer.writerows(self.data_buffer)
 
-        # print(f"[INFO] Saved keypoints to {csv_filename}")
         self.data_buffer = []  # Clear buffer after save

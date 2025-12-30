@@ -1,4 +1,9 @@
-DEBUG_ENABLED = True
+# Debug and Performance Configuration
+# Set DEBUG_ENABLED to False to disable all debug prints for production
+DEBUG_ENABLED = False
+
+# Set PERF_ENABLED to True to enable performance measurements
+PERF_ENABLED = True
 
 def debug_print(tag, message, *args):
     """Print debug messages if debugging is enabled"""
@@ -25,3 +30,14 @@ def log_fall_detection(fall_detection, algorithm=3):
         if fall_detection and method_key in fall_detection:
             data = fall_detection[method_key]
             print(f"[DEBUG FALL Algorithm {algorithm}] Detected: {data.get('detected')}, Counter: {data.get('counter')}")
+
+def perf_measure(func_name, duration_ms):
+    """Log performance measurements if enabled"""
+    if PERF_ENABLED and duration_ms > 5:  # Only log if operation takes more than 5ms
+        print(f"[PERF] {func_name}: {duration_ms:.1f}ms")
+
+def perf_summary(frame_num, total_time, breakdown):
+    """Log frame performance summary"""
+    if PERF_ENABLED:
+        breakdown_str = ", ".join([f"{k}={v:.1f}ms" for k, v in breakdown.items()])
+        print(f"[PERF] Frame {frame_num}: Total={total_time:.1f}ms, {breakdown_str}")
