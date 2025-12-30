@@ -428,6 +428,7 @@ NO_HUMAN_CONFIRM_FRAMES = 10
 STEP = 8
 
 # Background state variables
+background_update_in_progress = False
 background_img = None
 prev_human_present = False
 no_human_counter = 0
@@ -574,16 +575,16 @@ def send_frame_simple(img):
         return False
 
 def report_camera_state():
-    """Report state to analytics server (informational only, does NOT update control_flags)"""
+    """Report state to analytics server - DO NOT include control_flags"""
     if not analytics_server_available:
         return False
     
-    # Report state but note that control_flags are informational only
-    # Analytics server will preserve flags from web UI, not update from camera
+    # Report state WITHOUT control_flags
+    # Control flags are managed by web UI only
     state = {
         "camera_id": CAMERA_ID,
         "camera_name": CAMERA_NAME,
-        "control_flags": control_flags,  # Informational only, server won't use this to update flags
+        # DO NOT include control_flags - they are read-only from camera's perspective
         "safe_areas": safety_checker.safe_polygons,
         "ip_address": server_ip,
         "timestamp": time_ms()
@@ -716,6 +717,41 @@ def update_safety_checker_polygons(safe_areas=None):
             
     except Exception as e:
         print(f"Error updating safety checker: {e}")
+
+def send_command_to_analytics_async(command, value, callback=None):
+    """Send command to analytics server in background thread with optional callback"""
+    def send_command():
+        try:
+            payload = {
+                "command": command,
+                "value": value,
+                "camera_id": CAMERA_ID
+            }
+            
+            response = requests.post(
+                f"{ANALYTICS_HTTP_URL}/command",
+                json=payload,
+                timeout=2.0
+            )
+            
+            if response.status_code == 200:
+                print(f"[ASYNC COMMAND] {command}={value} sent successfully")
+                if callback:
+                    callback(True)  # Success callback
+            else:
+                print(f"[ASYNC COMMAND] Failed: HTTP {response.status_code}")
+                if callback:
+                    callback(False)  # Failure callback
+                
+        except Exception as e:
+            print(f"[ASYNC COMMAND] Error: {e}")
+            if callback:
+                callback(False)  # Failure callback
+    
+    # Start thread
+    thread = threading.Thread(target=send_command, daemon=True)
+    thread.start()
+    return thread
 
 def handle_command(command, value):
     """Handle command from analytics server or local input"""
@@ -1135,12 +1171,39 @@ while not app.need_exit():
             last_pose_analysis_time = current_time
     
     # Check for background update request
-    if control_flags.get("set_background", False):
+    if control_flags.get("set_background", False) and not background_update_in_progress:
+        print("[BACKGROUND] Starting background update...")
+        
+        # Update background image
         background_img = raw_img.copy()
         background_img.save(BACKGROUND_PATH)
+        
+        # Mark update in progress
+        background_update_in_progress = True
+        
+        # Define callback to reset background_update_in_progress when analytics confirms
+        def reset_background_lock(success):
+            global background_update_in_progress
+            if success:
+                background_update_in_progress = False
+                print("[BACKGROUND] Analytics confirmed reset, ready for next update")
+            else:
+                # If failed, still unlock after a short delay to prevent deadlock
+                print("[BACKGROUND] Analytics reset failed, unlocking anyway")
+                background_update_in_progress = False
+        
+        # Send async command to analytics to reset the flag with callback
+        if analytics_server_available:
+            send_command_to_analytics_async("set_background", False, callback=reset_background_lock)
+            print("[BACKGROUND] Reset command sent to analytics (async)")
+        else:
+            print("[BACKGROUND] Analytics not available, resetting locally only")
+            background_update_in_progress = False
+        
+        # Reset locally
         control_flags["set_background"] = False
         save_control_flags()
-        print("Background updated from request")
+        print("[BACKGROUND] Background updated and local flag reset")
     
     # 2. Segmentation (background update and human detection)
     seg_start = time_ms()
@@ -1166,7 +1229,7 @@ while not app.need_exit():
                 background_img = update_background(background_img, raw_img, objs_seg)
                 background_img.save(BACKGROUND_PATH)
                 bg_update_time = time_ms() - bg_update_start
-                print(f"[PERF] Background update: {bg_update_time}ms")
+                # print(f"[PERF] Background update: {bg_update_time}ms")
                 last_update_ms = time_ms()
                 bg_updated = True
 
@@ -1177,7 +1240,7 @@ while not app.need_exit():
             background_img = update_background(background_img, raw_img, objs_seg)
             background_img.save(BACKGROUND_PATH)
             bg_update_time = time_ms() - bg_update_start
-            print(f"[PERF] Background update: {bg_update_time}ms")
+            # print(f"[PERF] Background update: {bg_update_time}ms")
             last_update_ms = time_ms()
     else:
         no_human_counter = 0
@@ -1196,7 +1259,7 @@ while not app.need_exit():
     pose_start = time_ms()
     objs = detector.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
     pose_time = time_ms() - pose_start
-    print(f"[PERF] Pose detection: {pose_time}ms, found {len(objs)} objects")
+    # print(f"[PERF] Pose detection: {pose_time}ms, found {len(objs)} objects")
     
     pose_human_present = len(objs) > 0
     human_present = current_human_present or pose_human_present
@@ -1234,7 +1297,7 @@ while not app.need_exit():
     out_bbox = yolo_objs_to_tracker_objs(objs)
     tracks = tracker0.update(out_bbox)
     tracking_time = time_ms() - tracking_start
-    print(f"[PERF] Tracking: {tracking_time}ms, {len(tracks)} tracks")
+    # print(f"[PERF] Tracking: {tracking_time}ms, {len(tracks)} tracks")
 
     if is_recording:
         frame_id += 1
@@ -1288,9 +1351,9 @@ while not app.need_exit():
                         # In local mode, do pose estimation locally
                         pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten(), use_hme)
                     
-                    pose_eval_time = time_ms() - pose_eval_start
-                    if pose_eval_time > 10:  # Only log if pose evaluation takes more than 10ms
-                        print(f"[PERF] Pose evaluation: {pose_eval_time}ms")
+                    # pose_eval_time = time_ms() - pose_eval_start
+                    # if pose_eval_time > 10:  # Only log if pose evaluation takes more than 10ms
+                        # print(f"[PERF] Pose evaluation: {pose_eval_time}ms")
                     
                     # Send alerts for fall detection (only in analytics mode)
                     if control_flags["analytics_mode"] and track.id in fall_ids:
@@ -1545,7 +1608,7 @@ while not app.need_exit():
             state_data = {
                 "camera_id": CAMERA_ID,
                 "camera_name": CAMERA_NAME,
-                "control_flags": control_flags,  # Informational only, server won't use this to update flags
+                # DO NOT include control_flags
                 "safe_areas": safety_checker.safe_polygons,
                 "ip_address": server_ip,
                 "timestamp": time_ms()
@@ -1575,7 +1638,7 @@ while not app.need_exit():
         track_t = tracking_time if 'tracking_time' in locals() else 0
         disp_t = display_time if 'display_time' in locals() else 0
         
-        print(f"[PERF] Frame {frame_counter}: Total={frame_total_time}ms, Camera={cam_time}ms, Seg={seg_t}ms, Pose={pose_t}ms, Track={track_t}ms, Display={disp_t}ms")
+        # print(f"[PERF] Frame {frame_counter}: Total={frame_total_time}ms, Camera={cam_time}ms, Seg={seg_t}ms, Pose={pose_t}ms, Track={track_t}ms, Display={disp_t}ms")
     
     # Periodic garbage collection
     current_time = time_ms()
