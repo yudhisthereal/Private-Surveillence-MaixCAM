@@ -1,0 +1,25 @@
+id: privatecctv
+name: Private CCTV
+version: 1.0.0
+author: yudhisthereal
+icon: ''
+desc: >-
+  a privacy preserving cctv where human figures are replaced by stickman
+  figures, complete with fall detection and recording (video and csv for
+  keypoints) features.
+files:
+  - model/yolo11n_pose.mud
+  - model/yolo11n-pose_320x224_int8.cvimodel
+  - pose/__init__.py
+  - pose/judge_fall.py
+  - pose/pose_estimation.py
+  - static/index.html
+  - static/script.js
+  - static/style.css
+  - tools/__init__.py
+  - tools/skeleton_saver.py
+  - tools/time_utils.py
+  - tools/video_record.py
+  - tools/web_server.py
+  - tools/wifi_connect.py
+  - main.py
