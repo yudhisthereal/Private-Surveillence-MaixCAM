@@ -5,4 +5,4 @@ playground/
 hme_from_sona/
 pose/
 analytics.py
-./ssh
+.ssh/
