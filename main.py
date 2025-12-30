@@ -21,12 +21,13 @@ import select
 import time
 
 # Async Worker Classes for Non-Blocking Operations
-class FlagSyncWorker(threading.Thread):
-    """Background thread for syncing flags from analytics server"""
+class FlagAndSafeAreaSyncWorker(threading.Thread):
+    """Background thread for syncing flags AND safe areas from analytics server"""
     
-    def __init__(self, flags_queue, analytics_url, camera_id, sync_interval_ms=500):
+    def __init__(self, flags_queue, safe_areas_queue, analytics_url, camera_id, sync_interval_ms=500):
         super().__init__(daemon=True)
         self.flags_queue = flags_queue
+        self.safe_areas_queue = safe_areas_queue
         self.analytics_url = analytics_url
         self.camera_id = camera_id
         self.sync_interval = sync_interval_ms / 1000.0  # Convert to seconds
@@ -37,16 +38,28 @@ class FlagSyncWorker(threading.Thread):
     def run(self):
         while self.running:
             try:
-                # Check server connection and get flags
-                response = requests.get(
+                # 1. Get control flags from server
+                flags_response = requests.get(
                     f"{self.analytics_url}/camera_state?camera_id={self.camera_id}",
                     timeout=1.0
                 )
                 
-                if response.status_code == 200:
-                    flags = response.json()
+                if flags_response.status_code == 200:
+                    flags = flags_response.json()
                     # Put flags in queue for main thread to consume
                     self.flags_queue.put(("flags_update", flags))
+                    
+                    # 2. Get safe areas from server
+                    safe_areas_response = requests.get(
+                        f"{self.analytics_url}/get_safe_areas?camera_id={self.camera_id}",
+                        timeout=1.0
+                    )
+                    
+                    if safe_areas_response.status_code == 200:
+                        safe_areas = safe_areas_response.json()
+                        # Put safe areas in queue for main thread to consume
+                        self.safe_areas_queue.put(("safe_areas_update", safe_areas))
+                    
                     self.connection_errors = 0  # Reset error count on success
                 else:
                     self.connection_errors += 1
@@ -54,14 +67,13 @@ class FlagSyncWorker(threading.Thread):
             except Exception as e:
                 self.connection_errors += 1
                 if self.connection_errors % 5 == 0:  # Log every 5th error
-                    print(f"[FlagSync] Connection error ({self.connection_errors}): {e}")
+                    print(f"[FlagAndSafeAreaSync] Connection error ({self.connection_errors}): {e}")
             
             # Sleep for sync interval
             time.sleep(self.sync_interval)
     
     def stop(self):
         self.running = False
-
 
 class FrameSenderWorker(threading.Thread):
     """Background thread for sending frames to analytics server"""
@@ -446,7 +458,7 @@ last_frame_sent_time = time_ms()
 STATE_REPORT_INTERVAL_MS = 30000
 last_state_report = time_ms()
 
-# Flag syncing from analytics (read-only, every 500ms) - now handled by async worker
+# Flag and safe area syncing from analytics (read-only, every 500ms) - now handled by async worker
 FLAG_SYNC_INTERVAL_MS = 500
 flags_initialized = False
 
@@ -461,11 +473,12 @@ last_connection_check = 0
 
 # Async queues for non-blocking operations
 flags_queue = queue.Queue(maxsize=10)
+safe_areas_queue = queue.Queue(maxsize=5)
 frame_queue = queue.Queue(maxsize=5)
 state_queue = queue.Queue(maxsize=3)
 
 # Worker threads
-flag_sync_worker = None
+flag_and_safe_area_sync_worker = None
 frame_sender_worker = None
 state_reporter_worker = None
 
@@ -1038,7 +1051,7 @@ else:
     
     # Start async workers for non-blocking operations
     print("Starting async workers...")
-    flag_sync_worker = FlagSyncWorker(flags_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
+    flag_sync_worker = FlagAndSafeAreaSyncWorker(flags_queue, safe_areas_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
     frame_sender_worker = FrameSenderWorker(frame_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
     state_reporter_worker = StateReporterWorker(state_queue, ANALYTICS_HTTP_URL, CAMERA_ID)
     
@@ -1088,6 +1101,18 @@ while not app.need_exit():
                     if key in data:
                         control_flags[key] = data[key]
                 print(f"[ASYNC] Flags synced from server")
+    except queue.Empty:
+        pass
+    
+    # Process safe area updates from async worker (non-blocking)
+    try:
+        while not safe_areas_queue.empty():
+            msg_type, data = safe_areas_queue.get_nowait()
+            if msg_type == "safe_areas_update":
+                # Update safe areas with server data
+                if isinstance(data, list):
+                    update_safety_checker_polygons(data)
+                    print(f"[ASYNC] Safe areas synced from server ({len(data)} polygons)")
     except queue.Empty:
         pass
     
@@ -1565,8 +1590,8 @@ while not app.need_exit():
 command_server.stop()
 
 # Stop async workers
-if 'flag_sync_worker' in locals() and flag_sync_worker:
-    flag_sync_worker.stop()
+if 'flag_and_safe_area_sync_worker' in locals() and flag_and_safe_area_sync_worker:
+    flag_and_safe_area_sync_worker.stop()
 if 'frame_sender_worker' in locals() and frame_sender_worker:
     frame_sender_worker.stop()
 if 'state_reporter_worker' in locals() and state_reporter_worker:
