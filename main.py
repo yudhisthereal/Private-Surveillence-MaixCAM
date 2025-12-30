@@ -28,11 +28,195 @@ BACKGROUND_PATH = "/root/static/background.jpg"
 SAFE_AREA_FILE = "/root/safe_areas.json"
 STATE_FILE = "/root/camera_state.json"
 LOCAL_FLAGS_FILE = "/root/control_flags.json"
+CAMERA_INFO_FILE = "/root/camera_info.json"
+
+# Camera Identity
+def get_mac_address():
+    """Get MAC address of the device"""
+    try:
+        import ubinascii
+        import network
+        wlan = network.WLAN()
+        mac = wlan.config('mac')
+        return ubinascii.hexlify(mac).decode()
+    except:
+        return "unknown"
+
+def load_camera_info():
+    """Load camera ID and name from local file"""
+    try:
+        if os.path.exists(CAMERA_INFO_FILE):
+            with open(CAMERA_INFO_FILE, 'r') as f:
+                data = json.load(f)
+                camera_id = data.get("camera_id")
+                camera_name = data.get("camera_name")
+                registration_status = data.get("status", "unregistered")
+                
+                if camera_id and camera_name:
+                    print(f"Loaded camera info: {camera_name} ({camera_id}) - Status: {registration_status}")
+                    return camera_id, camera_name, registration_status
+    except Exception as e:
+        print(f"Error loading camera info: {e}")
+    
+    return None, None, "unregistered"
+
+def save_camera_info(camera_id, camera_name, registration_status):
+    # if registration failed (indicated by default IDs)
+    if camera_id in ["camera_000", "maixcam_000"]:
+        print("Registration failed, not saving camera info.")
+        return False
+
+    """Save camera ID and name to local file"""
+    try:
+        data = {
+            "camera_id": camera_id,
+            "camera_name": camera_name,
+            "status": registration_status,
+            "saved_at": time.ticks_ms(),
+            "saved_locally": True
+        }
+        
+        with open(CAMERA_INFO_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"Camera info saved: {camera_name} ({camera_id}) - Status: {registration_status}")
+        return True
+    except Exception as e:
+        print(f"Error saving camera info: {e}")
+        return False
+
+def register_with_analytics(server_ip, existing_camera_id=None, server_port=8000):
+    """Register camera with analytics server and get ID - IMPROVED with waiting"""
+    try:
+        # Request registration with existing camera_id if we have one
+        url = f"http://{server_ip}:{server_port}/register_camera"
+        
+        # Always send camera_id if we have one (even if it's a default one)
+        if existing_camera_id:
+            url += f"?camera_id={existing_camera_id}"
+        
+        print(f"Registering with analytics server: {url}")
+        response = requests.get(url, timeout=5.0)
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"Registration response: {result}")
+            status = result.get("status")
+            
+            if status == "registered" or status == "already_registered":
+                # Camera already registered
+                camera_id = result.get("camera_id")
+                camera_name = result.get("camera_name", f"Camera {camera_id.split('_')[-1]}")
+                print(f"✅ Camera already registered: {camera_name} ({camera_id})")
+                return camera_id, camera_name, "registered"
+            
+            elif status == "pending" or status == "pending_approval":
+                # Registration pending user approval
+                camera_id = result.get("camera_id")
+                print(f"⏳ Registration pending approval. Camera ID: {camera_id}")
+                print("Please visit the analytics dashboard to name this camera.")
+                
+                # Wait for approval with timeout
+                start_time = time.ticks_ms()
+                timeout_ms = 300000  # 5 minutes
+                poll_interval_ms = 10000  # Check every 10 seconds
+                
+                while time.ticks_ms() - start_time < timeout_ms:
+                    print(f"Waiting for approval... ({((time.ticks_ms() - start_time) // 1000)}s elapsed)")
+                    time.sleep_ms(poll_interval_ms)
+                    
+                    # Try to get registration status
+                    try:
+                        # Check camera registry to see if we've been approved
+                        registry_url = f"http://{server_ip}:{server_port}/camera_registry"
+                        registry_response = requests.get(registry_url, timeout=2.0)
+                        
+                        if registry_response.status_code == 200:
+                            registry_data = registry_response.json()
+                            cameras = registry_data.get("cameras", {})
+                            
+                            # Check if our camera_id is now registered
+                            if camera_id in cameras:
+                                camera_data = cameras[camera_id]
+                                approved_camera_name = camera_data.get("name", f"Camera {camera_id.split('_')[-1]}")
+                                print(f"✅ Camera approved: {approved_camera_name} ({camera_id})")
+                                return camera_id, approved_camera_name, "registered"
+                            
+                            # Also check pending registrations
+                            pending_url = f"http://{server_ip}:{server_port}/pending_registrations"
+                            pending_response = requests.get(pending_url, timeout=2.0)
+                            
+                            if pending_response.status_code == 200:
+                                pending_data = pending_response.json()
+                                pending_list = pending_data.get("pending", [])
+                                
+                                # If we're no longer in pending, we might have been approved
+                                still_pending = any(reg.get("camera_id") == camera_id for reg in pending_list)
+                                
+                                if not still_pending:
+                                    # Check registry again to be sure
+                                    registry_response2 = requests.get(registry_url, timeout=2.0)
+                                    if registry_response2.status_code == 200:
+                                        registry_data2 = registry_response2.json()
+                                        cameras2 = registry_data2.get("cameras", {})
+                                        
+                                        if camera_id in cameras2:
+                                            camera_data = cameras2[camera_id]
+                                            approved_camera_name = camera_data.get("name", f"Camera {camera_id.split('_')[-1]}")
+                                            print(f"✅ Camera approved: {approved_camera_name} ({camera_id})")
+                                            
+                                            # Save camera info immediately
+                                            save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status)
+                                            
+                                            # Force immediate frame upload to appear connected
+                                            print("Camera approved - starting immediate frame upload...")
+                                            
+                                            return camera_id, approved_camera_name, "registered"
+                                        else:
+                                            # We're not pending but not registered either - something went wrong
+                                            print(f"⚠️ Camera {camera_id} no longer pending but not registered")
+                                            return camera_id, "Pending Camera", "pending"
+                    
+                    except Exception as poll_error:
+                        print(f"Polling error: {poll_error}")
+                        # Continue waiting despite polling errors
+                
+                # Timeout reached
+                print(f"⏰ Registration timeout after {timeout_ms // 1000} seconds")
+                print(f"Using pending camera ID: {camera_id}")
+                return camera_id, "Pending Camera", "pending"
+            
+            else:
+                print(f"⚠️ Unexpected registration status: {status}")
+                camera_id = result.get("camera_id", "camera_000")
+                return camera_id, "Pending Camera", status
+        else:
+            print(f"❌ Registration failed: HTTP {response.status_code}")
+            return "camera_000", "Unnamed Camera", "unregistered"
+            
+    except Exception as e:
+        print(f"❌ Registration error: {e}")
+        import traceback
+        traceback.print_exc()
+        return "camera_000", "Unnamed Camera", "unregistered"
+
 
 # Analytics Server Setup
-ANALYTICS_SERVER_IP = "10.128.10.130"
-CAMERA_ID = "maixcam_001"
+ANALYTICS_SERVER_IP = "103.150.93.198"
+CAMERA_ID, CAMERA_NAME, registration_status = load_camera_info()
 ANALYTICS_HTTP_URL = f"http://{ANALYTICS_SERVER_IP}:8000"
+
+print(f"Current camera info: ID={CAMERA_ID}, Name={CAMERA_NAME}, Status={registration_status}")
+print(f"Current camera info: ID={CAMERA_ID}, Name={CAMERA_NAME}, Status={registration_status}")
+print(f"Current camera info: ID={CAMERA_ID}, Name={CAMERA_NAME}, Status={registration_status}")
+print(f"Current camera info: ID={CAMERA_ID}, Name={CAMERA_NAME}, Status={registration_status}")
+print(f"Current camera info: ID={CAMERA_ID}, Name={CAMERA_NAME}, Status={registration_status}")
+
+# Use existing camera_id if we have one, otherwise use None
+if registration_status != "registered":
+    CAMERA_ID, CAMERA_NAME, registration_status = register_with_analytics(
+        ANALYTICS_SERVER_IP, 
+        existing_camera_id=CAMERA_ID if CAMERA_ID and CAMERA_ID not in ["camera_000", "maixcam_000"] else None
+    )
 
 # Local server for receiving commands (runs on MaixCAM)
 LOCAL_PORT = 8080
@@ -105,9 +289,14 @@ control_flags = {
 FRAME_SEND_INTERVAL_MS = 200
 last_frame_sent_time = time.ticks_ms()
 
-# State reporting
+# State reporting (informational only, doesn't update flags)
 STATE_REPORT_INTERVAL_MS = 30000
 last_state_report = time.ticks_ms()
+
+# Flag syncing from analytics (read-only, every 500ms)
+FLAG_SYNC_INTERVAL_MS = 500
+last_flag_sync = 0
+flags_initialized = False
 
 # Connection management
 connection_error_count = 0
@@ -122,10 +311,6 @@ last_connection_check = 0
 command_server_running = True
 received_commands = []
 commands_lock = threading.Lock()
-
-# Track when flags were last changed locally to prevent sync overwriting
-flag_last_changed = {}  # key -> timestamp in ms
-FLAG_SYNC_PROTECTION_MS = 5000  # Don't sync flags changed within last 5 seconds
 
 def save_control_flags():
     """Save control flags to local storage"""
@@ -144,10 +329,8 @@ def save_control_flags():
     except Exception as e:
         print(f"Error saving control flags: {e}")
 
-def load_control_flags():
-    """Load control flags from local storage or analytics server"""
-    local_flags_loaded = False
-    
+def load_initial_flags():
+    """Load initial flags from local storage only if server is unavailable"""
     try:
         if os.path.exists(LOCAL_FLAGS_FILE):
             with open(LOCAL_FLAGS_FILE, 'r') as f:
@@ -156,60 +339,11 @@ def load_control_flags():
                     for key in control_flags.keys():
                         if key in data["control_flags"]:
                             control_flags[key] = data["control_flags"][key]
-                    local_flags_loaded = True
-                    print(f"Loaded control flags from local storage")
+                    print(f"Loaded initial flags from local storage")
                     return True
     except Exception as e:
-        print(f"Error loading control flags from local file: {e}")
+        print(f"Error loading initial flags from local file: {e}")
     
-    return local_flags_loaded
-
-def sync_flags_with_server():
-    """Try to sync flags with analytics server, fall back to local if unavailable"""
-    global analytics_server_available
-    
-    if check_server_connection():
-        try:
-            response = requests.get(
-                f"{ANALYTICS_HTTP_URL}/camera_state?camera_id={CAMERA_ID}",
-                timeout=2.0
-            )
-            
-            if response.status_code == 200:
-                flags = response.json()
-                current_time = time.ticks_ms()
-                
-                for key in control_flags.keys():
-                    if key in flags:
-                        # Don't overwrite flags that were changed recently
-                        last_changed = flag_last_changed.get(key, 0)
-                        time_since_change = current_time - last_changed
-                        
-                        if time_since_change > FLAG_SYNC_PROTECTION_MS:
-                            # Safe to sync - flag wasn't changed recently
-                            control_flags[key] = flags[key]
-                        else:
-                            # Flag was changed recently, skip syncing this flag
-                            print(f"Skipping sync for {key} (changed {time_since_change}ms ago)")
-                
-                control_flags["analytics_mode"] = True
-                analytics_server_available = True
-                
-                save_control_flags()
-                
-                print("Synced flags from analytics server")
-                return True
-            else:
-                print(f"Server responded with non-200: {response.status_code}")
-                analytics_server_available = False
-                
-        except Exception as e:
-            print(f"Error fetching flags from server: {e}")
-            analytics_server_available = False
-    else:
-        analytics_server_available = False
-    
-    print("Using locally stored flags (server unavailable)")
     return False
 
 def check_server_connection():
@@ -265,13 +399,16 @@ def send_frame_simple(img):
         return False
 
 def report_camera_state():
-    """Report state to analytics server"""
+    """Report state to analytics server (informational only, does NOT update control_flags)"""
     if not analytics_server_available:
         return False
     
+    # Report state but note that control_flags are informational only
+    # Analytics server will preserve flags from web UI, not update from camera
     state = {
         "camera_id": CAMERA_ID,
-        "control_flags": control_flags,
+        "camera_name": CAMERA_NAME,
+        "control_flags": control_flags,  # Informational only, server won't use this to update flags
         "safe_areas": safety_checker.safe_polygons,
         "ip_address": server_ip,
         "timestamp": time.ticks_ms()
@@ -312,13 +449,13 @@ def send_frame_to_analytics(img):
 def get_pose_analysis_from_analytics():
     """Get pose analysis from analytics server"""
     if not analytics_server_available or not control_flags.get("analytics_mode", True):
-        print(f"[DEBUG] Analytics server not available or not in analytics mode")
-        print(f"[DEBUG] analytics_server_available: {analytics_server_available}")
-        print(f"[DEBUG] analytics_mode flag: {control_flags.get('analytics_mode', True)}")
+        # print(f"[DEBUG] Analytics server not available or not in analytics mode")
+        # print(f"[DEBUG] analytics_server_available: {analytics_server_available}")
+        # print(f"[DEBUG] analytics_mode flag: {control_flags.get('analytics_mode', True)}")
         return None
     
     try:
-        print(f"[DEBUG] Requesting pose analysis from analytics server...")
+        # print(f"[DEBUG] Requesting pose analysis from analytics server...")
         response = requests.get(
             f"{ANALYTICS_HTTP_URL}/pose_analysis?camera_id={CAMERA_ID}",
             timeout=2.0
@@ -418,53 +555,17 @@ def update_safety_checker_polygons(safe_areas=None):
 
 def handle_command(command, value):
     """Handle command from analytics server or local input"""
-    global control_flags
-    
     print(f"Processing command: {command} = {value}")
-    current_time = time.ticks_ms()
     
-    if command == "toggle_record":
-        control_flags["record"] = bool(value)
-        flag_last_changed["record"] = current_time
-    elif command == "toggle_raw":
-        control_flags["show_raw"] = bool(value)
-        flag_last_changed["show_raw"] = current_time
-    elif command == "auto_update_bg":
-        control_flags["auto_update_bg"] = bool(value)
-        flag_last_changed["auto_update_bg"] = current_time
-    elif command == "set_background":
-        control_flags["set_background"] = bool(value)
-        flag_last_changed["set_background"] = current_time
+    # Only handle non-flag commands locally
+    if command == "set_background":
         if value:
             print("Background update requested")
-    elif command == "toggle_safe_area_display":
-        control_flags["show_safe_area"] = bool(value)
-        flag_last_changed["show_safe_area"] = current_time
-    elif command == "toggle_safety_check":
-        control_flags["use_safety_check"] = bool(value)
-        flag_last_changed["use_safety_check"] = current_time
+            # This will be handled in the main loop
     elif command == "update_safe_areas":
         if isinstance(value, list):
             update_safety_checker_polygons(value)
-    elif command == "toggle_analytics_mode":
-        control_flags["analytics_mode"] = bool(value)
-        flag_last_changed["analytics_mode"] = current_time
-        if not control_flags["analytics_mode"]:
-            print("Switched to local analysis mode")
-        else:
-            print("Switched to analytics mode")
-    elif command == "set_fall_algorithm":  # This is already correct
-        algorithm = int(value) if isinstance(value, (int, float)) else 3
-        if algorithm in [1, 2, 3]:
-            control_flags["fall_algorithm"] = algorithm
-            flag_last_changed["fall_algorithm"] = current_time
-            print(f"Fall algorithm set to Method {algorithm}")
-        else:
-            print(f"Invalid fall algorithm: {value}, defaulting to 3")
-            control_flags["fall_algorithm"] = 3
-            flag_last_changed["fall_algorithm"] = current_time
-    
-    save_control_flags()
+    # Flag commands are ignored here - camera will poll for them from analytics
 
 def start_new_recording():
     global frame_id, recording_start_time, is_recording
@@ -706,15 +807,47 @@ def check_and_fallback_to_local():
         if was_available and not analytics_server_available:
             print("Analytics server connection lost, falling back to local analysis mode")
             control_flags["analytics_mode"] = False
-            save_control_flags()
         
         elif not was_available and analytics_server_available:
             print("Analytics server connection restored, switching back to analytics mode")
             control_flags["analytics_mode"] = True
-            save_control_flags()
-            sync_flags_with_server()
     
     return analytics_server_available
+
+def sync_flags_from_server():
+    """Get current flags from analytics server (read-only, camera never modifies flags)"""
+    global analytics_server_available, flags_initialized
+    
+    if check_server_connection():
+        try:
+            response = requests.get(
+                f"{ANALYTICS_HTTP_URL}/camera_state?camera_id={CAMERA_ID}",
+                timeout=1.0
+            )
+            
+            if response.status_code == 200:
+                flags = response.json()
+                
+                # Update only the control flags that exist in our local dict
+                # Camera is read-only - it never modifies flags, only retrieves them
+                for key in control_flags.keys():
+                    if key in flags:
+                        control_flags[key] = flags[key]
+                
+                flags_initialized = True
+                analytics_server_available = True
+                return True
+            else:
+                analytics_server_available = False
+                
+        except Exception as e:
+            analytics_server_available = False
+    else:
+        analytics_server_available = False
+    
+    return False
+
+
 
 # Initialize background
 if os.path.exists(BACKGROUND_PATH):
@@ -727,7 +860,7 @@ else:
 
 # Load initial control flags and safe areas
 print("\n=== Loading Configuration ===")
-load_control_flags()
+load_initial_flags()
 initial_safe_areas = load_safe_areas()
 update_safety_checker_polygons(initial_safe_areas)
 
@@ -738,8 +871,12 @@ command_server.start()
 # Test connection to analytics server and sync flags
 print(f"\n=== Testing Analytics Server Connection ===")
 print(f"Analytics server: {ANALYTICS_HTTP_URL}")
+print(f"\n=== Starting Camera: {CAMERA_NAME} ===")
+print(f"Camera ID: {CAMERA_ID}")
+print(f"Camera IP: {server_ip}")
 
-if not sync_flags_with_server():
+# Initial flag sync on connection establishment
+if not sync_flags_from_server():
     print("Warning: Cannot connect to analytics server")
     print("Using locally stored configuration")
     control_flags["analytics_mode"] = False
@@ -747,7 +884,8 @@ if not sync_flags_with_server():
 else:
     print("Analytics server connection successful")
     control_flags["analytics_mode"] = True
-    save_control_flags()
+    # Initial sync done, flags will be synced every 500ms in main loop
+    last_flag_sync = time.ticks_ms()
 
 print(f"\n=== Starting with Configuration ===")
 print(f"Analytics Mode: {'ENABLED' if control_flags['analytics_mode'] else 'DISABLED'}")
@@ -771,15 +909,21 @@ while not app.need_exit():
     # Check analytics server connection and handle fallback
     check_and_fallback_to_local()
     
+    # Periodically sync flags from analytics server (every 500ms, read-only)
+    current_time = time.ticks_ms()
+    if analytics_server_available and (current_time - last_flag_sync >= FLAG_SYNC_INTERVAL_MS):
+        sync_flags_from_server()
+        last_flag_sync = current_time
+    
     # Process received commands
     with commands_lock:
         while received_commands:
             cmd_data = received_commands.pop(0)
             handle_command(cmd_data.get("command"), cmd_data.get("value"))
-    
-    # Periodically sync flags with analytics server if in analytics mode
-    if control_flags["analytics_mode"] and frame_counter % 60 == 0:
-        sync_flags_with_server()
+            # Trigger immediate flag sync after command to get latest flags faster
+            if analytics_server_available:
+                sync_flags_from_server()
+                last_flag_sync = time.ticks_ms()
     
     # Periodically get pose analysis from analytics server
     if control_flags["analytics_mode"]:
@@ -1118,16 +1262,6 @@ while not app.need_exit():
     # Add detection status text
     if current_fall_detected:
         img.draw_string(150, 30, "DETECTED!", color=image.COLOR_RED, scale=font_scale)
-    
-    # Add mode indicator
-    mode_text = "Analytics" if control_flags["analytics_mode"] else "Local"
-    mode_color = image.COLOR_BLUE if control_flags["analytics_mode"] else image.COLOR_YELLOW
-    img.draw_string(10, y_position, f"Mode: {mode_text}", color=mode_color, scale=font_scale)
-    y_position += 15
-    
-    # Show algorithm number
-    img.draw_string(10, y_position, f"Algorithm: {current_fall_algorithm}", color=image.COLOR_GREEN, scale=font_scale)
-    y_position += 15
 
     # Pose data display (if available)
     if current_torso_angle is not None:

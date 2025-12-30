@@ -1,4 +1,4 @@
-# analytics.py
+# analytics.py - FIXED Registration Flow - No Duplicate IDs, Complete Forget Feature
 
 import traceback
 import asyncio
@@ -35,395 +35,379 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 USE_HME = False  # Global toggle for HME mode
-class WiFiConnector:
-    """Handle WiFi connection for analytics server with smart connection logic"""
+
+camera_registry = {}  # camera_id -> {name, ip, first_seen, last_seen}
+camera_counter = 0
+registry_file = "camera_registry.json"
+pending_registrations = {}  # ip_address -> pending data
+registry_lock = threading.Lock()
+
+def load_camera_registry():
+    """Load camera registry from file"""
+    global camera_registry, camera_counter
     
-    def __init__(self, ssid="MaixCAM-Wifi", password="maixcamwifi"):
-        self.ssid = ssid
-        self.password = password
-        self.connected = False
-        self.ip_address = None
-        self.current_ssid = None
-        self.reconnection_attempts = 0
-        self.MAX_RECONNECTION_ATTEMPTS = 3
-        self.last_connection_check = 0
-        self.CHECK_INTERVAL_SECONDS = 30  # Check connection every 30 seconds
-    
-    def connect_wifi(self):
-        """Connect to WiFi network only if not already connected to the correct one"""
-        system = platform.system().lower()
-        
-        try:
-            # First, check current connection status
-            self._check_current_connection(system)
-            
-            # If already connected to the correct WiFi, just update IP and return
-            if self.current_ssid == self.ssid:
-                logger.info(f"Already connected to target WiFi: {self.ssid}")
-                self.connected = True
-                self.ip_address = self._get_current_ip()
-                self.reconnection_attempts = 0
-                return self.ip_address
-            
-            # If connected to a different WiFi, check if we should switch
-            if self.current_ssid and self.current_ssid != self.ssid:
-                logger.info(f"Connected to different WiFi: {self.current_ssid}. Switching to {self.ssid}")
-                # We'll proceed to connect to the target WiFi
-            
-            # If not connected or connected to wrong network, connect to target WiFi
-            logger.info(f"Connecting to WiFi: {self.ssid}")
-            
-            if system == "windows":
-                self._connect_wifi_windows()
-            elif system == "linux":
-                self._connect_wifi_linux()
-            elif system == "darwin":  # macOS
-                self._connect_wifi_macos()
-            else:
-                logger.warning(f"Unsupported OS: {system}")
-                self.ip_address = self._get_current_ip()
-                return self.ip_address
-            
-            # Verify connection after attempting to connect
-            time.sleep(3)  # Wait for connection to stabilize
-            self._verify_connection(system)
-            
-        except Exception as e:
-            logger.error(f"WiFi connection failed: {e}")
-            self.ip_address = self._get_current_ip()
-        
-        return self.ip_address
-    
-    def _check_current_connection(self, system):
-        """Check what WiFi network we're currently connected to"""
-        try:
-            if system == "windows":
-                self._check_windows_connection()
-            elif system == "linux":
-                self._check_linux_connection()
-            elif system == "darwin":  # macOS
-                self._check_macos_connection()
-            else:
-                logger.warning(f"Unsupported OS for connection check: {system}")
-                self.current_ssid = None
-                
-        except Exception as e:
-            logger.error(f"Error checking current connection: {e}")
-            self.current_ssid = None
-    
-    def _check_windows_connection(self):
-        """Check WiFi connection on Windows"""
-        try:
-            # Use netsh to get current connection info
-            cmd = 'netsh wlan show interfaces'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                output = result.stdout
-                # Parse for SSID
-                for line in output.split('\n'):
-                    if 'SSID' in line and 'BSSID' not in line:
-                        parts = line.split(':')
-                        if len(parts) > 1:
-                            ssid = parts[1].strip()
-                            if ssid and ssid != "":
-                                self.current_ssid = ssid
-                                logger.debug(f"Windows: Currently connected to SSID: {self.current_ssid}")
-                                return
-            self.current_ssid = None
-            logger.debug("Windows: Not connected to any WiFi or could not determine SSID")
-        except Exception as e:
-            logger.error(f"Windows connection check error: {e}")
-            self.current_ssid = None
-    
-    def _check_linux_connection(self):
-        """Check WiFi connection on Linux"""
-        try:
-            # Try using nmcli first (NetworkManager)
-            cmd = 'nmcli -t -f active,ssid dev wifi | grep "^yes:"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode == 0 and result.stdout:
-                # Extract SSID from output (format: yes:SSID_NAME)
-                lines = result.stdout.strip().split('\n')
-                for line in lines:
-                    if line.startswith('yes:'):
-                        self.current_ssid = line.split(':', 1)[1]
-                        logger.debug(f"Linux (nmcli): Currently connected to SSID: {self.current_ssid}")
-                        return
-            
-            # Fallback: check /proc/net/wireless or iwgetid
-            cmd = 'iwgetid -r'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                self.current_ssid = result.stdout.strip()
-                logger.debug(f"Linux (iwgetid): Currently connected to SSID: {self.current_ssid}")
-                return
-            
-            self.current_ssid = None
-            logger.debug("Linux: Not connected to any WiFi or could not determine SSID")
-        except Exception as e:
-            logger.error(f"Linux connection check error: {e}")
-            self.current_ssid = None
-    
-    def _check_macos_connection(self):
-        """Check WiFi connection on macOS"""
-        try:
-            # Use airport command or networksetup
-            cmd = '/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                output = result.stdout
-                for line in output.split('\n'):
-                    if ' SSID:' in line:
-                        parts = line.split(':')
-                        if len(parts) > 1:
-                            self.current_ssid = parts[1].strip()
-                            logger.debug(f"macOS: Currently connected to SSID: {self.current_ssid}")
-                            return
-            
-            # Alternative method
-            cmd = 'networksetup -getairportnetwork en0'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            if result.returncode == 0:
-                output = result.stdout
-                if 'Current Wi-Fi Network:' in output:
-                    parts = output.split(':')
-                    if len(parts) > 1:
-                        self.current_ssid = parts[1].strip()
-                        logger.debug(f"macOS (networksetup): Currently connected to SSID: {self.current_ssid}")
-                        return
-            
-            self.current_ssid = None
-            logger.debug("macOS: Not connected to any WiFi or could not determine SSID")
-        except Exception as e:
-            logger.error(f"macOS connection check error: {e}")
-            self.current_ssid = None
-    
-    def _verify_connection(self, system):
-        """Verify we're connected to the correct WiFi after attempting connection"""
-        # Check what we're actually connected to now
-        self._check_current_connection(system)
-        
-        if self.current_ssid == self.ssid:
-            self.connected = True
-            self.ip_address = self._get_current_ip()
-            self.reconnection_attempts = 0
-            logger.info(f"Successfully connected to WiFi: {self.ssid}")
-            logger.info(f"IP Address: {self.ip_address}")
+    try:
+        if os.path.exists(registry_file):
+            with open(registry_file, 'r') as f:
+                data = json.load(f)
+                camera_registry = data.get("cameras", {})
+                camera_counter = data.get("counter", 0)
+                logger.info(f"Loaded {len(camera_registry)} cameras from registry")
         else:
-            self.connected = False
-            self.reconnection_attempts += 1
-            logger.warning(f"Failed to connect to {self.ssid}. Currently connected to: {self.current_ssid or 'nothing'}")
-            
-            if self.reconnection_attempts < self.MAX_RECONNECTION_ATTEMPTS:
-                logger.info(f"Will retry connection (attempt {self.reconnection_attempts + 1}/{self.MAX_RECONNECTION_ATTEMPTS})")
-            else:
-                logger.error(f"Max reconnection attempts reached. Staying with current connection.")
-                self.ip_address = self._get_current_ip()
-    
-    def maintain_connection(self):
-        """Periodically check and maintain WiFi connection"""
-        current_time = time.time()
+            camera_registry = {}
+            camera_counter = 0  # Start from 0
+            logger.info("No camera registry found, starting fresh")
+    except Exception as e:
+        logger.error(f"Error loading camera registry: {e}")
+        camera_registry = {}
+        camera_counter = 0
+
+def save_camera_registry():
+    """Save camera registry to file"""
+    try:
+        data = {
+            "cameras": camera_registry,
+            "counter": camera_counter,
+            "last_updated": time.time()
+        }
+        with open(registry_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        logger.debug(f"Saved camera registry with {len(camera_registry)} cameras")
+    except Exception as e:
+        logger.error(f"Error saving camera registry: {e}")
+
+def get_next_camera_id():
+    """Get next incremental camera ID in hexadecimal format"""
+    global camera_counter
+    camera_counter += 1
+    return f"camera_{camera_counter:04x}"
+
+def register_camera(ip_address, camera_id=None):
+    """Register a new camera and return registration data"""
+    with registry_lock:
+        # If camera_id is provided, check if it exists
+        if camera_id and camera_id in camera_registry:
+            camera_data = camera_registry[camera_id]
+            logger.info(f"Camera {camera_id} already registered as {camera_data.get('name')}")
+            return {
+                "camera_id": camera_id,
+                "camera_name": camera_data.get("name", f"Camera {camera_id.split('_')[-1]}"),
+                "status": "registered"
+            }
         
-        if current_time - self.last_connection_check > self.CHECK_INTERVAL_SECONDS:
-            self.last_connection_check = current_time
-            
-            # Check current connection
-            system = platform.system().lower()
-            self._check_current_connection(system)
-            
-            # If not connected to target WiFi, try to reconnect
-            if self.current_ssid != self.ssid:
-                logger.warning(f"Not connected to target WiFi. Current: {self.current_ssid}, Target: {self.ssid}")
-                logger.info("Attempting to reconnect to target WiFi...")
-                self.connect_wifi()
-            else:
-                # Just update IP address
-                new_ip = self._get_current_ip()
-                if new_ip != self.ip_address:
-                    logger.info(f"WiFi IP address updated: {new_ip}")
-                    self.ip_address = new_ip
-    
-    # Keep the original connection methods but update them slightly
-    
-    def _connect_wifi_windows(self):
-        """Connect to WiFi on Windows"""
+        # Check if camera with this IP already exists
+        for cam_id, cam_data in camera_registry.items():
+            if cam_data.get("ip_address") == ip_address:
+                logger.info(f"Camera with IP {ip_address} already registered as {cam_id}")
+                return {
+                    "camera_id": cam_id,
+                    "camera_name": cam_data.get("name", f"Camera {cam_id.split('_')[-1]}"),
+                    "status": "registered"
+                }
+        
+        # If no camera_id provided, generate new one
+        if not camera_id:
+            camera_id = get_next_camera_id()
+        
+        # Store as pending registration (by IP, not by temp ID!)
+        pending_registrations[ip_address] = {
+            "camera_id": camera_id,
+            "timestamp": time.time(),
+            "status": "pending"
+        }
+        
+        logger.info(f"New camera registration pending from {ip_address}, camera ID: {camera_id}")
+        
+        return {
+            "camera_id": camera_id,
+            "status": "pending",
+            "message": "Registration pending user approval"
+        }
+
+def approve_camera_registration(ip_address, camera_name):
+    """Approve a pending camera registration"""
+    with registry_lock:
+        if ip_address not in pending_registrations:
+            return {"error": "No pending registration for this IP"}
+        
+        pending_data = pending_registrations[ip_address]
+        camera_id = pending_data["camera_id"]
+        
+        # Add to registry
+        camera_registry[camera_id] = {
+            "name": camera_name,
+            "ip_address": ip_address,
+            "mac_address": pending_data.get("mac_address"),
+            "first_seen": pending_data["timestamp"],
+            "last_seen": time.time(),
+            "approved_by": "user",
+            "approved_at": time.time()
+        }
+        
+        # Remove from pending
+        del pending_registrations[ip_address]
+        
+        # Save registry
+        save_camera_registry()
+        
+        logger.info(f"Camera registered: {camera_id} ({camera_name}) at {ip_address}")
+        
+        # Try to notify the camera about its approval
         try:
-            # Check if already connected to target SSID
-            if self.current_ssid == self.ssid:
-                logger.info(f"Windows: Already connected to {self.ssid}")
-                return
-            
-            # Try to connect
-            connect_cmd = f'netsh wlan connect name="{self.ssid}"'
-            logger.debug(f"Windows: Executing command: {connect_cmd}")
-            result = subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                logger.info(f"Windows: Connected to WiFi: {self.ssid}")
-            else:
-                logger.warning(f"Windows: Could not connect to {self.ssid}: {result.stderr}")
-                # Try adding the profile first if it doesn't exist
-                self._add_wifi_profile_windows()
-                
+            notify_camera_of_approval(camera_id, camera_name, ip_address)
         except Exception as e:
-            logger.error(f"Windows WiFi connection error: {e}")
-    
-    def _add_wifi_profile_windows(self):
-        """Add WiFi profile on Windows if it doesn't exist"""
-        try:
-            # Check if profile exists
-            check_cmd = f'netsh wlan show profiles name="{self.ssid}"'
-            result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-            
-            if "is not found on the system" in result.stdout or result.returncode != 0:
-                # Create XML profile
-                xml_profile = f'''<?xml version="1.0"?>
-<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{self.ssid}</name>
-    <SSIDConfig>
-        <SSID>
-            <name>{self.ssid}</name>
-        </SSID>
-    </SSIDConfig>
-    <connectionType>ESS</connectionType>
-    <connectionMode>auto</connectionMode>
-    <MSM>
-        <security>
-            <authEncryption>
-                <authentication>WPA2PSK</authentication>
-                <encryption>AES</encryption>
-                <useOneX>false</useOneX>
-            </authEncryption>
-            <sharedKey>
-                <keyType>passPhrase</keyType>
-                <protected>false</protected>
-                <keyMaterial>{self.password}</keyMaterial>
-            </sharedKey>
-        </security>
-    </MSM>
-</WLANProfile>'''
-                
-                # Save to temp file
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
-                    f.write(xml_profile)
-                    temp_file = f.name
-                
-                # Add profile
-                add_cmd = f'netsh wlan add profile filename="{temp_file}"'
-                result = subprocess.run(add_cmd, shell=True, capture_output=True, text=True)
-                
-                # Clean up
-                import os
-                os.unlink(temp_file)
-                
-                if result.returncode == 0:
-                    logger.info(f"Windows: Added WiFi profile for {self.ssid}")
-                    # Now try connecting again
-                    connect_cmd = f'netsh wlan connect name="{self.ssid}"'
-                    subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
-        except Exception as e:
-            logger.error(f"Windows profile creation error: {e}")
-    
-    def _connect_wifi_linux(self):
-        """Connect to WiFi on Linux"""
-        try:
-            # Check if already connected to target SSID
-            if self.current_ssid == self.ssid:
-                logger.info(f"Linux: Already connected to {self.ssid}")
-                return
-            
-            # Try using nmcli
-            connect_cmd = f'nmcli device wifi connect "{self.ssid}" password "{self.password}"'
-            logger.debug(f"Linux: Executing command: {connect_cmd}")
-            result = subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                logger.info(f"Linux: Connected to WiFi: {self.ssid}")
+            logger.error(f"Failed to notify camera of approval: {e}")
+        
+        # FORCE update camera frame timestamp to make it appear connected immediately
+        with frame_lock:
+            if camera_id in camera_frames:
+                camera_frames[camera_id]['timestamp'] = time.time()
             else:
-                logger.warning(f"Linux: Could not connect to {self.ssid}: {result.stderr}")
-                
-        except Exception as e:
-            logger.error(f"Linux WiFi connection error: {e}")
-    
-    def _connect_wifi_macos(self):
-        """Connect to WiFi on macOS"""
-        try:
-            # Check if already connected to target SSID
-            if self.current_ssid == self.ssid:
-                logger.info(f"macOS: Already connected to {self.ssid}")
-                return
+                # Create a dummy frame entry to make it appear in the list
+                camera_frames[camera_id] = {
+                    'frame': None,
+                    'timestamp': time.time(),  # Set to current time
+                    'size': 0,
+                    'source_addr': ip_address,
+                    'last_upload': time.time()
+                }
+        
+        return {
+            "camera_id": camera_id,
+            "camera_name": camera_name,
+            "status": "registered"
+        }
+
+def notify_camera_of_approval(camera_id, camera_name, camera_ip):
+    """Notify camera that it has been approved"""
+    try:
+        url = f"http://{camera_ip}:8080/command"
+        payload = {
+            "command": "camera_registered",
+            "value": {
+                "camera_id": camera_id,
+                "camera_name": camera_name
+            }
+        }
+        
+        response = requests.post(url, json=payload, timeout=2.0)
+        if response.status_code == 200:
+            logger.info(f"Notified camera at {camera_ip} of approval")
+            return True
+        else:
+            logger.warning(f"Failed to notify camera: HTTP {response.status_code}")
+            return False
+    except Exception as e:
+        logger.warning(f"Could not notify camera of approval: {e}")
+        return False
+
+def forget_camera(camera_id):
+    """Remove a camera from registry and notify camera to delete its info"""
+    with registry_lock:
+        if camera_id in camera_registry:
+            camera_data = camera_registry[camera_id]
+            camera_name = camera_data.get("name", "Unknown")
+            camera_ip = camera_data.get("ip_address")
             
-            # Try using networksetup
-            connect_cmd = f'networksetup -setairportnetwork en0 "{self.ssid}" "{self.password}"'
-            logger.debug(f"macOS: Executing command: {connect_cmd}")
-            result = subprocess.run(connect_cmd, shell=True, capture_output=True, text=True)
+            # First, try to notify the camera to delete its local info
+            if camera_ip:
+                try:
+                    notify_camera_to_forget(camera_ip)
+                except Exception as e:
+                    logger.warning(f"Failed to notify camera to forget: {e}")
             
-            if result.returncode == 0:
-                logger.info(f"macOS: Connected to WiFi: {self.ssid}")
-            else:
-                logger.warning(f"macOS: Could not connect to {self.ssid}: {result.stderr}")
-                
-        except Exception as e:
-            logger.error(f"macOS WiFi connection error: {e}")
+            # Remove from registry
+            del camera_registry[camera_id]
+            save_camera_registry()
+            
+            logger.info(f"Camera {camera_id} ({camera_name}) forgotten")
+            return {"status": "success", "message": f"Camera {camera_id} forgotten"}
+        else:
+            return {"error": "Camera not found"}
+
+def notify_camera_to_forget(camera_ip):
+    """Notify camera to delete its local info"""
+    try:
+        url = f"http://{camera_ip}:8080/command"
+        payload = {
+            "command": "forget_camera",
+            "value": True
+        }
+        
+        response = requests.post(url, json=payload, timeout=2.0)
+        if response.status_code == 200:
+            logger.info(f"Notified camera at {camera_ip} to forget itself")
+            return True
+        else:
+            logger.warning(f"Failed to notify camera to forget: HTTP {response.status_code}")
+            return False
+    except Exception as e:
+        logger.warning(f"Could not notify camera to forget: {e}")
+        return False
+
+def update_camera_flags(camera_id, flags):
+    """Update camera control flags from web UI"""
+    with registry_lock:
+        if camera_id not in camera_registry:
+            return {"error": "Camera not registered"}
+        
+        # Get the camera's current state if it exists
+        camera_state = analytics.camera_states.get(camera_id, {})
+        
+        # Update control flags
+        if "control_flags" not in camera_state:
+            camera_state["control_flags"] = {}
+        
+        # Only update flags that are passed in
+        for key, value in flags.items():
+            if key in camera_state["control_flags"]:
+                camera_state["control_flags"][key] = value
+        
+        # Update timestamp
+        camera_state["last_flag_update"] = time.time()
+        camera_state["last_flag_source"] = "web_ui"
+        
+        # Save to analytics state
+        analytics.camera_states[camera_id] = camera_state
+        
+        logger.info(f"Updated flags for {camera_id}: {flags}")
+        
+        return {"status": "success", "camera_id": camera_id, "flags_updated": list(flags.keys())}
+
+def get_pending_registrations():
+    """Get list of pending camera registrations"""
+    with registry_lock:
+        return {
+            "pending": [
+                {
+                    "ip_address": ip_address,
+                    "camera_id": data["camera_id"],
+                    "timestamp": data["timestamp"],
+                    "age_seconds": time.time() - data["timestamp"]
+                }
+                for ip_address, data in pending_registrations.items()
+            ],
+            "count": len(pending_registrations)
+        }
+
+def get_registered_cameras():
+    """Get list of registered cameras"""
+    with registry_lock:
+        return {
+            "cameras": camera_registry,
+            "count": len(camera_registry),
+            "counter": camera_counter
+        }
+
+class NetworkManager:
+    """Handle network connectivity for VPS environment"""
     
-    def _get_current_ip(self):
-        """Get current IP address with better error handling"""
+    def __init__(self):
+        self.ip_address = self.get_public_ip()
+        self.hostname = socket.gethostname()
+        self.network_interfaces = self.get_network_interfaces()
+        self.last_check = 0
+        self.CHECK_INTERVAL_SECONDS = 300
+    
+    def get_public_ip(self):
+        """Get public IP address of the VPS"""
         try:
-            # Method 1: Get local IP using socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(1)
+            ip_services = [
+                "https://api.ipify.org",
+                "https://checkip.amazonaws.com",
+                "https://ipinfo.io/ip"
+            ]
+            
+            for service in ip_services:
+                try:
+                    response = requests.get(service, timeout=3)
+                    if response.status_code == 200:
+                        ip = response.text.strip()
+                        logger.info(f"Public IP detected: {ip}")
+                        return ip
+                except:
+                    continue
+            
+            # Fallback to local IP
             try:
-                # Connect to Google DNS
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(1)
                 s.connect(("8.8.8.8", 80))
                 ip = s.getsockname()[0]
                 s.close()
+                logger.info(f"Local IP detected: {ip}")
                 return ip
-            except socket.error:
-                s.close()
-            
-            # Method 2: Get from hostname
-            try:
-                hostname = socket.gethostname()
-                ip = socket.gethostbyname(hostname)
-                if ip.startswith("127."):
-                    # Loopback address, not useful
-                    raise socket.error
-                return ip
-            except socket.error:
+            except:
                 pass
             
-            # Method 3: Try to get from network interfaces
-            if platform.system().lower() == "linux":
-                try:
-                    import netifaces
-                    for interface in netifaces.interfaces():
-                        addresses = netifaces.ifaddresses(interface)
-                        if netifaces.AF_INET in addresses:
-                            for addr in addresses[netifaces.AF_INET]:
-                                ip = addr.get('addr')
-                                if ip and not ip.startswith("127."):
-                                    return ip
-                except ImportError:
-                    pass
-            
-            logger.warning("Could not determine IP address")
-            return "0.0.0.0"
+            ip = "0.0.0.0"
+            logger.warning(f"Could not determine IP address, using: {ip}")
+            return ip
             
         except Exception as e:
             logger.error(f"Error getting IP address: {e}")
             return "0.0.0.0"
+    
+    def get_network_interfaces(self):
+        """Get network interface information"""
+        interfaces = {}
+        try:
+            if platform.system().lower() == "linux":
+                import netifaces
+                for interface in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        ip_info = addrs[netifaces.AF_INET][0]
+                        interfaces[interface] = {
+                            'ip': ip_info.get('addr'),
+                            'netmask': ip_info.get('netmask'),
+                            'broadcast': ip_info.get('broadcast')
+                        }
+            else:
+                interfaces['default'] = {'ip': self.ip_address}
+        except Exception as e:
+            logger.warning(f"Could not get network interfaces: {e}")
+            interfaces['default'] = {'ip': self.ip_address}
+        
+        return interfaces
+    
+    def check_connectivity(self):
+        """Check internet connectivity"""
+        current_time = time.time()
+        if current_time - self.last_check > self.CHECK_INTERVAL_SECONDS:
+            self.last_check = current_time
+            
+            try:
+                socket.create_connection(("8.8.8.8", 53), timeout=3)
+                response = requests.get("http://www.google.com", timeout=5)
+                if response.status_code == 200:
+                    logger.debug("Internet connectivity: OK")
+                    return True
+            except Exception as e:
+                logger.warning(f"Connectivity check failed: {e}")
+                return False
+        
+        return True
+    
+    def get_server_info(self):
+        """Get comprehensive server information"""
+        return {
+            "public_ip": self.ip_address,
+            "hostname": self.hostname,
+            "platform": platform.platform(),
+            "python_version": platform.python_version(),
+            "network_interfaces": self.network_interfaces,
+            "connectivity": self.check_connectivity(),
+            "timestamp": time.time()
+        }
 
 # Global frame storage
 camera_frames = {}
 frame_lock = threading.Lock()
-placeholder_frames = {}  # Store placeholder per camera
+placeholder_frames = {}
 
 # Track history for fall detection
-camera_track_history = {}  # camera_id -> {track_id -> history}
+camera_track_history = {}
 track_history_lock = threading.Lock()
 
 # Pose estimator (same as MaixCAM)
@@ -435,7 +419,7 @@ fallParam = {
     "angle": 70
 }
 queue_size = 5
-fps = 30  # Default FPS for analytics server
+fps = 30
 
 def create_placeholder_frame(camera_id="default"):
     """Create a placeholder frame for when camera is not connected"""
@@ -445,9 +429,9 @@ def create_placeholder_frame(camera_id="default"):
         img = np.ones((240, 320, 3), dtype=np.uint8) * 50
         cv2.putText(img, f"Camera {camera_id}", (50, 100), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(img, "Not Connected", (60, 130), 
+        cv2.putText(img, "Cloud Analytics Server", (40, 130), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(img, "Waiting for connection...", (30, 160), 
+        cv2.putText(img, "Waiting for camera feed...", (30, 160), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
         _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
         placeholder_frames[camera_id] = jpeg.tobytes()
@@ -460,7 +444,6 @@ def get_camera_status(camera_id):
         frame_info = camera_frames.get(camera_id, {})
         if frame_info:
             last_seen = frame_info.get('timestamp', 0)
-            # Camera is considered connected if seen in last 30 seconds
             if time.time() - last_seen < 30:
                 return "connected"
     return "disconnected"
@@ -473,17 +456,17 @@ def to_keypoints_np(obj_points):
 def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
     """Perform pose analysis on the server using the same logic as MaixCAM"""
     try:
-        logger.debug(f"[DEBUG] analyze_pose_on_server called for camera {camera_id}, track {track_id}")
+        logger.debug(f"analyze_pose_on_server called for camera {camera_id}, track {track_id}")
         
         if not keypoints_flat or len(keypoints_flat) < 10:
-            logger.debug(f"[DEBUG] Insufficient keypoints: {len(keypoints_flat) if keypoints_flat else 0}")
+            logger.debug(f"Insufficient keypoints: {len(keypoints_flat) if keypoints_flat else 0}")
             return None
         
         # Initialize track history for this camera if needed
         with track_history_lock:
             if camera_id not in camera_track_history:
                 camera_track_history[camera_id] = {}
-                logger.debug(f"[DEBUG] Created track history for camera {camera_id}")
+                logger.debug(f"Created track history for camera {camera_id}")
             
             if track_id not in camera_track_history[camera_id]:
                 camera_track_history[camera_id][track_id] = {
@@ -491,16 +474,16 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                     "bbox": [],
                     "points": []
                 }
-                logger.debug(f"[DEBUG] Created track history for track {track_id}")
+                logger.debug(f"Created track history for track {track_id}")
             
             track_history = camera_track_history[camera_id][track_id]
             
             # Add track to history
             if track_id not in track_history["id"]:
                 track_history["id"].append(track_id)
-                track_history["bbox"].append([])  # Will be populated as queue
+                track_history["bbox"].append([])
                 track_history["points"].append([])
-                logger.debug(f"[DEBUG] Added track {track_id} to history")
+                logger.debug(f"Added track {track_id} to history")
             
             idx = track_history["id"].index(track_id)
             
@@ -509,17 +492,17 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                 import queue
                 track_history["bbox"][idx] = queue.Queue(maxsize=queue_size)
                 track_history["points"][idx] = queue.Queue(maxsize=queue_size)
-                logger.debug(f"[DEBUG] Initialized queues for track {track_id}")
+                logger.debug(f"Initialized queues for track {track_id}")
             
             # Add current data to queue
             if track_history["bbox"][idx].qsize() >= queue_size:
                 track_history["bbox"][idx].get()
                 track_history["points"][idx].get()
-                logger.debug(f"[DEBUG] Removed oldest data from queues for track {track_id}")
+                logger.debug(f"Removed oldest data from queues for track {track_id}")
             
             track_history["bbox"][idx].put(bbox)
             track_history["points"][idx].put(keypoints_flat)
-            logger.debug(f"[DEBUG] Added data to queues for track {track_id}. Queue size: {track_history['bbox'][idx].qsize()}")
+            logger.debug(f"Added data to queues for track {track_id}. Queue size: {track_history['bbox'][idx].qsize()}")
         
         # Convert to numpy for pose estimation
         keypoints_np = to_keypoints_np(keypoints_flat)
@@ -528,14 +511,14 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
         pose_data = pose_estimator.evaluate_pose(keypoints_np.flatten())
         
         if not pose_data:
-            logger.debug(f"[DEBUG] No pose data returned from pose_estimator")
+            logger.debug(f"No pose data returned from pose_estimator")
             return None
         
-        logger.debug(f"[DEBUG] Pose data label: {pose_data.get('label')}")
+        logger.debug(f"Pose data label: {pose_data.get('label')}")
         
         # Check if we have enough history for fall detection
         if track_history["bbox"][idx].qsize() == queue_size:
-            logger.debug(f"[DEBUG] Queue full ({queue_size}), running fall detection for track {track_id}")
+            logger.debug(f"Queue full ({queue_size}), running fall detection for track {track_id}")
             
             # Create a tracker object similar to MaixCAM
             class MockTrackerObj:
@@ -554,10 +537,10 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
                 tracker_obj, track_history, idx, fallParam, queue_size, fps, pose_data
             )
             
-            logger.debug(f"[DEBUG] Fall detection results for track {track_id}:")
-            logger.debug(f"[DEBUG]   Method1: detected={fall_detected_method1}, counter={counter_method1}")
-            logger.debug(f"[DEBUG]   Method2: detected={fall_detected_method2}, counter={counter_method2}")
-            logger.debug(f"[DEBUG]   Method3: detected={fall_detected_method3}, counter={counter_method3}")
+            logger.debug(f"Fall detection results for track {track_id}:")
+            logger.debug(f"  Method1: detected={fall_detected_method1}, counter={counter_method1}")
+            logger.debug(f"  Method2: detected={fall_detected_method2}, counter={counter_method2}")
+            logger.debug(f"  Method3: detected={fall_detected_method3}, counter={counter_method3}")
             
             # Add fall detection results to pose data with NEW naming
             pose_data["fall_detected_method1"] = fall_detected_method1
@@ -569,15 +552,15 @@ def analyze_pose_on_server(keypoints_flat, bbox, track_id, camera_id):
             pose_data["fall_threshold"] = FALL_COUNT_THRES
             # Use method 3 as the primary alert (most conservative)
             pose_data["fall_alert"] = fall_detected_method3
-            pose_data["server_analysis"] = True  # Mark as server-side analysis
+            pose_data["server_analysis"] = True
             
-            logger.info(f"[ANALYTICS] Pose analysis for camera {camera_id}, track {track_id}:")
-            logger.info(f"[ANALYTICS]   Activity: {pose_data.get('label')}")
-            logger.info(f"[ANALYTICS]   Fall Method1: {'DETECTED' if fall_detected_method1 else 'no'} (counter={counter_method1}/{FALL_COUNT_THRES})")
-            logger.info(f"[ANALYTICS]   Fall Method2: {'DETECTED' if fall_detected_method2 else 'no'} (counter={counter_method2}/{FALL_COUNT_THRES})")
-            logger.info(f"[ANALYTICS]   Fall Method3: {'DETECTED' if fall_detected_method3 else 'no'} (counter={counter_method3}/{FALL_COUNT_THRES})")
+            logger.info(f"Pose analysis for camera {camera_id}, track {track_id}:")
+            logger.info(f"  Activity: {pose_data.get('label')}")
+            logger.info(f"  Fall Method1: {'DETECTED' if fall_detected_method1 else 'no'} (counter={counter_method1}/{FALL_COUNT_THRES})")
+            logger.info(f"  Fall Method2: {'DETECTED' if fall_detected_method2 else 'no'} (counter={counter_method2}/{FALL_COUNT_THRES})")
+            logger.info(f"  Fall Method3: {'DETECTED' if fall_detected_method3 else 'no'} (counter={counter_method3}/{FALL_COUNT_THRES})")
         else:
-            logger.debug(f"[DEBUG] Queue not full ({track_history['bbox'][idx].qsize()}/{queue_size}), skipping fall detection")
+            logger.debug(f"Queue not full ({track_history['bbox'][idx].qsize()}/{queue_size}), skipping fall detection")
         
         return pose_data
         
@@ -596,18 +579,14 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests"""
         try:
-            # Parse the path and query parameters
             parsed_path = urlparse(self.path)
             path = parsed_path.path
             query_params = parse_qs(parsed_path.query)
             
-            # Default camera ID
-            camera_id = query_params.get('camera_id', ['maixcam_001'])[0]
+            camera_id = query_params.get('camera_id', ['camera_000'])[0]
             
-            # Log the request for debugging
             logger.debug(f"GET {path} - Camera: {camera_id}")
             
-            # Route based on path
             if path == '/' or path == '/index.html':
                 self.serve_static_file('index.html', 'text/html')
             elif path.endswith('.css'):
@@ -634,8 +613,17 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 self.get_debug_info()
             elif path == '/pose_analysis':
                 self.get_pose_analysis(camera_id)
+            elif path == '/camera_registry':
+                self.get_camera_registry()
+            elif path == '/pending_registrations':
+                self.get_pending_registrations()
+            elif path == '/register_camera':
+                self.handle_camera_registration(parsed_path)
+            elif path == '/registered_cameras':
+                self.get_registered_cameras()
+            elif path == '/forget_camera':
+                self.handle_forget_camera(camera_id)
             else:
-                # Try to serve static file
                 if os.path.exists(os.path.join('static', path[1:])):
                     self.serve_static_file(path[1:])
                 else:
@@ -646,10 +634,79 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             logger.error(f"GET request error: {e}")
             self.send_error(500, "Internal Server Error")
     
+    def get_camera_registry(self):
+        """Return camera registry"""
+        try:
+            response = {
+                "cameras": camera_registry,
+                "count": len(camera_registry),
+                "counter": camera_counter,
+                "pending_count": len(pending_registrations)
+            }
+            self.send_json_response(200, response)
+        except Exception as e:
+            logger.error(f"Registry error: {e}")
+            self.send_error(500, "Internal Server Error")
+
+    def get_registered_cameras(self):
+        """Return registered cameras"""
+        try:
+            cameras = get_registered_cameras()
+            self.send_json_response(200, cameras)
+        except Exception as e:
+            logger.error(f"Registered cameras error: {e}")
+            self.send_error(500, "Internal Server Error")
+
+    def handle_forget_camera(self, camera_id):
+        """Handle forget camera request"""
+        try:
+            result = forget_camera(camera_id)
+            if "error" in result:
+                self.send_error(404, result["error"])
+            else:
+                self.send_json_response(200, result)
+        except Exception as e:
+            logger.error(f"Forget camera error: {e}")
+            self.send_error(500, "Internal Server Error")
+
+    def get_pending_registrations(self):
+        """Return pending camera registrations"""
+        try:
+            pending_data = get_pending_registrations()
+            self.send_json_response(200, pending_data)
+        except Exception as e:
+            logger.error(f"Pending registrations error: {e}")
+            self.send_error(500, "Internal Server Error")
+
+    def handle_camera_registration(self, parsed_path):
+        """Handle camera registration request"""
+        try:
+            query_params = parse_qs(parsed_path.query)
+            ip_address = self.client_address[0]
+            camera_id = query_params.get('camera_id', [None])[0]
+            
+            # Check if this camera is already registered
+            for cam_id, cam_data in camera_registry.items():
+                if cam_data.get("ip_address") == ip_address:
+                    response = {
+                        "camera_id": cam_id,
+                        "camera_name": cam_data.get("name", f"Camera {cam_id.split('_')[-1]}"),
+                        "status": "registered"
+                    }
+                    self.send_json_response(200, response)
+                    return
+            
+            # Register new camera
+            result = register_camera(ip_address, camera_id)
+            self.send_json_response(200, result)
+            
+        except Exception as e:
+            logger.error(f"Camera registration error: {e}")
+            self.send_error(500, "Internal Server Error")
+    
     def do_POST(self):
         """Handle POST requests"""
         try:
-            # Parse the path
             parsed_path = urlparse(self.path)
             path = parsed_path.path
             
@@ -668,12 +725,58 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 self.handle_command(body)
             elif path == '/camera_state':
                 self.handle_camera_state_update(body)
+            elif path == '/approve_registration':
+                self.handle_approve_registration(body)
+            elif path == '/forget_camera':
+                self.handle_forget_camera_post(body)
             else:
                 logger.warning(f"404 Not Found: {path}")
                 self.send_error(404, "Not Found")
                 
         except Exception as e:
             logger.error(f"POST request error: {e}")
+            self.send_error(500, "Internal Server Error")
+    
+    def handle_forget_camera_post(self, body):
+        """Handle POST request to forget camera"""
+        try:
+            data = json.loads(body.decode())
+            camera_id = data.get("camera_id")
+            
+            if not camera_id:
+                self.send_error(400, "Missing camera_id")
+                return
+            
+            result = forget_camera(camera_id)
+            if "error" in result:
+                self.send_error(404, result["error"])
+            else:
+                self.send_json_response(200, result)
+                
+        except Exception as e:
+            logger.error(f"Forget camera error: {e}")
+            self.send_error(500, "Internal Server Error")
+    
+    def handle_approve_registration(self, body):
+        """Approve a camera registration"""
+        try:
+            data = json.loads(body.decode())
+            ip_address = data.get("ip_address")
+            camera_name = data.get("camera_name")
+            
+            if not ip_address or not camera_name:
+                self.send_error(400, "Missing ip_address or camera_name")
+                return
+            
+            result = approve_camera_registration(ip_address, camera_name)
+            
+            if "error" in result:
+                self.send_error(400, result["error"])
+            else:
+                self.send_json_response(200, result)
+                
+        except Exception as e:
+            logger.error(f"Approve registration error: {e}")
             self.send_error(500, "Internal Server Error")
     
     def serve_static_file(self, filename, content_type=None):
@@ -686,7 +789,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 return
             
             if content_type is None:
-                # Guess content type
                 content_type, _ = mimetypes.guess_type(filepath)
                 if content_type is None:
                     content_type = 'application/octet-stream'
@@ -718,9 +820,29 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             # Check if camera is connected (seen in last 30 seconds)
             camera_connected = time.time() - last_seen < 30
             
-            if frame_data is None or not camera_connected:
-                # Use placeholder with connection status
-                frame_data = create_placeholder_frame(camera_id)
+            # Check if camera is registered
+            is_registered = camera_id in camera_registry
+            
+            # Show placeholder if:
+            # 1. No frame data, OR
+            # 2. Camera not connected, OR  
+            # 3. Camera not registered (new feature)
+            if frame_data is None or not camera_connected or not is_registered:
+                # Use placeholder with registration status
+                if not is_registered:
+                    # Create special placeholder for unregistered cameras
+                    img = np.ones((240, 320, 3), dtype=np.uint8) * 50
+                    cv2.putText(img, f"Camera {camera_id}", (50, 100), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                    cv2.putText(img, "AWAITING REGISTRATION", (30, 130), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 1)
+                    cv2.putText(img, "Please approve in dashboard", (25, 160), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 100), 1)
+                    _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    frame_data = jpeg.tobytes()
+                else:
+                    # Regular placeholder for disconnected registered cameras
+                    frame_data = create_placeholder_frame(camera_id)
             
             self.send_response(200)
             self.send_header('Content-Type', 'image/jpeg')
@@ -743,9 +865,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             # Get latest skeletal data for this camera
             skeletal_data = self.analytics.get_latest_skeletal_data(camera_id)
             
-            # DEBUG: Log what we're getting
-            logger.debug(f"[DEBUG] get_pose_analysis for {camera_id}: skeletal_data = {skeletal_data is not None}")
-            
             if not skeletal_data:
                 response = {
                     "camera_id": camera_id,
@@ -758,9 +877,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             
             pose_data = skeletal_data.get("pose_data")
             server_analysis = skeletal_data.get("server_analysis")
-            
-            # DEBUG: Log what data we have
-            logger.debug(f"[DEBUG] pose_data exists: {pose_data is not None}, server_analysis exists: {server_analysis is not None}")
             
             # Use server_analysis if available, otherwise use pose_data
             analysis_data = server_analysis if server_analysis else pose_data
@@ -780,7 +896,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             
             # Check for new method naming (method1, method2, method3)
             if analysis_data.get("fall_detected_method1") is not None:
-                # New naming scheme
                 fall_detection_data = {
                     "method1": {
                         "detected": bool(analysis_data.get("fall_detected_method1", False)),
@@ -798,7 +913,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                         "description": "Flexible Verification"
                     }
                 }
-            # Check for old naming scheme (for backward compatibility)
             elif analysis_data.get("fall_detected_old") is not None or analysis_data.get("fall_detected_new") is not None:
                 fall_detection_data = {
                     "method1": {
@@ -820,17 +934,11 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                     }
                 }
             else:
-                # No fall detection data found
-                logger.warning(f"[DEBUG] No fall detection data found in analysis_data for {camera_id}")
-                logger.warning(f"[DEBUG] analysis_data keys: {list(analysis_data.keys())}")
                 fall_detection_data = {
                     "method1": {"detected": False, "counter": 0, "description": "No data"},
                     "method2": {"detected": False, "counter": 0, "description": "No data"},
                     "method3": {"detected": False, "counter": 0, "description": "No data"}
                 }
-            
-            # DEBUG: Log fall detection data
-            logger.debug(f"[DEBUG] Fall detection data for {camera_id}: {fall_detection_data}")
             
             # Determine primary alert based on method3 (most conservative)
             primary_alert = fall_detection_data.get("method3", {}).get("detected", False)
@@ -843,7 +951,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "timestamp": skeletal_data.get("timestamp", time.time()),
                 "server_analysis_time": time.time(),
                 "primary_alert": primary_alert,
-                # Add metadata about available algorithms
                 "algorithms_available": [1, 2, 3],
                 "algorithm_descriptions": {
                     1: "BBox Motion only",
@@ -863,10 +970,10 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
     def handle_frame_upload(self, body):
         """Handle frame upload from MaixCAM"""
         try:
-            camera_id = self.headers.get('X-Camera-ID', 'maixcam_001')
+            camera_id = self.headers.get('X-Camera-ID', 'camera_000')
             
             # Validate frame size
-            if len(body) > 10 * 1024 * 1024:  # 10MB max
+            if len(body) > 10 * 1024 * 1024:
                 logger.warning(f"Frame too large from {camera_id}: {len(body)} bytes")
                 self.send_error(413, "Payload Too Large")
                 return
@@ -907,11 +1014,11 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             command_data = json.loads(body.decode())
             command = command_data.get("command")
             value = command_data.get("value")
-            camera_id = command_data.get("camera_id", "maixcam_001")
+            camera_id = command_data.get("camera_id", "camera_000")
             
             logger.info(f"Command received: {command}={value} for {camera_id}")
             
-            # Update camera state
+            # Get or create camera state
             if camera_id not in self.analytics.camera_states:
                 self.analytics.camera_states[camera_id] = {
                     "control_flags": {
@@ -929,33 +1036,41 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                     "connected": False
                 }
             
-            # Update control flag
+            # Map command to flag update
+            flag_updates = {}
             if command == "toggle_record":
-                self.analytics.camera_states[camera_id]["control_flags"]["record"] = bool(value)
+                flag_updates["record"] = bool(value)
             elif command == "toggle_raw":
-                self.analytics.camera_states[camera_id]["control_flags"]["show_raw"] = bool(value)
+                flag_updates["show_raw"] = bool(value)
             elif command == "auto_update_bg":
-                self.analytics.camera_states[camera_id]["control_flags"]["auto_update_bg"] = bool(value)
+                flag_updates["auto_update_bg"] = bool(value)
             elif command == "set_background":
-                self.analytics.camera_states[camera_id]["control_flags"]["set_background"] = bool(value)
+                flag_updates["set_background"] = bool(value)
             elif command == "toggle_safe_area_display":
-                self.analytics.camera_states[camera_id]["control_flags"]["show_safe_area"] = bool(value)
+                flag_updates["show_safe_area"] = bool(value)
             elif command == "toggle_safety_check":
-                self.analytics.camera_states[camera_id]["control_flags"]["use_safety_check"] = bool(value)
+                flag_updates["use_safety_check"] = bool(value)
             elif command == "toggle_analytics_mode":
-                self.analytics.camera_states[camera_id]["control_flags"]["analytics_mode"] = bool(value)
+                flag_updates["analytics_mode"] = bool(value)
             elif command == "set_fall_algorithm":
                 algorithm = int(value) if isinstance(value, (int, float)) else 3
                 if algorithm in [1, 2, 3]:
-                    self.analytics.camera_states[camera_id]["control_flags"]["fall_algorithm"] = algorithm
+                    flag_updates["fall_algorithm"] = algorithm
                     logger.info(f"Fall algorithm set to {algorithm} for {camera_id}")
                 else:
                     logger.warning(f"Invalid fall algorithm: {value}, defaulting to 3")
-                    self.analytics.camera_states[camera_id]["control_flags"]["fall_algorithm"] = 3
-            elif command == "update_safe_areas":
-                self.analytics.camera_states[camera_id]["safe_areas"] = value
+                    flag_updates["fall_algorithm"] = 3
             
-            # Try to forward to camera
+            # Update flags in analytics (single source of truth)
+            if flag_updates:
+                update_result = update_camera_flags(camera_id, flag_updates)
+                logger.info(f"Flags updated in analytics: {update_result}")
+            
+            # Update local state for immediate response
+            for key, value in flag_updates.items():
+                self.analytics.camera_states[camera_id]["control_flags"][key] = value
+            
+            # Try to forward to camera (but camera will poll for updates)
             forwarded = self.analytics.forward_to_camera(camera_id, command, value)
             
             response = {
@@ -963,7 +1078,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "command": command,
                 "value": value,
                 "camera_id": camera_id,
-                "forwarded": forwarded
+                "forwarded": forwarded,
+                "flags_updated": flag_updates
             }
             
             self.send_json_response(200, response)
@@ -1003,9 +1119,9 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Camera state error: {e}")
             self.send_error(500, "Internal Server Error")
-    
+        
     def get_camera_list(self):
-        """Return list of active cameras"""
+        """Return list of active cameras with NAMES not IDs"""
         try:
             active_cameras = []
             current_time = time.time()
@@ -1013,7 +1129,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             with frame_lock:
                 for cam_id, frame_info in camera_frames.items():
                     last_seen = frame_info.get('timestamp', 0)
-                    # Camera is active if seen in last 30 seconds
                     if current_time - last_seen < 30:
                         status = "connected"
                         online = True
@@ -1021,32 +1136,66 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                         status = "disconnected"
                         online = False
                     
+                    # Check if camera is registered
+                    is_registered = cam_id in camera_registry
+                    
+                    # Get camera name
+                    if is_registered:
+                        camera_name = camera_registry[cam_id].get("name", f"Camera {cam_id.split('_')[-1]}")
+                    else:
+                        # Check if pending
+                        is_pending = any(reg.get("camera_id") == cam_id for reg in pending_registrations.values())
+                        if is_pending:
+                            camera_name = "Pending Camera"
+                        else:
+                            camera_name = "Unregistered Camera"
+                    
+                    # FORCE refresh connection status for recently approved cameras
+                    # If camera was approved in the last 10 seconds, mark as connected
+                    if is_registered and cam_id in camera_registry:
+                        approved_at = camera_registry[cam_id].get("approved_at", 0)
+                        if current_time - approved_at < 10 and not online:
+                            online = True
+                            status = "connected"
+                            print(f"Force-marking recently approved camera {cam_id} as connected")
+                    
                     active_cameras.append({
                         "camera_id": cam_id,
+                        "camera_name": camera_name,
                         "last_seen": last_seen,
                         "ip_address": frame_info.get('source_addr', 'unknown'),
                         "online": online,
                         "status": status,
-                        "age_seconds": current_time - last_seen
+                        "age_seconds": current_time - last_seen,
+                        "registered": is_registered,
+                        "pending": not is_registered and any(reg.get("camera_id") == cam_id for reg in pending_registrations.values())
                     })
             
-            # Also include cameras in states but not in frames
-            for cam_id, state in self.analytics.camera_states.items():
+            # Also include cameras that are in registry but not in frames (for completeness)
+            for cam_id in camera_registry:
                 if cam_id not in [c["camera_id"] for c in active_cameras]:
-                    last_seen = state.get("last_seen", 0)
+                    camera_data = camera_registry[cam_id]
+                    # If approved in last 10 seconds, show as connected
+                    approved_at = camera_data.get("approved_at", 0)
+                    recently_approved = current_time - approved_at < 10
+                    
                     active_cameras.append({
                         "camera_id": cam_id,
-                        "last_seen": last_seen,
-                        "ip_address": state.get("ip_address", "unknown"),
-                        "online": False,
-                        "status": "disconnected",
-                        "age_seconds": current_time - last_seen
+                        "camera_name": camera_data.get("name", f"Camera {cam_id.split('_')[-1]}"),
+                        "last_seen": camera_data.get("last_seen", 0),
+                        "ip_address": camera_data.get("ip_address", "unknown"),
+                        "online": recently_approved,  # Show as online if recently approved
+                        "status": "connected" if recently_approved else "disconnected",
+                        "age_seconds": current_time - camera_data.get("last_seen", current_time),
+                        "registered": True,
+                        "pending": False
                     })
             
             response = {
                 "cameras": active_cameras,
                 "count": len(active_cameras),
                 "connected_count": len([c for c in active_cameras if c["online"]]),
+                "registered_count": len([c for c in active_cameras if c["registered"]]),
                 "timestamp": current_time
             }
             
@@ -1054,13 +1203,25 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
             
         except Exception as e:
             logger.error(f"Camera list error: {e}")
-            self.send_error(500, "Internal Server Error")
+        self.send_error(500, "Internal Server Error")
     
     def get_camera_state(self, camera_id):
-        """Return camera's control flags"""
+        """Return camera's control flags from analytics state"""
         try:
+            # Get the camera state from analytics
             state = self.analytics.camera_states.get(camera_id, {})
-            flags = state.get("control_flags", {})
+            
+            # Ensure we have default flags
+            flags = state.get("control_flags", {
+                "record": False,
+                "show_raw": False,
+                "set_background": False,
+                "auto_update_bg": False,
+                "show_safe_area": False,
+                "use_safety_check": True,
+                "analytics_mode": True,
+                "fall_algorithm": 3
+            })
             
             # Add metadata and connection status
             with frame_lock:
@@ -1078,7 +1239,7 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Camera state error for {camera_id}: {e}")
             self.send_error(500, "Internal Server Error")
-    
+        
     def get_camera_status(self, camera_id):
         """Return camera connection status"""
         try:
@@ -1116,7 +1277,7 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
         """Set safe areas for camera"""
         try:
             data = json.loads(body.decode())
-            camera_id = data.get("camera_id", "maixcam_001")
+            camera_id = data.get("camera_id", "camera_000")
             safe_areas = data.get("safe_areas", [])
             
             if camera_id not in self.analytics.camera_states:
@@ -1150,16 +1311,10 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 hme_mode = upload_data.get("hme_mode", False)
                 
                 if hme_mode and USE_HME:
-                    # HME mode: process encrypted features
                     encrypted_features = upload_data.get("encrypted_features", {})
-                    
-                    # Analytics performs encrypted comparisons
                     comparison_results = pose_estimator.perform_hme_comparisons(encrypted_features)
                     
                     if comparison_results:
-                        # Send comparison results to caregiver for decryption
-                        # In real implementation, this would be sent back to the caregiver
-                        # For now, we'll simulate the decryption locally
                         pose_label = pose_estimator.decrypt_comparison_results(comparison_results)
                         
                         upload_data["server_analysis"] = {
@@ -1170,7 +1325,6 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                         
                         print(f"[HME] Processed encrypted features from {camera_id}, pose: {pose_label}")
                 else:
-                    # Plain mode: original server-side analysis
                     if "keypoints" in upload_data and "bbox" in upload_data:
                         track_id = upload_data.get("track_id", 0)
                         pose_data = analyze_pose_on_server(
@@ -1208,8 +1362,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                 "total_cameras": len(self.analytics.camera_states),
                 "connected_cameras": connected_cameras,
                 "diagnoses": len(self.analytics.diagnosis_history),
-                "wifi_connected": self.analytics.wifi_connector.connected,
-                "wifi_ssid": self.analytics.wifi_connector.ssid,
+                "server_uptime": time.time() - self.analytics.start_time,
+                "network_connectivity": self.analytics.network_manager.check_connectivity(),
                 "timestamp": time.time(),
                 "fall_threshold": FALL_COUNT_THRES,
                 "queue_size": queue_size,
@@ -1225,21 +1379,18 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
     def get_server_info(self):
         """Return server information"""
         try:
-            hostname = socket.gethostname()
-            info = {
-                "ip": self.analytics.wifi_connector.ip_address,
-                "hostname": hostname,
-                "wifi_ssid": self.analytics.wifi_connector.ssid,
-                "wifi_connected": self.analytics.wifi_connector.connected,
+            server_info = self.analytics.network_manager.get_server_info()
+            server_info.update({
                 "port": self.analytics.http_port,
-                "uptime": getattr(self.analytics, 'start_time', time.time()),
+                "uptime": time.time() - self.analytics.start_time,
                 "cameras_registered": len(self.analytics.camera_states),
                 "pose_estimator": "Available" if pose_estimator else "Not available",
                 "fall_detection": "Available (using same logic as MaixCAM)",
-                "fall_threshold": FALL_COUNT_THRES
-            }
+                "fall_threshold": FALL_COUNT_THRES,
+                "environment": "VPS"
+            })
             
-            self.send_json_response(200, info)
+            self.send_json_response(200, server_info)
             
         except Exception as e:
             logger.error(f"Server info error: {e}")
@@ -1269,7 +1420,8 @@ class AnalyticsHTTPHandler(BaseHTTPRequestHandler):
                             'connected': state.get('connected', False)
                         }
                         for cam_id, state in self.analytics.camera_states.items()
-                    }
+                    },
+                    'network_info': self.analytics.network_manager.get_server_info()
                 }
             
             self.send_json_response(200, debug_info)
@@ -1298,11 +1450,12 @@ class PatientAnalytics:
     def __init__(self, port=8000):
         self.connected_cameras: Dict = {}
         self.diagnosis_history = []
-        self.camera_states = {}  # camera_id -> control_flags, safe_areas, etc.
-        self.latest_skeletal_data = {}  # camera_id -> latest skeletal data
+        self.camera_states = {}
+        self.latest_skeletal_data = {}
         
-        # WiFi connection
-        self.wifi_connector = WiFiConnector("MaixCAM-Wifi", "maixcamwifi")
+        # Network manager for VPS
+        self.network_manager = NetworkManager()
+        load_camera_registry()
         
         # HTTP server
         self.http_port = port
@@ -1310,7 +1463,15 @@ class PatientAnalytics:
         
         # Create default placeholder frame
         create_placeholder_frame("default")
+
+        # Production settings
+        self.production_mode = os.environ.get('PRODUCTION', 'False').lower() == 'true'
         
+        if self.production_mode:
+            logger.info("Running in PRODUCTION mode")
+            global debug_print
+            debug_print = lambda *args: None
+
         # Start time
         self.start_time = time.time()
         
@@ -1321,17 +1482,19 @@ class PatientAnalytics:
     def start_http_server(self):
         """Start HTTP server"""
         try:
-            # Connect to WiFi first
-            logger.info("Connecting to WiFi network...")
-            self.wifi_connector.connect_wifi()
+            network_info = self.network_manager.get_server_info()
+            logger.info(f"VPS Server Information:")
+            logger.info(f"  Public IP: {network_info.get('public_ip')}")
+            logger.info(f"  Hostname: {network_info.get('hostname')}")
+            logger.info(f"  Platform: {network_info.get('platform')}")
+            logger.info(f"  Connectivity: {'OK' if network_info.get('connectivity') else 'Limited'}")
             
             # Start HTTP server
             server_address = ('0.0.0.0', self.http_port)
             handler_class = lambda *args, **kwargs: AnalyticsHTTPHandler(*args, analytics=self, **kwargs)
             self.http_server = HTTPServer(server_address, handler_class)
             
-            # Get the actual IP
-            ip = self.wifi_connector.ip_address or "0.0.0.0"
+            ip = self.network_manager.ip_address
             
             logger.info(f"HTTP server starting on port {self.http_port}")
             logger.info(f"Dashboard available at: http://{ip}:{self.http_port}")
@@ -1342,7 +1505,6 @@ class PatientAnalytics:
                 os.makedirs('static', exist_ok=True)
                 logger.info("Please place index.html, style.css, and script.js in the static/ directory")
             
-            # Log pose estimation status
             logger.info(f"Pose Estimator: {'Available' if pose_estimator else 'Not available'}")
             logger.info(f"Fall Detection: Available (using same logic as MaixCAM)")
             logger.info(f"Fall Threshold: {FALL_COUNT_THRES}")
@@ -1352,10 +1514,11 @@ class PatientAnalytics:
             server_thread.start()
             
             logger.info("=" * 60)
-            logger.info("📊 Analytics Gateway Service Started Successfully!")
-            logger.info(f"🌐 Analytics IP: {ip}")
+            logger.info("☁️  Cloud Analytics Gateway Service Started Successfully!")
+            logger.info(f"🌐 Public IP: {ip}")
             logger.info(f"🖥️  Dashboard: http://{ip}:{self.http_port}")
             logger.info(f"🎯 Using same pose/fall detection as MaixCAM")
+            logger.info(f"🏢 Environment: VPS/Cloud")
             logger.info("=" * 60)
             
             return True
@@ -1365,14 +1528,13 @@ class PatientAnalytics:
             return False
     
     def forward_to_camera(self, camera_id, command, value):
-        """Forward command to MaixCAM"""
+        """Forward command to MaixCAM (for commands that need immediate action)"""
         try:
             with frame_lock:
                 frame_info = camera_frames.get(camera_id, {})
                 camera_ip = frame_info.get('source_addr')
             
             if not camera_ip:
-                # Try to get IP from camera state
                 state = self.camera_states.get(camera_id, {})
                 camera_ip = state.get('ip_address')
             
@@ -1380,33 +1542,30 @@ class PatientAnalytics:
                 logger.debug(f"No IP known for camera {camera_id}")
                 return False
             
-            # Send command to MaixCAM (assuming MaixCAM is listening on port 8080)
-            url = f"http://{camera_ip}:8080/command"
-            payload = {
-                "command": command,
-                "value": value,
-                "camera_id": camera_id
-            }
+            # Only forward commands that need immediate action
+            # Don't forward flag updates - camera will poll for these
+            if command in ["set_background", "update_safe_areas"]:
+                url = f"http://{camera_ip}:8080/command"
+                payload = {
+                    "command": command,
+                    "value": value,
+                    "camera_id": camera_id
+                }
+                
+                try:
+                    response = requests.post(url, json=payload, timeout=1.0)
+                    success = response.status_code == 200
+                    if success:
+                        logger.info(f"Command forwarded to {camera_id} at {camera_ip}: {command}")
+                    else:
+                        logger.warning(f"Command forwarding failed: HTTP {response.status_code}")
+                    return success
+                except requests.exceptions.RequestException as e:
+                    logger.debug(f"Command forwarding error: {e}")
+                    return False
             
-            try:
-                response = requests.post(
-                    url,
-                    json=payload,
-                    timeout=1.0
-                )
-                
-                success = response.status_code == 200
-                if success:
-                    logger.info(f"Command forwarded to {camera_id} at {camera_ip}")
-                else:
-                    logger.warning(f"Command forwarding failed: HTTP {response.status_code}")
-                
-                return success
-                
-            except requests.exceptions.RequestException as e:
-                logger.debug(f"Command forwarding error: {e}")
-                return False
-                
+            return True  # Flag updates don't need forwarding
+            
         except Exception as e:
             logger.error(f"Forward error: {e}")
             return False
@@ -1414,21 +1573,16 @@ class PatientAnalytics:
     def process_skeletal_data(self, camera_id: str, data: dict):
         """Process skeletal data from camera via HTTP"""
         try:
-            # Store latest data
             self.latest_skeletal_data[camera_id] = data
             
-            # Get pose data (use server analysis if available, otherwise use camera data)
             pose_data = data.get("server_analysis") or data.get("pose_data")
             
-            # Perform analytics using server-side analysis
             diagnosis = self.perform_advanced_analysis(camera_id, pose_data, data)
             
-            # Store diagnosis
             if diagnosis:
                 self.diagnosis_history.append(diagnosis)
             
             logger.info(f"Processed skeletal data from {camera_id}, alert: {diagnosis.get('alert_level', 'normal') if diagnosis else 'N/A'}")
-                
         except Exception as e:
             logger.error(f"Error processing skeletal data from {camera_id}: {e}")
 
@@ -1439,7 +1593,6 @@ class PatientAnalytics:
             track_id = data.get("track_id")
             pose_data = data.get("pose_data", {})
             
-            # Get server analysis if available
             server_analysis = data.get("server_analysis")
             
             if alert_type == "fall_detected" and server_analysis:
@@ -1457,7 +1610,6 @@ class PatientAnalytics:
                 logger.warning(f"  Threshold: {FALL_COUNT_THRES}")
             else:
                 logger.warning(f"Pose alert from {camera_id}: {alert_type} for track {track_id}")
-            
         except Exception as e:
             logger.error(f"Error processing pose alert from {camera_id}: {e}")
 
@@ -1466,7 +1618,6 @@ class PatientAnalytics:
         try:
             timestamp = full_data.get("timestamp", time.time())
             
-            # Get fall detection info from server analysis if available
             fall_detected = False
             fall_confidence = 0.0
             
@@ -1475,7 +1626,6 @@ class PatientAnalytics:
                 fall_detected_new = pose_data.get("fall_detected_new", False)
                 fall_detected = fall_detected_old or fall_detected_new
                 
-                # Calculate fall confidence based on counters
                 counter_old = pose_data.get("fall_counter_old", 0)
                 counter_new = pose_data.get("fall_counter_new", 0)
                 fall_threshold = pose_data.get("fall_threshold", FALL_COUNT_THRES)
@@ -1485,10 +1635,8 @@ class PatientAnalytics:
                 else:
                     fall_confidence = min(counter_old, counter_new) / max(fall_threshold, 1)
             
-            # Activity classification from pose data
             activity = pose_data.get('label', 'unknown') if pose_data else 'unknown'
             
-            # Enhanced risk assessment using server-side fall detection
             overall_risk = self.assess_overall_risk(fall_confidence, activity, fall_detected)
             
             diagnosis = {
@@ -1504,7 +1652,8 @@ class PatientAnalytics:
                 "alert_level": self.determine_alert_level(overall_risk, fall_detected),
                 "recommendations": self.generate_recommendations(overall_risk, activity, fall_detected),
                 "confidence": 0.9 if fall_detected else 0.7,
-                "analysis_source": "server_side" if full_data.get("server_analysis") else "camera_side"
+                "analysis_source": "server_side" if full_data.get("server_analysis") else "camera_side",
+                "server_type": "vps_cloud"
             }
             
             logger.info(f"Generated diagnosis for {camera_id}: {diagnosis['alert_level']} (Fall: {fall_detected})")
@@ -1519,7 +1668,7 @@ class PatientAnalytics:
         activity_risk = self.activity_risk(activity)
         
         if fall_detected:
-            overall_risk = 0.8 + (fall_confidence * 0.2)  # Base 0.8 for detected fall
+            overall_risk = 0.8 + (fall_confidence * 0.2)
         else:
             overall_risk = (fall_confidence * 0.7) + (activity_risk * 0.3)
         
@@ -1591,21 +1740,36 @@ class PatientAnalytics:
             self.http_server.server_close()
         logger.info("All servers stopped")
 
+def cleanup_pending_registrations():
+    """Clean up old pending registrations"""
+    with registry_lock:
+        current_time = time.time()
+        expired = []
+        
+        for ip_address, data in pending_registrations.items():
+            if current_time - data["timestamp"] > 3600:
+                expired.append(ip_address)
+        
+        for ip_address in expired:
+            del pending_registrations[ip_address]
+        
+        if expired:
+            logger.info(f"Cleaned up {len(expired)} expired pending registrations")
+
 def main():
     """Main function to start the analytics service"""
     analytics = PatientAnalytics(port=8000)
     
     try:
-        # Start HTTP server
         if not analytics.start_http_server():
             logger.error("Failed to start HTTP server")
             return
         
         logger.info("Press Ctrl+C to stop the service.")
         
-        # Keep the server running
         while True:
             time.sleep(1)
+            cleanup_pending_registrations()
         
     except KeyboardInterrupt:
         logger.info("Shutting down analytics service...")
