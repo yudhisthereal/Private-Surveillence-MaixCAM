@@ -3,3 +3,6 @@ model/yolo11n-pose_320x224_int8.cvimodel
 LaTeX/
 playground/
 hme_from_sona/
+pose/
+analytics.py
+./ssh
