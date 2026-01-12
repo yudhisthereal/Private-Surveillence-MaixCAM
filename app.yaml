@@ -1,6 +1,6 @@
 id: privatecctv
 name: Private CCTV
-version: 1.0.0
+version: 1.1.0
 author: yudhisthereal
 icon: ''
 desc: >-
@@ -13,13 +13,11 @@ files:
   - pose/__init__.py
   - pose/judge_fall.py
   - pose/pose_estimation.py
-  - static/index.html
-  - static/script.js
-  - static/style.css
   - tools/__init__.py
   - tools/skeleton_saver.py
   - tools/time_utils.py
   - tools/video_record.py
   - tools/web_server.py
   - tools/wifi_connect.py
+  - debug_config.py
   - main.py
