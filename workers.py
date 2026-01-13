@@ -125,7 +125,8 @@ class StateReporterWorker(threading.Thread):
                 if current_time - self.last_report_time > self.report_interval:
                     # Report state using the helper function
                     success = report_state(
-                        rtmp_connected=rtmp_connected
+                        rtmp_connected=rtmp_connected,
+                        is_recording=get_is_recording()
                     )
                     
                     if success:

@@ -445,15 +445,16 @@ def get_safe_areas_from_server():
         print(f"Get safe areas error: {e}")
         return []
 
-def report_state(rtmp_connected=False):
+def report_state(rtmp_connected=False, is_recording=False):
     """Report camera state to streaming server"""
     try:
         camera_id = get_current_camera_id()
         STREAMING_HTTP_URL = _get_streaming_http_url()
         state_report = {
-            "camera_id": camera_id,
-            "status": "online",
-            "rtmp_connected": rtmp_connected
+            "CameraId": camera_id,
+            "Status": "online",
+            "IsRecording": is_recording,
+            "RtmpConnected": rtmp_connected
         }
         url = f"{STREAMING_HTTP_URL}/api/stream/report-state"
         response = requests.post(
