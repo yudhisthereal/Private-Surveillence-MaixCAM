@@ -405,9 +405,9 @@ def send_background_updated(timestamp):
         response = requests.post(
             url,
             json={
-                "camera_id": camera_id,
-                "command": "background_updated",
-                "value": {"timestamp": timestamp}
+                "CameraId": camera_id,
+                "Command": "background_updated",
+                "Value": {"timestamp": timestamp}
             },
             headers={'Content-Type': 'application/json'},
             timeout=2.0
