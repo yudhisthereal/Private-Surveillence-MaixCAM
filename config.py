@@ -6,6 +6,10 @@ import time
 import socket
 import requests
 
+# Import CameraStateManager from control_manager for proper state management
+# This must be done early to ensure singleton pattern works correctly
+from control_manager import camera_state_manager
+
 # ============================================
 # SERVER CONFIGURATION
 # ============================================
@@ -18,6 +22,8 @@ RTMP_SERVER_URL = f"rtmp://{STREAMING_SERVER_IP}:1935"
 # CAMERA IDENTITY
 # ============================================
 CAMERA_INFO_FILE = "/root/camera_info.json"
+CAMERA_ID = None
+CAMERA_NAME = None
 
 def get_local_ip():
     """Get local IP address"""
@@ -159,6 +165,7 @@ def check_registration_status(server_ip, camera_id, local_ip):
         return "unknown"
 
 def initialize_camera():
+    global CAMERA_ID, CAMERA_NAME
     """Initialize camera by loading existing info or registering new"""
     # Load or register camera
     CAMERA_ID, CAMERA_NAME, registration_status, saved_ip, last_reg = load_camera_info()
@@ -202,6 +209,12 @@ def initialize_camera():
     print(f"Status: {registration_status}")
     print(f"Local IP: {local_ip}")
 
+    # Update CameraStateManager with the final state
+    camera_state_manager.set_camera_id(CAMERA_ID, notify=False)
+    camera_state_manager.set_camera_name(CAMERA_NAME)
+    camera_state_manager.set_registration_status(registration_status, notify=False)
+    camera_state_manager.set_local_ip(local_ip)
+
     return CAMERA_ID, CAMERA_NAME, registration_status, local_ip
 
 # ============================================
@@ -232,3 +245,8 @@ SAFE_AREA_FILE = "/root/safe_areas.json"
 BACKGROUND_PATH = "/root/static/background.jpg"
 LOCAL_PORT = 8080
 
+# Garbage Collection
+GC_INTERVAL_MS = 30000
+
+# Pose Analysis
+POSE_ANALYSIS_INTERVAL_MS = 50

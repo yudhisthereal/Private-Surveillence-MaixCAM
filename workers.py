@@ -8,14 +8,15 @@ import select
 import json
 import threading
 from config import (
-    STREAMING_HTTP_URL, CAMERA_ID, FLAG_SYNC_INTERVAL_MS, 
+    STREAMING_HTTP_URL, FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
     FRAME_UPLOAD_INTERVAL_MS, LOCAL_PORT
 )
-
-# Global flags for state reporter (will be updated by main)
-is_recording = False
-rtmp_connected = False
+from control_manager import (
+    get_camera_state_from_server, get_safe_areas_from_server, report_state,
+    camera_state_manager
+)
+from streaming import send_frame_to_server
 
 class FlagAndSafeAreaSyncWorker(threading.Thread):
     """Background thread for syncing flags AND safe areas from streaming server"""
@@ -34,18 +35,16 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
         self.last_successful_sync = 0
         self.last_safe_area_sync = 0
         
+        # Use CameraStateManager to set the camera_id
+        camera_state_manager.set_camera_id(camera_id)
+        
     def run(self):
         while self.running:
             try:
                 # 1. Get camera state (including control flags) from streaming server
-                state_response = requests.get(
-                    f"{self.streaming_url}/api/stream/camera-state?camera_id={self.camera_id}",
-                    timeout=2.0
-                )
+                flags = get_camera_state_from_server()
                 
-                if state_response.status_code == 200:
-                    flags = state_response.json()
-                    
+                if flags is not None:
                     # Check if we received valid flags
                     if flags and isinstance(flags, dict):
                         # Put flags in queue for main thread to consume
@@ -62,28 +61,23 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                         print(f"[FlagSync] Invalid flags data received")
                         self.connection_errors += 1
                 else:
-                    print(f"[FlagSync] Failed to get flags: HTTP {state_response.status_code}")
+                    print(f"[FlagSync] Failed to get camera state from server")
                     self.connection_errors += 1
                 
                 # 2. Get safe areas from streaming server (less frequent)
                 current_time = time.time()
                 if current_time - self.last_safe_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
-                    safe_areas_response = requests.get(
-                        f"{self.streaming_url}/api/stream/safe-areas?camera_id={self.camera_id}",
-                        timeout=2.0
-                    )
+                    safe_areas = get_safe_areas_from_server()
                     
-                    if safe_areas_response.status_code == 200:
-                        safe_areas = safe_areas_response.json()
-                        if isinstance(safe_areas, list):
-                            try:
-                                self.safe_areas_queue.put_nowait(("safe_areas_update", safe_areas))
-                                print(f"[SafeAreaSync] Safe areas synced ({len(safe_areas)} polygons)")
-                                self.last_safe_area_sync = current_time
-                            except queue.Full:
-                                pass
+                    if safe_areas is not None and isinstance(safe_areas, list):
+                        try:
+                            self.safe_areas_queue.put_nowait(("safe_areas_update", safe_areas))
+                            print(f"[SafeAreaSync] Safe areas synced ({len(safe_areas)} polygons)")
+                            self.last_safe_area_sync = current_time
+                        except queue.Full:
+                            pass
                     else:
-                        print(f"[SafeAreaSync] Failed to get safe areas: HTTP {safe_areas_response.status_code}")
+                        print(f"[SafeAreaSync] Failed to get safe areas from server")
                 
             except requests.exceptions.Timeout:
                 self.connection_errors += 1
@@ -129,33 +123,15 @@ class StateReporterWorker(threading.Thread):
                 
                 # Check if it's time to send a heartbeat/report
                 if current_time - self.last_report_time > self.report_interval:
-                    # Build state report with current camera status
-                    # Note: We report state only - camera does NOT send control_flags
-                    # as it cannot modify them (server is the authority)
-                    state_report = {
-                        "camera_id": self.camera_id,
-                        "timestamp": int(time.time() * 1000),
-                        "status": "online",
-                        "is_recording": is_recording,
-                        "rtmp_connected": rtmp_connected
-                    }
+                    # Report state using the helper function
+                    success = report_state(
+                        rtmp_connected=rtmp_connected
+                    )
                     
-                    try:
-                        # Send to the proper state report endpoint (NOT command endpoint)
-                        response = requests.post(
-                            f"{self.streaming_url}/api/stream/report-state",
-                            json=state_report,
-                            headers={'Content-Type': 'application/json'},
-                            timeout=2.0
-                        )
-                        
-                        if response.status_code == 200:
-                            print(f"[StateReporter] State reported successfully to /api/stream/report-state")
-                        else:
-                            print(f"[StateReporter] Failed: HTTP {response.status_code}")
-                            
-                    except Exception as e:
-                        print(f"[StateReporter] State report error: {e}")
+                    if success:
+                        print(f"[StateReporter] State reported successfully to /api/stream/report-state")
+                    else:
+                        print(f"[StateReporter] Failed to report state")
                     
                     self.last_report_time = current_time
                 
@@ -190,21 +166,12 @@ class FrameUploadWorker(threading.Thread):
                 current_time = time.time() * 1000  # Convert to ms
                 # Limit upload rate to avoid overwhelming server
                 if current_time - self.last_upload_time > self.upload_interval * 1000:
-                    try:
-                        response = requests.post(
-                            f"{self.streaming_url}/api/stream/upload-frame",
-                            headers={'X-Camera-ID': self.camera_id},
-                            data=frame_data,
-                            timeout=2.0
-                        )
-                        
-                        if response.status_code == 200:
-                            self.last_upload_time = current_time
-                        else:
-                            print(f"[FrameUpload] Failed: HTTP {response.status_code}")
-                            
-                    except Exception as e:
-                        print(f"[FrameUpload] Error: {e}")
+                    success = send_frame_to_server(frame_data, self.camera_id)
+                    
+                    if success:
+                        self.last_upload_time = current_time
+                    else:
+                        print(f"[FrameUpload] Failed to upload frame")
                 
                 self.frame_queue.task_done()
                 
@@ -213,6 +180,51 @@ class FrameUploadWorker(threading.Thread):
                 pass
             except Exception as e:
                 print(f"[FrameUpload] Queue error: {e}")
+    
+    def stop(self):
+        self.running = False
+
+class PingWorker(threading.Thread):
+    """Background thread for sending periodic pings to streaming server
+    
+    This worker pings the streaming server every 250ms to notify the server
+    that this camera is connected and alive. Uses fire-and-forget pattern.
+    
+    IMPORTANT: Pings are only sent when the camera is registered (not pending/unregistered).
+    The registration status is checked dynamically using CameraStateManager.
+    """
+    
+    def __init__(self, streaming_url, camera_id, ping_interval_ms=250):
+        super().__init__(daemon=True)
+        self.streaming_url = streaming_url
+        self.camera_id = camera_id
+        self.ping_interval = ping_interval_ms / 1000.0  # Convert to seconds
+        self.running = True
+        
+        # Use CameraStateManager for registration status checks
+        camera_state_manager.set_camera_id(camera_id)
+        
+    def run(self):
+        from streaming import ping_streaming_server
+        
+        while self.running:
+            try:
+                # Only ping if camera is registered
+                # Check registration status dynamically via CameraStateManager
+                status = camera_state_manager.get_registration_status()
+                
+                # Get camera_id from CameraStateManager (in case it was updated)
+                camera_id = camera_state_manager.get_camera_id()
+                
+                if status == "registered" and camera_id and camera_id != "camera_000":
+                    # Fire-and-forget ping - don't wait for response
+                    ping_streaming_server(camera_id)
+            except Exception:
+                # Silently ignore ping errors
+                pass
+            
+            # Sleep for ping interval
+            time.sleep(self.ping_interval)
     
     def stop(self):
         self.running = False
@@ -298,7 +310,7 @@ class CommandReceiver(threading.Thread):
                                     received_commands.append(data)
                                 
                                 response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
-                                response += json.dumps({"status": "success", "camera_id": CAMERA_ID})
+                                response += json.dumps({"status": "success", "camera_id": camera_state_manager.get_camera_id()})
                                 conn.send(response.encode())
                                 print(f"Received command from {addr[0]}: {data.get('command')} = {data.get('value')}")
                     else:
@@ -366,7 +378,7 @@ def handle_command(command, value, camera_id, registration_status, save_camera_i
         print(f"✅ Camera approval received!")
         if registration_status == "pending":
             registration_status = "registered"
-            save_camera_info_func(camera_id, CAMERA_NAME, "registered", "")
+            save_camera_info_func(camera_id, camera_state_manager.get_camera_name(), "registered", "")
             print(f"Camera status updated to: registered")
 
 def get_default_control_flags():
@@ -383,13 +395,36 @@ def get_default_control_flags():
         "hme": False
     }
 
-def update_is_recording(value):
-    """Update global is_recording flag"""
-    global is_recording
-    is_recording = value
-
 def update_rtmp_connected(value):
     """Update global rtmp_connected flag"""
     global rtmp_connected
     rtmp_connected = value
+
+# Recording state synchronization
+_recording_state = {
+    "is_recording": False
+}
+
+def update_is_recording(recording):
+    """Update and synchronize is_recording state across modules
+    
+    This function should be called whenever recording state changes.
+    It ensures all modules have access to the current recording state.
+    
+    Args:
+        recording: Boolean indicating if recording is active
+    """
+    global _recording_state
+    old_state = _recording_state["is_recording"]
+    _recording_state["is_recording"] = recording
+    if old_state != recording:
+        print(f"[SYNC] is_recording updated: {old_state} -> {recording}")
+
+def get_is_recording():
+    """Get current recording state
+    
+    Returns:
+        Boolean indicating if recording is currently active
+    """
+    return _recording_state["is_recording"]
 

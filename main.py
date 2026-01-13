@@ -20,17 +20,18 @@ from camera_manager import (
 from control_manager import (
     load_initial_flags, get_control_flags, update_control_flags_from_server,
     update_control_flag, get_flag, initialize_safety_checker,
-    update_safety_checker_polygons, load_safe_areas, get_safety_checker
+    update_safety_checker_polygons, load_safe_areas, get_safety_checker,
+    send_background_updated, camera_state_manager, register_status_change_callback,
+    set_camera_id, set_camera_name, set_registration_status
 )
 from workers import (
     FlagAndSafeAreaSyncWorker, StateReporterWorker, FrameUploadWorker,
-    CommandReceiver, get_received_commands, handle_command,
-    update_is_recording, update_rtmp_connected
+    CommandReceiver, PingWorker, get_received_commands, handle_command,
+    update_is_recording, get_is_recording, update_rtmp_connected
 )
 from tracking import (
-    update_tracks, process_track, clear_track_history, get_online_targets
+    update_tracks, process_track, clear_track_history, get_online_targets, set_fps
 )
-from streaming import send_background_updated
 from tools.time_utils import time_ms, FrameProfiler
 
 import os
@@ -100,11 +101,29 @@ def main():
     )
     state_reporter_worker = StateReporterWorker(STREAMING_HTTP_URL, CAMERA_ID)
     frame_upload_worker = FrameUploadWorker(frame_queue, STREAMING_HTTP_URL, CAMERA_ID)
+    ping_worker = PingWorker(STREAMING_HTTP_URL, CAMERA_ID)
     
     flag_sync_worker.start()
     state_reporter_worker.start()
     frame_upload_worker.start()
+    ping_worker.start()
     print("✅ Async workers started successfully")
+    
+    # Register callback for registration status changes
+    # This ensures that when the camera is approved, the local status is updated
+    def on_registration_status_changed(new_status):
+        """Callback to handle registration status changes"""
+        nonlocal registration_status
+        old_status = registration_status
+        registration_status = new_status
+        print(f"[StatusChange] Registration status changed: {old_status} -> {new_status}")
+        
+        # If camera was approved, save the updated info
+        if new_status == "registered" and old_status == "pending":
+            from config import save_camera_info
+            save_camera_info(CAMERA_ID, CAMERA_NAME, "registered", local_ip)
+    
+    register_status_change_callback(on_registration_status_changed)
     
     # ============================================
     # STATE VARIABLES
@@ -129,6 +148,9 @@ def main():
     
     # Initialize frame profiler
     frame_profiler = FrameProfiler()
+    
+    # FPS tracking
+    frame_start_time = time_ms()
     
     # ============================================
     # MAIN LOOP
@@ -180,8 +202,12 @@ def main():
                 cmd_data.get("value"),
                 CAMERA_ID,
                 registration_status,
-                lambda cid, cname, status, ip: None  # Placeholder - save_camera_info imported separately if needed
+                lambda cid, cname, status, ip: save_camera_info(cid, cname, status, ip)
             )
+            
+            # If command was "approve_camera", update the CameraStateManager
+            if cmd_data.get("command") == "approve_camera":
+                camera_state_manager.set_registration_status("registered")
         frame_profiler.end_task("commands")
         
         # 3. Camera Read
@@ -256,44 +282,44 @@ def main():
         if len(human_presence_history) > NO_HUMAN_FRAMES_TO_STOP + 1:
             human_presence_history.pop(0)
         
-        # Recording logic
-        if get_flag("record", False):
-            now = time_ms()
+        # Recording logic - clean state machine approach
+        record_flag = get_flag("record", False)
+        now = time_ms()
+        
+        if record_flag and not is_recording:
+            # Start recording if: record flag is True AND not already recording
+            # AND we have confirmed human presence for minimum frames
+            if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
+                all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                video_path = f"/root/recordings/{timestamp}.mp4"
+                recorder.start(video_path, detector.input_width(), detector.input_height())
+                skeleton_saver_2d.start_new_log(timestamp)
+                frame_id = 0
+                recording_start_time = now
+                is_recording = True
+                update_is_recording(True)
+                print(f"Started recording: {timestamp}")
+        
+        if is_recording:
+            # Check if we should stop recording
+            no_human_count = 0
+            for presence in reversed(human_presence_history):
+                if not presence:
+                    no_human_count += 1
+                else:
+                    break
             
-            if not is_recording:
-                if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
-                    all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    video_path = f"/root/recordings/{timestamp}.mp4"
-                    recorder.start(video_path, detector.input_width(), detector.input_height())
-                    skeleton_saver_2d.start_new_log(timestamp)
-                    frame_id = 0
-                    recording_start_time = now
-                    is_recording = True
-                    update_is_recording(True)
-                    print(f"Started recording: {timestamp}")
-            
-            if is_recording:
-                no_human_count = 0
-                for presence in reversed(human_presence_history):
-                    if not presence:
-                        no_human_count += 1
-                    else:
-                        break
-                
-                if (no_human_count >= NO_HUMAN_FRAMES_TO_STOP or 
-                    now - recording_start_time >= MAX_RECORDING_DURATION_MS):
-                    recorder.end()
-                    skeleton_saver_2d.save_to_csv()
-                    is_recording = False
-                    update_is_recording(False)
-                    print("Stopped recording")
-        else:
-            if is_recording:
+            # Stop if: no human detected for threshold OR max duration reached
+            # OR if record flag was turned off (external control)
+            if (no_human_count >= NO_HUMAN_FRAMES_TO_STOP or 
+                now - recording_start_time >= MAX_RECORDING_DURATION_MS or
+                not record_flag):
                 recorder.end()
                 skeleton_saver_2d.save_to_csv()
                 is_recording = False
                 update_is_recording(False)
+                print("Stopped recording")
         frame_profiler.end_task("pose_detection")
         
         # 9. Process tracking
@@ -302,6 +328,13 @@ def main():
         
         if is_recording:
             frame_id += 1
+        
+        # Calculate FPS for fall detection (using time since last frame)
+        frame_end_time = time_ms()
+        frame_duration = frame_end_time - frame_start_time
+        current_fps = 1000.0 / frame_duration if frame_duration > 0 else 30.0
+        set_fps(current_fps)
+        frame_start_time = frame_end_time
         
         current_fall_counter = 0
         current_fall_detected = False
@@ -315,8 +348,15 @@ def main():
                 is_recording=is_recording,
                 skeleton_saver=skeleton_saver_2d if is_recording else None,
                 frame_id=frame_id,
-                safety_checker=safety_checker
+                safety_checker=safety_checker,
+                fps=current_fps
             )
+            
+            # Track fall detection results
+            if track_result:
+                if track_result.get("status") == "fall":
+                    current_fall_detected = True
+                    current_fall_counter += 1
         frame_profiler.end_task("tracking")
         
         # 10. Draw UI elements
@@ -332,57 +372,57 @@ def main():
         img.draw_string(10, y_position, fall_text, color=text_color, scale=font_scale)
         y_position += 15
         
-        if current_torso_angle is not None:
-            torso_text = f"Torso: {current_torso_angle:.1f}°"
-            img.draw_string(10, y_position, torso_text, color=image.COLOR_BLUE, scale=font_scale)
-            y_position += 15
+        # if current_torso_angle is not None:
+        #     torso_text = f"Torso: {current_torso_angle:.1f}°"
+        #     img.draw_string(10, y_position, torso_text, color=image.COLOR_BLUE, scale=font_scale)
+        #     y_position += 15
         
-        if current_thigh_uprightness is not None:
-            thigh_text = f"Thigh: {current_thigh_uprightness:.1f}°"
-            img.draw_string(10, y_position, thigh_text, color=image.COLOR_BLUE, scale=font_scale)
+        # if current_thigh_uprightness is not None:
+        #     thigh_text = f"Thigh: {current_thigh_uprightness:.1f}°"
+        #     img.draw_string(10, y_position, thigh_text, color=image.COLOR_BLUE, scale=font_scale)
         
-        # Draw camera status
-        status_text = f"{CAMERA_NAME} ({registration_status})"
-        img.draw_string(img.width() - 200, 10, status_text, color=image.COLOR_GREEN, scale=0.5)
+        # # Draw camera status
+        # status_text = f"{CAMERA_NAME} ({registration_status})"
+        # img.draw_string(img.width() - 200, 10, status_text, color=image.COLOR_GREEN, scale=0.5)
         
-        # Draw connection status
-        connection_text = "✓ Online" if streaming_server_available else "✗ Offline"
-        connection_color = image.COLOR_GREEN if streaming_server_available else image.COLOR_RED
-        img.draw_string(img.width() - 150, 30, connection_text, color=connection_color, scale=0.5)
+        # # Draw connection status
+        # connection_text = "✓ Online" if streaming_server_available else "✗ Offline"
+        # connection_color = image.COLOR_GREEN if streaming_server_available else image.COLOR_RED
+        # img.draw_string(img.width() - 150, 30, connection_text, color=connection_color, scale=0.5)
         
-        # Draw safe areas
-        if get_flag("show_safe_area", False):
-            for polygon in safety_checker.safe_polygons:
-                points = []
-                for x_norm, y_norm in polygon:
-                    x_pixel = int(x_norm * img.width())
-                    y_pixel = int(y_norm * img.height())
-                    points.append((x_pixel, y_pixel))
+        # # Draw safe areas
+        # if get_flag("show_safe_area", False):
+        #     for polygon in safety_checker.safe_polygons:
+        #         points = []
+        #         for x_norm, y_norm in polygon:
+        #             x_pixel = int(x_norm * img.width())
+        #             y_pixel = int(y_norm * img.height())
+        #             points.append((x_pixel, y_pixel))
                 
-                for i in range(len(points)):
-                    start_point = points[i]
-                    end_point = points[(i + 1) % len(points)]
-                    img.draw_line(start_point[0], start_point[1], 
-                                end_point[0], end_point[1], 
-                                color=image.COLOR_BLUE, thickness=2)
+        #         for i in range(len(points)):
+        #             start_point = points[i]
+        #             end_point = points[(i + 1) % len(points)]
+        #             img.draw_line(start_point[0], start_point[1], 
+        #                         end_point[0], end_point[1], 
+        #                         color=image.COLOR_BLUE, thickness=2)
         
-        # Draw recording status
-        if is_recording:
-            recording_time = (time_ms() - recording_start_time) // 1000
-            status_text = f"REC {recording_time}s"
-            text_x = img.width() - 100
-            text_y = 50
-            img.draw_string(int(text_x), int(text_y), status_text, color=image.COLOR_RED, scale=0.5)
+        # # Draw recording status
+        # if is_recording:
+        #     recording_time = (time_ms() - recording_start_time) // 1000
+        #     status_text = f"REC {recording_time}s"
+        #     text_x = img.width() - 100
+        #     text_y = 50
+        #     img.draw_string(int(text_x), int(text_y), status_text, color=image.COLOR_RED, scale=0.5)
         
-        # Draw operation mode
-        if get_flag("analytics_mode", True):
-            mode_text = f"Mode: Analytics (Alg:{current_fall_algorithm})"
-            mode_color = image.Color.from_rgb(0, 255, 255)
-        else:
-            mode_text = f"Mode: Local (Alg:{current_fall_algorithm})"
-            mode_color = image.Color.from_rgb(255, 165, 0)
+        # # Draw operation mode
+        # if get_flag("analytics_mode", True):
+        #     mode_text = f"Mode: Analytics (Alg:{current_fall_algorithm})"
+        #     mode_color = image.Color.from_rgb(0, 255, 255)
+        # else:
+        #     mode_text = f"Mode: Local (Alg:{current_fall_algorithm})"
+        #     mode_color = image.Color.from_rgb(255, 165, 0)
         
-        img.draw_string(10, 15, mode_text, color=mode_color, scale=0.5)
+        # img.draw_string(10, 15, mode_text, color=mode_color, scale=0.5)
         frame_profiler.end_task("ui_drawing")
         
         # 11. Recording and Display
@@ -424,6 +464,7 @@ def main():
     flag_sync_worker.stop()
     state_reporter_worker.stop()
     frame_upload_worker.stop()
+    ping_worker.stop()
     
     if is_recording:
         recorder.end()

@@ -1,8 +1,6 @@
 # camera_manager.py - Camera and display initialization, RTMP streaming setup
 
-from maix import camera, display, rtmp
-from nn import YOLO11
-import image
+from maix import camera, display, rtmp, nn, image
 
 # Global references
 cam = None
@@ -16,8 +14,9 @@ def initialize_cameras():
     global cam, disp, detector, segmentor
     
     # Initialize detectors
-    detector = YOLO11(model="/root/models/yolo11n_pose.mud", dual_buff=True)
-    segmentor = YOLO11(model="/root/models/yolo11n_seg.mud", dual_buff=True)
+    # detector = nn.YOLO11(model="/root/models/yolo11n_pose.mud", dual_buff=True)
+    detector = nn.YOLOv8(model="/root/models/tiny_pose.mud", dual_buff=True)
+    segmentor = nn.YOLO11(model="/root/models/yolo11n_seg.mud", dual_buff=True)
 
     # Initialize camera
     cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format(), fps=60)

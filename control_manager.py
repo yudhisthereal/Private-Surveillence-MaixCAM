@@ -3,7 +3,130 @@
 import os
 import json
 import time
-from config import LOCAL_FLAGS_FILE, SAFE_AREA_FILE
+
+# ============================================
+# FILE PATHS (defined locally to avoid circular imports)
+# ============================================
+
+# Local file paths for persistent storage
+LOCAL_FLAGS_FILE = "/root/control_flags.json"
+SAFE_AREA_FILE = "/root/safe_areas.json"
+
+# ============================================
+# CAMERA STATE MANAGER
+# ============================================
+
+class CameraStateManager:
+    """Singleton manager for camera state (ID and registration status)
+    
+    This class ensures that camera state changes are properly reflected
+    across all modules that need it. It uses a callback system to notify
+    interested modules when the registration status changes.
+    """
+    
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._camera_id = "camera_000"
+            cls._instance._registration_status = "unregistered"
+            cls._instance._camera_name = "Unnamed Camera"
+            cls._instance._local_ip = ""
+            cls._instance._status_change_callbacks = []
+        return cls._instance
+    
+    def get_camera_id(self):
+        """Get current camera ID"""
+        return self._camera_id
+    
+    def set_camera_id(self, camera_id, notify=True):
+        """Set camera ID and optionally notify callbacks"""
+        old_id = self._camera_id
+        self._camera_id = camera_id
+        if old_id != camera_id:
+            print(f"[CameraStateManager] Camera ID updated: {old_id} -> {camera_id}")
+    
+    def get_registration_status(self):
+        """Get current registration status"""
+        return self._registration_status
+    
+    def set_registration_status(self, status, notify=True):
+        """Set registration status and notify callbacks if changed"""
+        old_status = self._registration_status
+        self._registration_status = status
+        if old_status != status:
+            print(f"[CameraStateManager] Registration status updated: {old_status} -> {status}")
+            if notify:
+                self._notify_status_change(status)
+    
+    def get_camera_name(self):
+        """Get current camera name"""
+        return self._camera_name
+    
+    def set_camera_name(self, camera_name):
+        """Set camera name"""
+        self._camera_name = camera_name
+    
+    def get_local_ip(self):
+        """Get local IP address"""
+        return self._local_ip
+    
+    def set_local_ip(self, local_ip):
+        """Set local IP address"""
+        self._local_ip = local_ip
+    
+    def register_status_change_callback(self, callback):
+        """Register a callback to be called when registration status changes
+        
+        Args:
+            callback: Function that takes (new_status) as argument
+        """
+        if callback not in self._status_change_callbacks:
+            self._status_change_callbacks.append(callback)
+            print(f"[CameraStateManager] Registered status change callback")
+    
+    def unregister_status_change_callback(self, callback):
+        """Unregister a status change callback"""
+        if callback in self._status_change_callbacks:
+            self._status_change_callbacks.remove(callback)
+    
+    def _notify_status_change(self, new_status):
+        """Notify all registered callbacks of status change"""
+        for callback in self._status_change_callbacks:
+            try:
+                callback(new_status)
+            except Exception as e:
+                print(f"[CameraStateManager] Callback error: {e}")
+    
+    def get_state(self):
+        """Get complete camera state as a dictionary"""
+        return {
+            "camera_id": self._camera_id,
+            "camera_name": self._camera_name,
+            "registration_status": self._registration_status,
+            "local_ip": self._local_ip
+        }
+    
+    def set_state(self, state_dict, notify=True):
+        """Set complete camera state from dictionary"""
+        if "camera_id" in state_dict:
+            self.set_camera_id(state_dict["camera_id"], notify=notify)
+        if "camera_name" in state_dict:
+            self._camera_name = state_dict.get("camera_name", "Unnamed Camera")
+        if "registration_status" in state_dict:
+            self.set_registration_status(state_dict["registration_status"], notify=notify)
+        if "local_ip" in state_dict:
+            self._local_ip = state_dict.get("local_ip", "")
+
+
+# Global camera state manager instance
+camera_state_manager = CameraStateManager()
+
+
+# ============================================
+# CONTROL FLAGS MANAGEMENT
+# ============================================
 
 # Control flags (will be synced from streaming server)
 control_flags = {
@@ -115,12 +238,37 @@ def set_flag(flag_name, value):
     return update_control_flag(flag_name, value)
 
 def get_camera_id():
-    """Get current camera ID"""
-    return control_flags.get("_camera_id", "camera_000")
+    """Get current camera ID (uses CameraStateManager)"""
+    return camera_state_manager.get_camera_id()
 
 def set_camera_id(camera_id):
-    """Set camera ID"""
-    control_flags["_camera_id"] = camera_id
+    """Set camera ID (uses CameraStateManager)"""
+    camera_state_manager.set_camera_id(camera_id)
+
+# Convenience functions for CameraStateManager
+def get_registration_status():
+    """Get current registration status"""
+    return camera_state_manager.get_registration_status()
+
+def set_registration_status(status):
+    """Set registration status"""
+    camera_state_manager.set_registration_status(status)
+
+def register_status_change_callback(callback):
+    """Register callback for status changes"""
+    camera_state_manager.register_status_change_callback(callback)
+
+def get_camera_name():
+    """Get current camera name"""
+    return camera_state_manager.get_camera_name()
+
+def set_camera_name(camera_name):
+    """Set camera name"""
+    camera_state_manager.set_camera_name(camera_name)
+
+def get_camera_state():
+    """Get complete camera state"""
+    return camera_state_manager.get_state()
 
 # ============================================
 # SAFE AREAS MANAGEMENT
@@ -173,12 +321,9 @@ def save_safe_areas(safe_areas):
         return False
 
 def update_safety_checker_polygons(safe_areas):
+    global safety_checker
     """Update the safety checker with safe areas"""
     try:
-        if safety_checker is None:
-            from tools.safe_area import BodySafetyChecker
-            safety_checker = BodySafetyChecker()
-        
         safety_checker.clear_safe_polygons()
         for polygon in safe_areas:
             if isinstance(polygon, list) and len(polygon) >= 3:
@@ -196,13 +341,8 @@ def update_safety_checker_polygons(safe_areas):
         return False
 
 def add_safe_area(polygon):
-    """Add a safe area polygon"""
-    from tools.safe_area import BodySafetyChecker
-    
+    """Add a safe area polygon"""    
     global safety_checker
-    
-    if safety_checker is None:
-        safety_checker = BodySafetyChecker()
     
     safety_checker.add_safe_polygon(polygon)
     print(f"Added safe area polygon with {len(polygon)} points")
@@ -211,6 +351,7 @@ def add_safe_area(polygon):
     save_all_safe_areas()
 
 def clear_safe_areas():
+    global safety_checker
     """Clear all safe areas"""
     if safety_checker:
         safety_checker.clear_safe_polygons()
@@ -223,14 +364,106 @@ def save_all_safe_areas():
         save_safe_areas(safety_checker.safe_polygons)
 
 def is_point_safe(x, y):
+    global safety_checker
     """Check if a point is in a safe area"""
     if safety_checker is None:
         return True  # No safe areas = everywhere is safe
     return safety_checker.is_point_safe((x, y))
 
 def body_in_safe_zone(body_keypoints, check_method=CheckMethod.TORSO_HEAD):
+    global safety_checker
     """Check if body keypoints are in safe zone"""
     if safety_checker is None:
         return True  # No safe areas = everywhere is safe
     return safety_checker.body_in_safe_zone(body_keypoints, check_method)
+
+
+# ============================================
+# STREAMING SERVER COMMUNICATION (Camera State & Safe Areas)
+# ============================================
+
+import requests
+
+# Import STREAMING_HTTP_URL here to avoid circular import
+# This is done at the end so that config.py can safely import from control_manager
+def _get_streaming_http_url():
+    """Get STREAMING_HTTP_URL from config (lazy import to avoid circular dependency)"""
+    from config import STREAMING_HTTP_URL
+    return STREAMING_HTTP_URL
+
+# Get camera_id from CameraStateManager instead of direct import
+def get_current_camera_id():
+    """Get current camera ID from CameraStateManager"""
+    return camera_state_manager.get_camera_id()
+
+def send_background_updated(timestamp):
+    """Notify streaming server that background was updated"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/command"
+        response = requests.post(
+            url,
+            json={
+                "camera_id": camera_id,
+                "command": "background_updated",
+                "value": {"timestamp": timestamp}
+            },
+            headers={'Content-Type': 'application/json'},
+            timeout=2.0
+        )
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Background update notification error: {e}")
+        return False
+
+def get_camera_state_from_server():
+    """Get camera state (including control flags) from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/camera-state?camera_id={camera_id}"
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"Get camera state error: {e}")
+        return None
+
+def get_safe_areas_from_server():
+    """Get safe areas from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/safe-areas?camera_id={camera_id}"
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        print(f"Get safe areas error: {e}")
+        return []
+
+def report_state(rtmp_connected=False):
+    """Report camera state to streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        state_report = {
+            "camera_id": camera_id,
+            "status": "online",
+            "rtmp_connected": rtmp_connected
+        }
+        url = f"{STREAMING_HTTP_URL}/api/stream/report-state"
+        response = requests.post(
+            url,
+            json=state_report,
+            headers={'Content-Type': 'application/json'},
+            timeout=2.0
+        )
+        return response.status_code == 200
+    except Exception as e:
+        print(f"State report error: {e}")
+        return False
 

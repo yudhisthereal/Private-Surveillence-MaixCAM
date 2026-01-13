@@ -2,8 +2,11 @@
 
 import queue
 import numpy as np
-from maix import tracker
+from maix import tracker, image
 from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
+from pose.pose_estimation import PoseEstimation
+
+pose_estimator = PoseEstimation()
 
 # Tracking parameters
 max_lost_buff_time = 30
@@ -34,6 +37,18 @@ online_targets = {
 # Fall and unsafe IDs tracking
 fall_ids = set()
 unsafe_ids = set()
+
+# FPS tracking for fall detection
+current_fps = 30.0
+
+def set_fps(fps):
+    """Set the current FPS for fall detection calculations"""
+    global current_fps
+    current_fps = fps if fps > 0 else 30.0
+
+def get_fps():
+    """Get the current FPS for fall detection calculations"""
+    return current_fps
 
 def yolo_objs_to_tracker_objs(objs, valid_class_id=[0]):
     """Convert YOLO objects to tracker objects"""
@@ -86,9 +101,12 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, detector, img, is_recording=False, skeleton_saver=None, frame_id=0, safety_checker=None, check_method=None):
+def process_track(track, objs, detector, img, is_recording=False, skeleton_saver=None, frame_id=0, safety_checker=None, check_method=None, fps=30):
     """Process a single track - draw tracking info and handle fall detection"""
-    global online_targets, fall_ids, unsafe_ids
+    global online_targets, fall_ids, unsafe_ids, current_fps
+    
+    # Update global FPS
+    current_fps = fps
     
     if track.lost:
         return None
@@ -114,16 +132,42 @@ def process_track(track, objs, detector, img, is_recording=False, skeleton_saver
                 online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
                 online_targets["points"][idx].put(obj.points)
                 
-                # Determine status color and message
+                # Check for fall detection if we have enough history
+                pose_label = "unknown"
+                if online_targets["bbox"][idx].qsize() >= 2:
+                    fall_result = check_fall(tracker_obj, online_targets, idx, fps)
+                    if fall_result:
+                        fall_info, pose_label = fall_result
+                        (fall_detected_method1, counter_method1,
+                         fall_detected_method2, counter_method2,
+                         fall_detected_method3, counter_method3) = fall_info
+                        
+                        # Update fall_ids and unsafe_ids based on detection results
+                        # Method 3 is the most conservative/fallback
+                        if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
+                            fall_ids.add(track.id)
+                            unsafe_ids.discard(track.id)
+                        elif counter_method2 > 0 or counter_method1 > 0:
+                            unsafe_ids.add(track.id)
+                            fall_ids.discard(track.id)
+                        else:
+                            # No detection, check if we should remove from unsafe
+                            if track.id in unsafe_ids:
+                                unsafe_ids.discard(track.id)
+                
+                # Determine status color and message based on updated IDs
                 if track.id in fall_ids:
                     msg = f"[{track.id}] FALL"
-                    color = img.COLOR_RED
+                    color = image.COLOR_RED
                 elif track.id in unsafe_ids:
                     msg = f"[{track.id}] UNSAFE"
-                    color = img.COLOR_ORANGE
+                    color = image.COLOR_ORANGE
                 else:
                     msg = f"[{track.id}] TRACKING"
-                    color = img.COLOR_GREEN
+                    color = image.COLOR_GREEN
+                
+                # Draw pose label above tracking info
+                img.draw_string(int(tracker_obj.x), int(tracker_obj.y) - 12, f"POSE: {pose_label}", color=image.COLOR_GREEN, scale=0.4)
                 
                 # Draw tracking info
                 img.draw_string(int(tracker_obj.x), int(tracker_obj.y), msg, color=color, scale=0.5)
@@ -146,12 +190,13 @@ def process_track(track, objs, detector, img, is_recording=False, skeleton_saver
 
 def check_fall(tracker_obj, track_history, idx, fps=30):
     """Check for fall using track history"""
-    # Get pose data from track history
-    pose_data = None
+    global current_fps, pose_estimator
     
-    # Extract pose data from the pose estimation module
-    from pose.pose_estimation import PoseEstimation
-    pose_estimator = PoseEstimation()
+    # Use provided fps or global fps
+    effective_fps = fps if fps > 0 else current_fps
+    
+    pose_data = None
+    pose_label = "unknown"
     
     # Get keypoints from history
     if not track_history["points"][idx].empty():
@@ -159,7 +204,27 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
         if keypoints_flat:
             # Get the most recent keypoints
             latest_keypoints = keypoints_flat[-1]
-            pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints))
+            
+            # Evaluate pose using PoseEstimation
+            try:
+                
+                # Check if HME mode is enabled
+                use_hme = False
+                try:
+                    from control_manager import get_flag
+                    use_hme = get_flag("hme", False)
+                except ImportError:
+                    pass
+                
+                # Evaluate pose with keypoints
+                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints), use_hme)
+                
+                # Extract label from pose_data
+                if pose_data is not None:
+                    pose_label = pose_data['label']
+            except ImportError:
+                # Fallback if pose_estimation not available
+                pass
     
     # Get HME flag from control manager
     use_hme = False
@@ -169,17 +234,20 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
     except ImportError:
         pass
     
-    # Call fall detection
-    return get_fall_info(
+    # Call fall detection with the tracker object and pose data
+    fall_info = get_fall_info(
         tracker_obj,
         track_history,
         idx,
         fallParam,
         queue_size,
-        fps,
+        effective_fps,
         pose_data,
         use_hme
     )
+    print(f"POSE DATA: {pose_data}")
+    
+    return fall_info, pose_label
 
 def update_fall_counters(fall_info):
     """Update fall counters and IDs based on fall detection result"""
