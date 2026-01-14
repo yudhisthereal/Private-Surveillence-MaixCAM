@@ -1,62 +1,59 @@
-# camera_manager.py - Camera and display initialization, RTMP streaming setup
+# camera_manager.py - Camera and display initialization (RTMP removed)
 
-from maix import camera, display, rtmp, nn, image
+from maix import camera, display, nn, image
 
 # Global references
 cam = None
 disp = None
-detector = None
-segmentor = None
-rtmp_streamer = None
+pose_extractor = None
+detector = None  # Person detection using YOLOv8
+
+# OBSOLETE: RTMP functionality has been removed
+# Old code kept as reference only (commented out):
+# from maix import rtmp
+# rtmp_streamer = None
+# cam_rtmp = None  # OBSOLETE: Separate camera for RTMP no longer needed
 
 def initialize_cameras():
-    """Initialize camera, display, and YOLO detectors"""
-    global cam, disp, detector, segmentor
+    """Initialize camera, display, and YOLO detectors
     
-    # Initialize detectors
-    # detector = nn.YOLO11(model="/root/models/yolo11n_pose.mud", dual_buff=True)
-    detector = nn.YOLOv8(model="/root/models/tiny_pose.mud", dual_buff=True)
-    segmentor = nn.YOLO11(model="/root/models/yolo11n_seg.mud", dual_buff=True)
+    Returns:
+        cam: Camera instance for capturing frames
+        disp: Display instance for showing output
+        pose_extractor: YOLO11 pose detector for keypoint extraction
+        detector: YOLOv8 person detector for human presence detection
+    """
+    global cam, disp, pose_extractor, detector
+    
+    # Initialize pose extractor (YOLO11 pose model for keypoint detection)
+    pose_extractor = nn.YOLO11(model="/root/models/yolo11n_pose.mud", dual_buff=True)
+    
+    # Initialize person detector (YOLOv8 for detecting person existence)
+    detector = nn.YOLO11(model="/root/models/yolo11n.mud", dual_buff=True)
 
-    # Initialize camera
-    cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format(), fps=60)
+    # Initialize camera (single camera, no RTMP)
+    cam = camera.Camera(pose_extractor.input_width(), pose_extractor.input_height(), pose_extractor.input_format(), fps=60)
     disp = display.Display()
 
-    print(f"Camera initialized: {detector.input_width()}x{detector.input_height()} @ {cam.fps()} fps")
+    print(f"Camera initialized: {pose_extractor.input_width()}x{pose_extractor.input_height()} @ {cam.fps()} fps")
+    print(f"Pose extractor: /root/models/yolo11n_pose.mud")
+    print(f"Person detector: /root/models/yolo11n.mud")
     
-    return cam, disp, detector, segmentor
+    return cam, disp, pose_extractor, detector
 
-def setup_rtmp_stream(display_obj, camera_id):
-    """Setup RTMP streaming to streaming server"""
-    global rtmp_streamer
-    
-    from config import RTMP_SERVER_URL, STREAMING_SERVER_IP
-    
-    rtmp_url = f"{RTMP_SERVER_URL}/live/{camera_id}"
-    
-    try:
-        print(f"Setting up RTMP stream to: {rtmp_url}")
-        rtmp_streamer = rtmp.Rtmp(STREAMING_SERVER_IP, 1935, 'live', camera_id, 1000000)
-        rtmp_streamer.bind_display(display_obj)
-        rtmp_streamer.start()
-        print("✅ RTMP streaming started")
-        return True
-    except Exception as e:
-        print(f"❌ RTMP setup error: {e}")
-        return False
+# OBSOLETE: RTMP functions kept as reference only (commented out):
+# def setup_rtmp_stream(cam, camera_id):
+#     """OBSOLETE: RTMP streaming has been removed"""
+#     pass
+#
+# def stop_rtmp_stream():
+#     """OBSOLETE: RTMP streaming has been removed"""
+#     pass
 
 def load_fonts():
     """Load default fonts for image rendering"""
     image.load_font("sourcehansans", "/maixapp/share/font/SourceHanSansCN-Regular.otf", size=32)
     image.set_default_font("sourcehansans")
-
-def stop_rtmp_stream():
-    """Stop RTMP streaming"""
-    global rtmp_streamer
-    if rtmp_streamer:
-        rtmp_streamer.stop()
-        rtmp_streamer = None
-        print("RTMP streaming stopped")
 
 def get_camera():
     """Get camera instance"""
@@ -66,11 +63,11 @@ def get_display():
     """Get display instance"""
     return disp
 
-def get_detector():
-    """Get pose detector"""
-    return detector
+def get_pose_extractor():
+    """Get pose extractor (YOLO11 pose for keypoint extraction)"""
+    return pose_extractor
 
-def get_segmentor():
-    """Get segmentation detector"""
-    return segmentor
+def get_detector():
+    """Get person detector (YOLOv8 for human presence detection)"""
+    return detector
 

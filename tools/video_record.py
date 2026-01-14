@@ -27,7 +27,7 @@ class VideoRecorder:
 
         # Ensure format is YVU420SP
         if img.format() != image.Format.FMT_YVU420SP:
-            img = img.to_format(image.Format.FMT_YVU420SP)
+            img = img.to_format(format=image.Format.FMT_YVU420SP)
 
         self.encoder.encode(img)
 

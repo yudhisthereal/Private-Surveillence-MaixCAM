@@ -16,7 +16,8 @@ from control_manager import camera_state_manager
 STREAMING_SERVER_IP = "103.150.93.198"
 STREAMING_SERVER_PORT = 8000
 STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
-RTMP_SERVER_URL = f"rtmp://{STREAMING_SERVER_IP}:1935"
+# OBSOLETE: RTMP functionality has been removed
+# RTMP_SERVER_URL = f"rtmp://{STREAMING_SERVER_IP}:1935"
 
 # ============================================
 # CAMERA IDENTITY
@@ -221,7 +222,8 @@ def initialize_camera():
 # RECORDING PARAMETERS
 # ============================================
 MIN_HUMAN_FRAMES_TO_START = 3
-NO_HUMAN_FRAMES_TO_STOP = 30
+NO_HUMAN_FRAMES_TO_STOP = 30  # Will be overridden by NO_HUMAN_SECONDS_TO_STOP
+NO_HUMAN_SECONDS_TO_STOP = 5  # 5 seconds at 60fps = 300 frames before confirming no person
 MAX_RECORDING_DURATION_MS = 90000
 
 # Background update settings

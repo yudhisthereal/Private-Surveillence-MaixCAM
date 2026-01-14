@@ -47,14 +47,14 @@ class FrameProfiler:
             "commands",
             "camera_read",
             "background_check",
-            "segmentation",
+            "human detect",
             "display_prep",
-            "pose_detection",
+            "pose_extraction",
             "tracking",
-            "fall_detection",
             "ui_drawing",
             "recording",
-            "display"
+            "display",
+            "frame_upload"
         ]
         
         # Task display names
@@ -63,14 +63,14 @@ class FrameProfiler:
             "commands": "Command Processing",
             "camera_read": "Camera Read",
             "background_check": "Background Check",
-            "segmentation": "Segmentation",
+            "human detect": "Human Detect",
             "display_prep": "Display Prep",
-            "pose_detection": "Pose Detection",
+            "pose_extraction": "Pose Extraction",
             "tracking": "Tracking",
-            "fall_detection": "Fall Detection",
             "ui_drawing": "UI Drawing",
             "recording": "Recording",
-            "display": "Display Show"
+            "display": "Display Show",
+            "frame_upload": "Frame Upload"
         }
     
     def start_frame(self):

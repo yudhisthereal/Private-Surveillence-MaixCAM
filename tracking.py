@@ -101,7 +101,7 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, detector, img, is_recording=False, skeleton_saver=None, frame_id=0, safety_checker=None, check_method=None, fps=30):
+def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton_saver=None, frame_id=0, safety_checker=None, check_method=None, fps=30):
     """Process a single track - draw tracking info and handle fall detection"""
     global online_targets, fall_ids, unsafe_ids, current_fps
     
@@ -171,7 +171,7 @@ def process_track(track, objs, detector, img, is_recording=False, skeleton_saver
                 
                 # Draw tracking info
                 img.draw_string(int(tracker_obj.x), int(tracker_obj.y), msg, color=color, scale=0.5)
-                detector.draw_pose(img, obj.points, 8 if detector.input_width() > 480 else 4, color=color)
+                pose_extractor.draw_pose(img, obj.points, 8 if pose_extractor.input_width() > 480 else 4, color=color)
                 
                 # Save to skeleton if recording
                 if is_recording and skeleton_saver:

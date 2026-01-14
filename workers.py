@@ -10,13 +10,14 @@ import threading
 from config import (
     STREAMING_HTTP_URL, FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
-    FRAME_UPLOAD_INTERVAL_MS, LOCAL_PORT
+    LOCAL_PORT
 )
 from control_manager import (
     get_camera_state_from_server, get_safe_areas_from_server, report_state,
     camera_state_manager
 )
 from streaming import send_frame_to_server
+from tools.time_utils import time_ms, FrameProfiler
 
 class FlagAndSafeAreaSyncWorker(threading.Thread):
     """Background thread for syncing flags AND safe areas from streaming server"""
@@ -50,7 +51,7 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                         # Put flags in queue for main thread to consume
                         try:
                             self.flags_queue.put_nowait(("flags_update", flags))
-                            print(f"[FlagSync] Flags synced from server ({len(flags)} items)")
+                            # print(f"[FlagSync] Flags synced from server ({len(flags)} items)")
                         except queue.Full:
                             pass
                         
@@ -58,10 +59,10 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                         self.connection_errors = 0
                         self.last_successful_sync = time.time()
                     else:
-                        print(f"[FlagSync] Invalid flags data received")
+                        # print(f"[FlagSync] Invalid flags data received")
                         self.connection_errors += 1
                 else:
-                    print(f"[FlagSync] Failed to get camera state from server")
+                    # print(f"[FlagSync] Failed to get camera state from server")
                     self.connection_errors += 1
                 
                 # 2. Get safe areas from streaming server (less frequent)
@@ -72,7 +73,7 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                     if safe_areas is not None and isinstance(safe_areas, list):
                         try:
                             self.safe_areas_queue.put_nowait(("safe_areas_update", safe_areas))
-                            print(f"[SafeAreaSync] Safe areas synced ({len(safe_areas)} polygons)")
+                            # print(f"[SafeAreaSync] Safe areas synced ({len(safe_areas)} polygons)")
                             self.last_safe_area_sync = current_time
                         except queue.Full:
                             pass
@@ -94,7 +95,7 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
             
             # If too many errors, increase interval
             if self.connection_errors > 20:
-                print(f"[FlagSync] High error count, increasing sync interval")
+                # print(f"[FlagSync] High error count, increasing sync interval")
                 time.sleep(5.0)  # Longer sleep on many errors
     
     def stop(self):
@@ -123,9 +124,9 @@ class StateReporterWorker(threading.Thread):
                 
                 # Check if it's time to send a heartbeat/report
                 if current_time - self.last_report_time > self.report_interval:
-                    # Report state using the helper function
+                    # Report state using the helper function (RTMP always False now)
                     success = report_state(
-                        rtmp_connected=rtmp_connected,
+                        rtmp_connected=False,  # OBSOLETE: RTMP removed
                         is_recording=get_is_recording()
                     )
                     
@@ -147,42 +148,124 @@ class StateReporterWorker(threading.Thread):
         self.running = False
 
 class FrameUploadWorker(threading.Thread):
-    """Background thread for uploading frames to streaming server"""
+    """Background thread for uploading frames to streaming server (UDP-like behavior)
     
-    def __init__(self, frame_queue, streaming_url, camera_id, upload_interval_ms=FRAME_UPLOAD_INTERVAL_MS):
+    This worker works asynchronously from the main loop. It shares a reference to
+    the latest frame with the main thread. When uploading:
+    - If no upload is in progress: upload the current latest frame
+    - If upload is already in progress: skip and wait for next frame
+    - When upload finishes: upload the current latest frame immediately
+    
+    This achieves UDP-like behavior where slow uploads don't pile up - old frames
+    are dropped and only the latest frame is uploaded.
+    """
+    
+    def __init__(self, streaming_url, camera_id):
         super().__init__(daemon=True)
-        self.frame_queue = frame_queue
         self.streaming_url = streaming_url
         self.camera_id = camera_id
         self.running = True
-        self.last_upload_time = 0
-        self.upload_interval = upload_interval_ms / 1000.0
+        self.uploading = False
         
+        # Shared frame reference - main thread writes, worker reads
+        # Using a lock for thread-safe access
+        self._frame_lock = threading.Lock()
+        self._current_frame = None
+        self._frame_timestamp = 0
+        
+        # Upload statistics for debugging
+        self.upload_count = 0
+        self.skip_count = 0
+        
+        # Profiler for upload FPS calculation
+        self.upload_profiler = FrameProfiler(print_interval=30, enabled=True)
+        self.upload_profiler.start_frame()
+        self.upload_profiler.start_task("frame_upload")
+        
+    def update_frame(self, frame_data):
+        """Update the shared frame reference (called from main thread after disp.show)
+        
+        Args:
+            frame_data: JPEG bytes of the latest rendered frame
+        """
+        with self._frame_lock:
+            self._current_frame = frame_data
+            self._frame_timestamp = time.time()
+    
+    def get_frame(self):
+        """Get the current frame for upload (thread-safe)
+        
+        Returns:
+            The latest frame data, or None if no frame available
+        """
+        with self._frame_lock:
+            return self._current_frame
+            
+    def clear_frame(self):
+        """Clear the current frame after successful upload"""
+        with self._frame_lock:
+            self._current_frame = None
+            
     def run(self):
+        """Main worker loop - continuously try to upload latest frame"""
         while self.running:
             try:
-                # Get frame from queue with timeout
-                frame_data = self.frame_queue.get(timeout=1.0)
+                # Get the current frame
+                current_frame = self.get_frame()
                 
-                current_time = time.time() * 1000  # Convert to ms
-                # Limit upload rate to avoid overwhelming server
-                if current_time - self.last_upload_time > self.upload_interval * 1000:
-                    success = send_frame_to_server(frame_data, self.camera_id)
+                if current_frame is None:
+                    # No frame available yet, sleep briefly
+                    time.sleep(0.01)  # 10ms
+                    continue
+                
+                # Check if we're already uploading
+                if self.uploading:
+                    # UDP-like behavior: skip this frame, will upload latest on next iteration
+                    self.skip_count += 1
+                    time.sleep(0.005)  # Brief sleep before checking again
+                    continue
+                
+                # Start upload with profiling
+                self.uploading = True
+                self.upload_profiler.start_frame()
+                self.upload_profiler.start_task("frame_upload")
+                
+                # Upload the frame
+                upload_start = time_ms()
+                success = send_frame_to_server(current_frame, self.camera_id)
+                upload_duration = time_ms() - upload_start
+                
+                # End profiling for this upload
+                self.upload_profiler.end_task("frame_upload")
+                self.upload_profiler.end_frame()
+                
+                if success:
+                    self.upload_count += 1
+                    # Clear frame after successful upload
+                    self.clear_frame()
                     
-                    if success:
-                        self.last_upload_time = current_time
-                    else:
-                        print(f"[FrameUpload] Failed to upload frame")
+                    # Log periodically with upload FPS
+                    if self.upload_count % 30 == 0:
+                        avg_upload_time = upload_duration
+                        upload_fps = 1000.0 / avg_upload_time if avg_upload_time > 0 else 0
+                        print(f"[FrameUpload] Uploaded {self.upload_count} frames, skipped {self.skip_count}, avg upload: {avg_upload_time:.2f}ms, FPS: {upload_fps:.2f}")
+                else:
+                    print(f"[FrameUpload] Failed to upload frame")
+                    # Keep the frame for retry on next iteration
                 
-                self.frame_queue.task_done()
+                # Upload complete, check for new frame
+                self.uploading = False
                 
-            except queue.Empty:
-                # No frames to upload
-                pass
+                # Small delay between uploads to avoid overwhelming server
+                time.sleep(0.005)  # 5ms
+                
             except Exception as e:
-                print(f"[FrameUpload] Queue error: {e}")
+                print(f"[FrameUpload] Error: {e}")
+                self.uploading = False
+                time.sleep(0.1)  # Longer sleep on error
     
     def stop(self):
+        """Stop the worker"""
         self.running = False
 
 class PingWorker(threading.Thread):
@@ -359,7 +442,7 @@ def handle_command(command, value, camera_id, registration_status, save_camera_i
             # Will be handled in main loop
     elif command == "update_safe_areas":
         if isinstance(value, list):
-            from safe_area_manager import update_safety_checker_polygons
+            from control_manager import update_safety_checker_polygons
             update_safety_checker_polygons(value)
     elif command in get_default_control_flags():
         from control_manager import update_control_flag
@@ -396,10 +479,11 @@ def get_default_control_flags():
         "hme": False
     }
 
-def update_rtmp_connected(value):
-    """Update global rtmp_connected flag"""
-    global rtmp_connected
-    rtmp_connected = value
+# OBSOLETE: RTMP-related functions kept as reference only (commented out):
+# def update_rtmp_connected(value):
+#     """OBSOLETE: RTMP has been removed"""
+#     global rtmp_connected
+#     rtmp_connected = False  # Always False now
 
 # Recording state synchronization
 _recording_state = {
