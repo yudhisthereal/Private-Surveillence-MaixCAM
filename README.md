@@ -33,7 +33,7 @@ This project is one component of a three-part distributed system:
 
 | Component | Repository | Description | Status |
 |-----------|------------|-------------|--------|
-| **Camera** | [private-cctv]([https://github.com/yudhisthereal/private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM)) | Edge device with pose estimation, fall detection, and privacy protection | ✅ Active |
+| **Camera** | [private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM) | Edge device with pose estimation, fall detection, and privacy protection | ✅ Active |
 | **Streaming Server** | [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/) | Web interface for caregivers to monitor patients | ✅ Active |
 | **Analytics Server** | [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/) | Privacy-preserving cloud analytics using Homomorphic Encryption | ⚠️ Disabled (using local fallback) |
 
@@ -499,7 +499,7 @@ This research software is developed for privacy-preserving patient monitoring. Y
 
 ### References
 
-- **This Project (Camera)**: [private-cctv](https://github.com/yudhisthereal/private-cctv)
+- **This Project (Camera)**: [private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM)
 - **Analytics Server**: [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/)
 - **Streaming Server (Caregiver UI)**: [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/)
 - MaixCAM: [Sipeed MaixCAM](https://wiki.sipeed.com/maixcam)
