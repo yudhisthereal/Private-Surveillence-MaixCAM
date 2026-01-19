@@ -1032,6 +1032,7 @@ class AnalyticsWorker(threading.Thread):
 # Global analytics queue reference (set by main.py)
 _analytics_queue = None
 _pose_label_queue = None  # Queue for pose label sender worker
+_keypoints_queue = None  # Queue for keypoints sender worker
 
 def set_analytics_queue(q):
     """Set the analytics queue reference (called from main.py)"""
@@ -1042,6 +1043,11 @@ def set_pose_label_queue(q):
     """Set the pose label queue reference (called from main.py)"""
     global _pose_label_queue
     _pose_label_queue = q
+
+def set_keypoints_queue(q):
+    """Set the keypoints queue reference (called from main.py)"""
+    global _keypoints_queue
+    _keypoints_queue = q
 
 def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
     """Send track data to analytics queue for processing.
@@ -1163,7 +1169,7 @@ class PoseLabelSenderWorker(threading.Thread):
         """
         try:
             track_id = pose_data.get("track_id")
-            pose_label = pose_data.get("pose_label", "unknown")
+            pose_label = pose_data.get("plain_label", "unknown")
             safety_status = pose_data.get("safety_status", "normal")
             
             success = send_func(
@@ -1234,4 +1240,138 @@ def send_pose_label_to_queue(track_id, pose_label, safety_status="normal"):
     except Exception as e:
         print(f"[PoseLabelSender] Failed to prepare pose data: {e}")
         return False
+
+def send_keypoints_to_queue(track_id, keypoints, bbox=None, pose_label=None, safety_status="normal"):
+    """Queue keypoints data for async sending to streaming server.
+    
+    This function is called from the main thread to queue keypoints data
+    for the KeypointsSenderWorker to send asynchronously.
+    
+    Args:
+        track_id: The track ID
+        keypoints: List of 34 floats (17 keypoints × 2 coordinates)
+        bbox: Optional bounding box [x, y, width, height]
+        pose_label: Optional pose classification label
+        safety_status: Safety status (normal, unsafe, fall)
+    
+    Returns:
+        bool: True if data was queued successfully, False otherwise
+    """
+    # Check if queue is available
+    if _keypoints_queue is None:
+        return False
+    
+    try:
+        keypoints_data = {
+            "track_id": track_id,
+            "keypoints": keypoints,
+            "bbox": bbox,
+            "pose_label": pose_label,
+            "safety_status": safety_status
+        }
+        # Put data in the queue for the worker to send
+        try:
+            _keypoints_queue.put_nowait(keypoints_data)
+            return True
+        except queue.Full:
+            # Queue is full, skip this frame
+            return False
+    except Exception as e:
+        print(f"[KeypointsSender] Failed to prepare keypoints data: {e}")
+        return False
+
+
+class KeypointsSenderWorker(threading.Thread):
+    """Background worker for sending keypoints to streaming server asynchronously.
+    
+    This worker receives keypoints data from the main thread via a queue and sends it
+    to the streaming server in the background, preventing blocking of the main loop.
+    """
+    
+    def __init__(self, keypoints_queue, camera_id):
+        super().__init__(daemon=True)
+        self.camera_id = camera_id
+        self.running = True
+        self.keypoints_queue = keypoints_queue
+        
+        # Statistics for monitoring
+        self.sent_count = 0
+        self.error_count = 0
+        
+    def run(self):
+        """Main worker loop - process keypoints data from queue."""
+        from streaming import send_keypoints_to_streaming_server
+        
+        print(f"[KeypointsSender] Starting worker for camera: {self.camera_id}")
+        
+        while self.running:
+            try:
+                # Get next keypoints data from queue (non-blocking)
+                try:
+                    keypoints_data = self.keypoints_queue.get_nowait()
+                    self._send_keypoints(keypoints_data, send_keypoints_to_streaming_server)
+                except queue.Empty:
+                    # No data available, sleep briefly
+                    time.sleep(0.01)  # 10ms
+                    
+            except Exception as e:
+                print(f"[KeypointsSender] Error in main loop: {e}")
+                self.error_count += 1
+                time.sleep(0.1)  # Sleep on error
+        
+        print(f"[KeypointsSender] Stopped (sent={self.sent_count}, errors={self.error_count})")
+    
+    def _send_keypoints(self, keypoints_data, send_func):
+        """Send a single keypoints data to streaming server.
+        
+        Args:
+            keypoints_data: Dictionary containing:
+                - track_id: int
+                - keypoints: list of 34 floats
+                - bbox: list [x, y, w, h]
+                - pose_label: str
+                - safety_status: str (normal, unsafe, fall)
+            send_func: The send function to use
+        """
+        try:
+            track_id = keypoints_data.get("track_id")
+            keypoints = keypoints_data.get("keypoints", [])
+            bbox = keypoints_data.get("bbox")
+            pose_label = keypoints_data.get("pose_label")
+            safety_status = keypoints_data.get("safety_status", "normal")
+            
+            success = send_func(
+                camera_id=self.camera_id,
+                track_id=track_id,
+                keypoints=keypoints,
+                bbox=bbox,
+                pose_label=pose_label,
+                safety_status=safety_status
+            )
+            
+            if success:
+                self.sent_count += 1
+                if self.sent_count % 30 == 0:
+                    print(f"[KeypointsSender] Sent {self.sent_count} keypoints data")
+            else:
+                self.error_count += 1
+                
+        except Exception as e:
+            print(f"[KeypointsSender] Error sending keypoints: {e}")
+            self.error_count += 1
+    
+    def stop(self):
+        """Stop the worker."""
+        self.running = False
+    
+    def get_stats(self):
+        """Get worker statistics.
+        
+        Returns:
+            dict: Statistics about the worker's activity
+        """
+        return {
+            "sent": self.sent_count,
+            "errors": self.error_count
+        }
 

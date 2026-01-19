@@ -82,6 +82,40 @@ def send_pose_label_to_streaming_server(camera_id, track_id, pose_label, safety_
         print(f"Pose label streaming error: {e}")
         return False
 
+def send_keypoints_to_streaming_server(camera_id, track_id, keypoints, bbox=None, pose_label=None, safety_status="normal"):
+    """Send keypoints to streaming server for logging/display
+    
+    Args:
+        camera_id: Camera identifier
+        track_id: Track ID of the person
+        keypoints: List of 34 floats (17 keypoints × 2 coordinates)
+        bbox: Optional bounding box [x, y, width, height]
+        pose_label: Optional pose classification label
+        safety_status: Safety status (normal, unsafe, fall)
+    
+    Returns:
+        bool: True if sent successfully, False otherwise
+    """
+    try:
+        url = f"{STREAMING_HTTP_URL}/api/stream/keypoints"
+        data = {
+            "camera_id": camera_id,
+            "track_id": track_id,
+            "keypoints": keypoints if keypoints else [],
+            "safety_status": safety_status,
+            "timestamp": time.time()
+        }
+        if bbox is not None:
+            data["bbox"] = bbox
+        if pose_label is not None:
+            data["pose_label"] = pose_label
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/keypoints | payload: %s", "POST", data)
+        response = requests.post(url, json=data, timeout=2.0)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Keypoints streaming error: {e}")
+        return False
+
 def send_background_to_server(background_data, camera_id):
     """Send background image to streaming server
     

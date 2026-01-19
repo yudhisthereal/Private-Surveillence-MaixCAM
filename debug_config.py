@@ -1,9 +1,9 @@
 # Debug and Performance Configuration
 # Set DEBUG_ENABLED to False to disable all debug prints for production
-DEBUG_ENABLED = False
+DEBUG_ENABLED = True
 
 # Set PERF_ENABLED to True to enable performance measurements
-PERF_ENABLED = True
+PERF_ENABLED = False
 
 def debug_print(tag, message, *args):
     """Print debug messages if debugging is enabled"""
@@ -14,9 +14,9 @@ def debug_print(tag, message, *args):
 def log_pose_data(pose_data, source="unknown"):
     """Log pose data for debugging"""
     if DEBUG_ENABLED and pose_data:
-        print(f"[DEBUG POSE {source}] Label: {pose_data["raw_features"].get('label', 'N/A')}")
-        print(f"[DEBUG POSE {source}] Torso angle: {pose_data["raw_features"].get('torso_angle', 'N/A')}")
-        print(f"[DEBUG POSE {source}] Thigh uprightness: {pose_data["raw_features"].get('thigh_uprightness', 'N/A')}")
+        print(f"[DEBUG POSE {source}] Label: {pose_data['raw_features'].get('label', 'N/A')}")
+        print(f"[DEBUG POSE {source}] Torso angle: {pose_data['raw_features'].get('torso_angle', 'N/A')}")
+        print(f"[DEBUG POSE {source}] Thigh uprightness: {pose_data['raw_features'].get('thigh_uprightness', 'N/A')}")
         
         # Check for fall detection data
         for method in ['method1', 'method2', 'method3', 'fall_detected_old', 'fall_detected_new']:

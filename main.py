@@ -29,7 +29,8 @@ from workers import (
     update_is_recording, AnalyticsWorker,
     send_track_to_analytics, get_analytics_pose_data, get_analytics_fall_data,
     is_analytics_server_available, set_analytics_queue, PoseLabelSenderWorker,
-    set_pose_label_queue, send_pose_label_to_queue
+    set_pose_label_queue, send_pose_label_to_queue, KeypointsSenderWorker,
+    set_keypoints_queue, send_keypoints_to_queue
 )
 from tracking import (
     update_tracks, process_track, set_fps
@@ -89,6 +90,7 @@ def main():
     safe_areas_queue = queue.Queue(maxsize=5)
     analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
     pose_label_queue = queue.Queue(maxsize=50)  # Queue for pose label sender
+    keypoints_queue = queue.Queue(maxsize=30)  # Queue for keypoints sender
     
     # Start command server
     command_receiver = CommandReceiver()
@@ -124,6 +126,12 @@ def main():
     pose_label_sender = PoseLabelSenderWorker(pose_label_queue, CAMERA_ID)
     pose_label_sender.start()
     print("[PoseLabelSender] Worker started")
+    
+    # Start Keypoints Sender Worker (always runs to send plain keypoints to Streaming Server)
+    set_keypoints_queue(keypoints_queue)
+    keypoints_sender = KeypointsSenderWorker(keypoints_queue, CAMERA_ID)
+    keypoints_sender.start()
+    print("[KeypointsSender] Worker started")
     
     print("Async workers started successfully")
     
@@ -408,6 +416,14 @@ def main():
                     pose_label=pose_label,
                     safety_status=safety_status
                 )
+                # Always send plain keypoints to Streaming Server (not Analytics)
+                send_keypoints_to_queue(
+                    track_id=track_id,
+                    keypoints=keypoints,
+                    bbox=bbox,
+                    pose_label=pose_label,
+                    safety_status=safety_status
+                )
                 previous_bboxes[track_id] = bbox
         
         frame_profiler.end_task("tracking")
@@ -465,6 +481,7 @@ def main():
     frame_upload_worker.stop()
     ping_worker.stop()
     pose_label_sender.stop()
+    keypoints_sender.stop()
     
     if is_recording:
         recorder.end()
