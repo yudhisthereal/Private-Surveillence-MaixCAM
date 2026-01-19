@@ -7,15 +7,19 @@ import socket
 import requests
 from debug_config import debug_print
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # Import CameraStateManager from control_manager for proper state management
 # This must be done early to ensure singleton pattern works correctly
 from control_manager import camera_state_manager
 
 # ============================================
-# SERVER CONFIGURATION
+# SERVER CONFIGURATION (loaded from .env)
 # ============================================
-STREAMING_SERVER_IP = "103.150.93.198"
-STREAMING_SERVER_PORT = 8000
+STREAMING_SERVER_IP = os.getenv("STREAMING_SERVER_IP", "103.150.93.198")
+STREAMING_SERVER_PORT = int(os.getenv("STREAMING_SERVER_PORT", "8000"))
 STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
 # OBSOLETE: RTMP functionality has been removed
 # RTMP_SERVER_URL = f"rtmp://{STREAMING_SERVER_IP}:1935"
@@ -96,7 +100,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
             params["camera_id"] = existing_camera_id
 
         print(f"Registering with streaming server: {url} params={params} from IP: {local_ip}")
-        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/register | params: %s", "POST", str(params))
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/register | params: %s", "POST", str(params))
 
         response = requests.post(
             url,
@@ -136,7 +140,7 @@ def check_registration_status(server_ip, camera_id, local_ip):
     try:
         url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/registered"
         print("Checking registration status on streaming server...")
-        debug_print("API_REQUEST", "GET %s | endpoint: /api/stream/registered", "GET")
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/registered", "GET")
 
         response = requests.get(url, timeout=3.0)
 
@@ -255,9 +259,9 @@ GC_INTERVAL_MS = 30000
 POSE_ANALYSIS_INTERVAL_MS = 50
 
 # ============================================
-# ANALYTICS SERVER CONFIGURATION
+# ANALYTICS SERVER CONFIGURATION (loaded from .env)
 # ============================================
-ANALYTICS_API_URL = "http://102.127.136.213:5000" #INTENTIONALLY INCORRECT
+ANALYTICS_API_URL = os.getenv("ANALYTICS_API_URL", "http://102.127.136.213:5000")
 ANALYTICS_TIMEOUT = 10
 ANALYTICS_RETRY_COUNT = 3
 ANALYTICS_RETRY_BACKOFF = 1.0  # seconds

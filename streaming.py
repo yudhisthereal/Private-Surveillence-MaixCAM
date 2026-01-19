@@ -9,7 +9,7 @@ def send_to_streaming_server(endpoint, data):
     """Send data to streaming server"""
     try:
         url = f"{STREAMING_HTTP_URL}{endpoint}"
-        debug_print("API_REQUEST", "POST %s | endpoint: %s | payload: %s", "POST", endpoint, str(data)[:200])
+        debug_print("API_REQUEST", "%s | endpoint: %s | payload: %s", "POST", endpoint, str(data)[:200])
         response = requests.post(
             url,
             json=data,
@@ -26,7 +26,7 @@ def send_frame_to_server(frame_data, camera_id):
     try:
         url = f"{STREAMING_HTTP_URL}/api/stream/upload-frame"
         headers = {'X-Camera-ID': camera_id}
-        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/upload-frame | params: camera_id=%s | payload_size: %d bytes", "POST", camera_id, len(frame_data))
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/upload-frame | params: camera_id=%s | payload_size: %d bytes", "POST", camera_id, len(frame_data))
         response = requests.post(
             url,
             headers=headers,
@@ -47,7 +47,7 @@ def ping_streaming_server(camera_id):
     try:
         url = f"{STREAMING_HTTP_URL}/api/stream/ping"
         params = {'camera_id': camera_id}
-        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/ping | params: camera_id=%s", "POST", camera_id)
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/ping | params: camera_id=%s", "POST", camera_id)
         # Fire-and-forget: timeout is short and we don't wait for response
         requests.post(url, params=params, timeout=0.5)
     except Exception:
@@ -75,7 +75,7 @@ def send_pose_label_to_streaming_server(camera_id, track_id, pose_label, safety_
             "safety_status": safety_status,
             "timestamp": time.time()
         }
-        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/pose-label | payload: %s", "POST", str(data)[:150])
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/pose-label | payload: %s", "POST", str(data)[:150])
         response = requests.post(url, json=data, timeout=2.0)
         return response.status_code == 200
     except Exception as e:
@@ -129,13 +129,14 @@ def send_background_to_server(background_data, camera_id):
     try:
         url = f"{STREAMING_HTTP_URL}/api/stream/upload-bg"
         headers = {'X-Camera-ID': camera_id}
-        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/upload-bg | params: camera_id=%s | payload_size: %d bytes", "POST", camera_id, len(background_data))
+        debug_print("API_REQUEST", "%s | endpoint: /api/stream/upload-bg | params: camera_id=%s | payload_size: %d bytes", "POST", camera_id, len(background_data))
         response = requests.post(
             url,
             headers=headers,
             data=background_data,
             timeout=5.0  # Longer timeout for background image upload
         )
+        print(f"BACKGROUND UPLOAD RESPONSE: {response.json()}")
         if response.status_code == 200:
             print(f"[BackgroundUpload] Background image uploaded successfully")
             return True

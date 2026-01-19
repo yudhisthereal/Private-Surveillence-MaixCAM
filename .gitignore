@@ -12,3 +12,5 @@ static/
 TODO*.md
 *PROMPT*.md
 .blackboxrules
+.env
+.env.local

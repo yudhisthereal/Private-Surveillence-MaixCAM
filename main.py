@@ -28,14 +28,13 @@ from workers import (
     CommandReceiver, PingWorker, get_received_commands, handle_command,
     update_is_recording, AnalyticsWorker,
     send_track_to_analytics, get_analytics_pose_data, get_analytics_fall_data,
-    is_analytics_server_available, set_analytics_queue, PoseLabelSenderWorker,
-    set_pose_label_queue, send_pose_label_to_queue, KeypointsSenderWorker,
+    is_analytics_server_available, set_analytics_queue, KeypointsSenderWorker,
     set_keypoints_queue, send_keypoints_to_queue
 )
 from tracking import (
     update_tracks, process_track, set_fps
 )
-from streaming import send_frame_to_server
+from streaming import send_frame_to_server, send_pose_label_to_streaming_server
 from tools.time_utils import time_ms, FrameProfiler
 
 import os
@@ -89,7 +88,6 @@ def main():
     flags_queue = queue.Queue(maxsize=10)
     safe_areas_queue = queue.Queue(maxsize=5)
     analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
-    pose_label_queue = queue.Queue(maxsize=50)  # Queue for pose label sender
     keypoints_queue = queue.Queue(maxsize=30)  # Queue for keypoints sender
     
     # Start command server
@@ -120,12 +118,6 @@ def main():
         print("[Analytics] Worker started (analytics_mode=True)")
     else:
         print("[Analytics] Worker NOT started (analytics_mode=False)")
-    
-    # Start Pose Label Sender Worker (always runs for when analytics is unavailable)
-    set_pose_label_queue(pose_label_queue)
-    pose_label_sender = PoseLabelSenderWorker(pose_label_queue, CAMERA_ID)
-    pose_label_sender.start()
-    print("[PoseLabelSender] Worker started")
     
     # Start Keypoints Sender Worker (always runs to send plain keypoints to Streaming Server)
     set_keypoints_queue(keypoints_queue)
@@ -180,6 +172,15 @@ def main():
     print(f"  UI Rendering: DISABLED (no text/skeleton)")
     print(f"  Display: DISABLED")
     print(f"  Fall Algorithm: {control_flags.get('fall_algorithm')}")
+    
+    # Upload background image to server at startup
+    if streaming_server_available and background_img is not None:
+        try:
+            jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
+            frame_upload_worker.update_background(jpeg_bytes)
+            print("[BACKGROUND] Background queued for upload at startup")
+        except Exception as e:
+            print(f"[BACKGROUND] Failed to queue background for upload at startup: {e}")
     
     while not app.need_exit():
         # Start frame profiling
@@ -374,6 +375,8 @@ def main():
             if not track_result:
                 continue
             
+            # print(f"process_track() -> main(): {track_result}")
+            print(f"pose_label <- track_result['pose_label]: {track_result.get('pose_label', 'unknown')}")
             track_id = track_result.get("track_id")
             keypoints = track_result.get("keypoints")
             bbox = track_result.get("bbox")
@@ -402,7 +405,8 @@ def main():
                 else:
                     # No encrypted features available, fall back to local processing
                     print(f"[Main] Warning: use_hme=True but no encrypted_features for track_id={track_id}")
-                    send_pose_label_to_queue(
+                    send_pose_label_to_streaming_server(
+                        camera_id=CAMERA_ID,
                         track_id=track_id,
                         pose_label=pose_label,
                         safety_status=safety_status
@@ -411,7 +415,8 @@ def main():
                 # Either HME disabled OR analytics server unavailable
                 # NEVER send plain keypoints to Analytics Server
                 # Always do local fall detection and send results to Streaming Server
-                send_pose_label_to_queue(
+                send_pose_label_to_streaming_server(
+                    camera_id=CAMERA_ID,
                     track_id=track_id,
                     pose_label=pose_label,
                     safety_status=safety_status
@@ -428,9 +433,9 @@ def main():
         
         frame_profiler.end_task("tracking")
         
-        # 9. Pose label handling (async processing)
+        # 9. Pose label handling (direct sending)
         frame_profiler.start_task("pose_label_handling")
-        # Nothing to do here - pose labels are sent asynchronously by PoseLabelSenderWorker
+        # Pose labels are sent directly to streaming server (no queue)
         frame_profiler.end_task("pose_label_handling")
         
         # 10. Recording (no display, no UI rendering)
@@ -480,7 +485,6 @@ def main():
     state_reporter_worker.stop()
     frame_upload_worker.stop()
     ping_worker.stop()
-    pose_label_sender.stop()
     keypoints_sender.stop()
     
     if is_recording:

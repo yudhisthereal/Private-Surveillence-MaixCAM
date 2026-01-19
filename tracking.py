@@ -249,7 +249,7 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                     safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
                     skeleton_saver.add_keypoints(frame_id, track.id, obj.points, safety_status)
                 
-                return {
+                track_result = {
                     "track_id": track.id,
                     "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
                     "keypoints": obj.points,
@@ -259,6 +259,9 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                     "encrypted_features": encrypted_features,  # Encrypted features for analytics server (when use_hme=True)
                     "use_hme": use_hme  # Whether HME is enabled (True only when analytics server is available)
                 }
+                # print(f"process_track() -> {track_result}")
+                
+                return track_result
     
     return None
 
@@ -303,7 +306,7 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
                 
                 # Extract label from pose_data
                 if pose_data is not None:
-                    pose_label = pose_data.get('label', 'unknown')
+                    pose_label = pose_data.get('plain_label', 'unknown')
                     # Get encrypted features when HME is enabled
                     if use_hme:
                         encrypted_features = pose_estimator.get_encrypted_features()
@@ -330,7 +333,6 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
         pose_data,
         use_hme
     )
-    print(f"POSE DATA: {pose_data}")
     
     return fall_info, pose_label, encrypted_features
 
