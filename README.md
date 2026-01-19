@@ -119,9 +119,9 @@ private-cctv/
               │  Fall Detection │                    │  Streaming   │  │  Recording   │
               │  (3 Algorithms) │                    │  Server      │  │  (Video/CSV) │
               └────────┬────────┘                    └──────────────┘  └──────────────┘
-                       │                                       ▲
-                       │                                       │
-                       ▼                                       │
+                       │                                        ▲
+                       │                                        │
+                       ▼                                        │
               ┌─────────────────┐                               │
               │    Safety       │◀──────────────────────────────┘
               │    Status       │     Pose + Fall + Safety Data
