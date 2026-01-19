@@ -508,6 +508,380 @@ This research software is developed for privacy-preserving patient monitoring. Y
 - ByteTracker: [ByteTrack](https://github.com/Zhongdao/Towards-Realtime-MOT)
 - COCO Keypoints: [COCO Dataset](https://cocodataset.org/)
 
+## 🌐 API Endpoints
+
+This section documents all API endpoints used for communication between the Camera (MaixCAM), Streaming Server, and Analytics Server.
+
+### Camera → Streaming Server Endpoints
+
+These endpoints are called by the Camera to send data to the Streaming Server.
+
+#### POST /api/stream/upload-frame
+Upload a video frame to the streaming server (when `show_raw=True`).
+
+**Headers:**
+```
+X-Camera-ID: <camera_id>
+Content-Type: image/jpeg
+```
+
+**Body:** Raw JPEG image bytes
+
+**Response:** 200 OK on success
+
+---
+
+#### POST /api/stream/upload-bg
+Upload the background image to the streaming server.
+
+**Headers:**
+```
+X-Camera-ID: <camera_id>
+Content-Type: image/jpeg
+```
+
+**Body:** Raw JPEG image bytes
+
+**Response:** 200 OK on success
+
+---
+
+#### POST /api/stream/pose-label
+Send pose classification and safety status for a tracked person.
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "camera_id": "camera_001",
+    "track_id": 1,
+    "pose_label": "standing",
+    "safety_status": "normal",
+    "timestamp": 1710000000.123
+}
+```
+
+**Response:** 200 OK on success
+
+**Field Descriptions:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `camera_id` | string | Unique camera identifier |
+| `track_id` | integer | Tracking ID for the person |
+| `pose_label` | string | Pose classification: `standing`, `sitting`, `bending_down`, `lying_down`, `unknown` |
+| `safety_status` | string | Safety status: `normal`, `unsafe`, `fall` |
+| `timestamp` | float | Unix timestamp of the detection |
+
+---
+
+#### POST /api/stream/keypoints
+Send 17-keypoint skeleton data to the streaming server.
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "camera_id": "camera_001",
+    "track_id": 1,
+    "keypoints": [x0, y0, x1, y1, ..., x16, y16],
+    "bbox": [x, y, width, height],
+    "pose_label": "standing",
+    "safety_status": "normal",
+    "timestamp": 1710000000.123
+}
+```
+
+**Response:** 200 OK on success
+
+**Field Descriptions:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `camera_id` | string | Unique camera identifier |
+| `track_id` | integer | Tracking ID for the person |
+| `keypoints` | array | 34 values (17 x,y pairs for COCO keypoints) |
+| `bbox` | array | Bounding box [x, y, width, height] |
+| `pose_label` | string | Pose classification label |
+| `safety_status` | string | Safety status: `normal`, `unsafe`, `fall` |
+| `timestamp` | float | Unix timestamp of the detection |
+
+**COCO Keypoint Order:**
+```
+0: Nose, 1: Left Eye, 2: Right Eye, 3: Left Ear, 4: Right Ear,
+5: Left Shoulder, 6: Right Shoulder, 7: Left Elbow, 8: Right Elbow,
+9: Left Wrist, 10: Right Wrist, 11: Left Hip, 12: Right Hip,
+13: Left Knee, 14: Right Knee, 15: Left Ankle, 16: Right Ankle
+```
+
+---
+
+#### POST /api/stream/report-state
+Report camera state heartbeat to the streaming server.
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "CameraId": "camera_001",
+    "Status": "online",
+    "IsRecording": false,
+    "RtmpConnected": false
+}
+```
+
+**Response:** 200 OK on success
+
+---
+
+#### POST /api/stream/ping
+Fire-and-forget heartbeat ping to notify the server the camera is connected.
+
+**Query Parameters:**
+- `camera_id`: Unique camera identifier
+
+**Response:** 200 OK (response not checked)
+
+---
+
+#### POST /api/stream/command
+Send a command to the streaming server (e.g., background_updated notification).
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "CameraId": "camera_001",
+    "Command": "background_updated",
+    "Value": {"timestamp": 1710000000.123}
+}
+```
+
+**Response:** 200 OK on success
+
+---
+
+### Camera ← Streaming Server Endpoints
+
+These endpoints are called by the Camera to receive data from the Streaming Server.
+
+#### GET /api/stream/camera-state
+Get camera state including control flags from the streaming server.
+
+**Query Parameters:**
+- `camera_id`: Unique camera identifier
+
+**Response (200 OK):**
+```json
+{
+    "record": true,
+    "show_raw": false,
+    "auto_update_bg": true,
+    "set_background": false,
+    "analytics_mode": true,
+    "hme": false,
+    "fall_algorithm": 3,
+    "use_safety_check": true,
+    "show_safe_area": false
+}
+```
+
+---
+
+#### GET /api/stream/safe-areas
+Get safe area definitions from the streaming server.
+
+**Query Parameters:**
+- `camera_id`: Unique camera identifier
+
+**Response (200 OK):**
+```json
+[
+    [[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]],
+    [[0.6, 0.6], [0.9, 0.6], [0.9, 0.9], [0.6, 0.9]]
+]
+```
+
+---
+
+#### GET /api/stream/registered
+Check which cameras are registered on the streaming server.
+
+**Response (200 OK):**
+```json
+{
+    "cameras": [
+        {"camera_id": "camera_001", "status": "registered"},
+        {"camera_id": "camera_002", "status": "pending"}
+    ]
+}
+```
+
+---
+
+#### POST /api/stream/register
+Register a new camera or re-register an existing camera.
+
+**Query Parameters:**
+- `camera_id`: Existing camera ID (for re-registration)
+
+**Response (200 OK):**
+```json
+{
+    "status": "registered",
+    "camera_id": "camera_001",
+    "camera_name": "Room 101 Camera"
+}
+```
+
+**Status Values:**
+| Status | Description |
+|--------|-------------|
+| `registered` | Camera is approved and active |
+| `pending` | Camera registration awaiting approval |
+| `unknown` | Registration status unknown |
+
+---
+
+### Camera → Analytics Server Endpoints
+
+These endpoints are called by the Camera to send encrypted data to the Analytics Server (when HME is enabled).
+
+#### POST /api/analytics/analyze-pose
+Request privacy-preserving pose analysis using encrypted features.
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "track_id": 1,
+    "camera_id": "camera_001",
+    "use_hme": true,
+    "encrypted_features": {
+        "Tra": [c1, c2],
+        "Tha": [c1, c2],
+        "Thl": [c1, c2],
+        "cl": [c1, c2],
+        "Trl": [c1, c2],
+        "ll": [c1, c2]
+    },
+    "bbox": [x, y, width, height]
+}
+```
+
+**Response (200 OK):**
+```json
+{
+    "status": "success",
+    "pose_data": {
+        "label": "standing",
+        "torso_angle": 25.5,
+        "thigh_uprightness": 35.2,
+        "thigh_calf_ratio": 0.85,
+        "torso_leg_ratio": 0.52
+    }
+}
+```
+
+---
+
+#### POST /api/analytics/detect-fall
+Request privacy-preserving fall detection using encrypted features.
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "camera_id": "camera_001",
+    "track_id": 1,
+    "current_bbox": [x, y, width, height],
+    "previous_bbox": [x, y, width, height],
+    "elapsed_ms": 33.33,
+    "use_hme": true,
+    "encrypted_features": {
+        "Tra": [c1, c2],
+        "Tha": [c1, c2],
+        "Thl": [c1, c2],
+        "cl": [c1, c2],
+        "Trl": [c1, c2],
+        "ll": [c1, c2]
+    }
+}
+```
+
+**Response (200 OK):**
+```json
+{
+    "status": "success",
+    "fall_detection": {
+        "fall_detected_method1": false,
+        "fall_detected_method2": false,
+        "fall_detected_method3": false,
+        "counter_method1": 0,
+        "counter_method2": 0,
+        "counter_method3": 0,
+        "primary_alert": false
+    }
+}
+```
+
+---
+
+#### GET /api/analytics/health
+Health check endpoint for the Analytics Server.
+
+**Response (200 OK):**
+```json
+{
+    "status": "healthy"
+}
+```
+
+---
+
+### Local Command Server (Camera Side)
+
+The Camera runs a local HTTP server on port 8080 to receive commands from the Streaming Server.
+
+#### POST /command
+Receive commands from the streaming server.
+
+**Content-Type:** application/json
+
+**Request Body:**
+```json
+{
+    "command": "set_background",
+    "value": true
+}
+```
+
+**Response (200 OK):**
+```json
+{
+    "status": "success",
+    "camera_id": "camera_001"
+}
+```
+
+**Available Commands:**
+| Command | Value Type | Description |
+|---------|------------|-------------|
+| `record` | boolean | Enable/disable recording |
+| `show_raw` | boolean | Show raw or privacy-protected feed |
+| `set_background` | boolean | Capture current frame as background |
+| `auto_update_bg` | boolean | Enable/disable automatic background updates |
+| `update_safe_areas` | array | Update safe area polygons |
+| `fall_algorithm` | integer | Set fall detection algorithm (1, 2, or 3) |
+| `approve_camera` | boolean | Approve camera registration |
+| `forget_camera` | boolean | Remove camera from registry |
+
+---
+
 ## 📞 Support
 
 - **MaixCAM Issues**: Refer to official MaixCAM documentation
