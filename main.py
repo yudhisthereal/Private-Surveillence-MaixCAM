@@ -1,6 +1,6 @@
 # main.py - Modularized main entry point for Private CCTV System
 
-from maix import camera, display, app, nn, image, time
+from maix import app, image, time
 from tools.wifi_connect import connect_wifi
 from tools.video_record import VideoRecorder
 from tools.skeleton_saver import SkeletonSaver2D
@@ -8,7 +8,7 @@ from tools.safe_area import BodySafetyChecker
 
 # Import modular components
 from config import (
-    initialize_camera, STREAMING_HTTP_URL,
+    initialize_camera, save_camera_info, STREAMING_HTTP_URL,
     BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START, NO_HUMAN_FRAMES_TO_STOP,
     MAX_RECORDING_DURATION_MS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
     FLAG_SYNC_INTERVAL_MS, GC_INTERVAL_MS, POSE_ANALYSIS_INTERVAL_MS,
@@ -16,21 +16,22 @@ from config import (
 )
 from camera_manager import (
     initialize_cameras, load_fonts,
-    get_camera, get_display, get_pose_extractor, get_detector
 )
 from control_manager import (
     load_initial_flags, get_control_flags, update_control_flags_from_server,
     update_control_flag, get_flag, initialize_safety_checker,
-    update_safety_checker_polygons, load_safe_areas, get_safety_checker,
+    update_safety_checker_polygons, load_safe_areas,
     send_background_updated, camera_state_manager, register_status_change_callback
 )
 from workers import (
     FlagAndSafeAreaSyncWorker, StateReporterWorker, FrameUploadWorker,
     CommandReceiver, PingWorker, get_received_commands, handle_command,
-    update_is_recording, get_is_recording
+    update_is_recording, AnalyticsWorker,
+    send_track_to_analytics, get_analytics_pose_data, get_analytics_fall_data,
+    is_analytics_server_available, set_analytics_queue,
 )
 from tracking import (
-    update_tracks, process_track, clear_track_history, get_online_targets, set_fps
+    update_tracks, process_track, set_fps
 )
 from tools.time_utils import time_ms, FrameProfiler
 
@@ -88,6 +89,7 @@ def main():
     # ============================================
     flags_queue = queue.Queue(maxsize=10)
     safe_areas_queue = queue.Queue(maxsize=5)
+    analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
     # OBSOLETE: FrameUploadWorker no longer uses queue - uses shared frame reference
     # Old code:
     # frame_queue = queue.Queue(maxsize=2)
@@ -110,7 +112,19 @@ def main():
     state_reporter_worker.start()
     frame_upload_worker.start()
     ping_worker.start()
-    print("✅ Async workers started successfully")
+    
+    # Start Analytics Worker (only if analytics_mode is True)
+    analytics_worker = None
+    if get_flag("analytics_mode", False):
+        # Register the analytics queue with the workers module
+        set_analytics_queue(analytics_queue)
+        analytics_worker = AnalyticsWorker(analytics_queue, CAMERA_ID)
+        analytics_worker.start()
+        print("[Analytics] Worker started (analytics_mode=True)")
+    else:
+        print("[Analytics] Worker NOT started (analytics_mode=False)")
+    
+    print("Async workers started successfully")
     
     # Register callback for registration status changes
     # This ensures that when the camera is approved, the local status is updated
@@ -123,7 +137,6 @@ def main():
         
         # If camera was approved, save the updated info
         if new_status == "registered" and old_status == "pending":
-            from config import save_camera_info
             save_camera_info(CAMERA_ID, CAMERA_NAME, "registered", local_ip)
     
     register_status_change_callback(on_registration_status_changed)
@@ -142,11 +155,9 @@ def main():
     
     # Background update state
     last_gc_time = time_ms()
-    last_flag_sync_time = time_ms()
     
     # Server connection status
     streaming_server_available = True
-    connection_error_count = 0
     
     # Initialize frame profiler
     frame_profiler = FrameProfiler()
@@ -160,12 +171,15 @@ def main():
     frame_counter = 0
     last_pose_analysis_time = 0
     
-    print("\n=== Starting Camera Stream ===")
-    print(f"Camera: {CAMERA_NAME} ({CAMERA_ID})")
-    print(f"Status: {registration_status}")
-    print(f"OBSOLETE: RTMP Streaming DISABLED (JPEG upload via HTTP)")
-    print(f"Streaming Server: {STREAMING_HTTP_URL}")
-    print("Frame profiling ENABLED - timing summaries print every 30 frames")
+    print("\n=== Camera Stream Stopped ===")
+    control_flags = get_control_flags()
+    print(f"Final Configuration:")
+    print(f"  Camera: {CAMERA_NAME} ({CAMERA_ID})")
+    print(f"  Status: {registration_status}")
+    print(f"  Analytics Mode: {'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED'}")
+    print(f"  Recording: {'ENABLED' if control_flags.get('record') else 'DISABLED'}")
+    print(f"  OBSOLETE: RTMP Streaming DISABLED (JPEG upload via HTTP)")
+    print(f"  Fall Algorithm: {control_flags.get('fall_algorithm')}")
     
     while not app.need_exit():
         # Start frame profiling
@@ -332,11 +346,15 @@ def main():
         set_fps(current_fps)
         frame_start_time = frame_end_time
         
+        # Calculate elapsed_ms for analytics server (time since last frame)
+        elapsed_ms = frame_duration if frame_duration > 0 else 33.33
+        
         current_fall_counter = 0
         current_fall_detected = False
         current_fall_algorithm = get_flag("fall_algorithm", 3)
-        current_torso_angle = None
-        current_thigh_uprightness = None
+        
+        # Track previous bboxes for analytics server (per track_id)
+        previous_bboxes = {}
         
         for track in tracks:
             track_result = process_track(
@@ -345,14 +363,54 @@ def main():
                 skeleton_saver=skeleton_saver_2d if is_recording else None,
                 frame_id=frame_id,
                 safety_checker=safety_checker,
-                fps=current_fps
+                fps=current_fps,
+                analytics_mode=get_flag("analytics_mode", False)
             )
+            
+            # Send track data to analytics server if analytics_mode is enabled
+            if track_result and get_flag("analytics_mode", False):
+                track_id = track_result.get("track_id")
+                keypoints = track_result.get("keypoints")
+                bbox = track_result.get("bbox")
+                
+                if track_id and keypoints and bbox:
+                    # Get previous bbox for this track
+                    prev_bbox = previous_bboxes.get(track_id)
+                    
+                    # Send to analytics queue
+                    send_track_to_analytics(
+                        track_id=track_id,
+                        keypoints=keypoints,
+                        bbox=bbox,
+                        previous_bbox=prev_bbox,
+                        elapsed_ms=elapsed_ms,
+                        use_hme=get_flag("hme", False)
+                    )
+                    
+                    # Store current bbox for next frame
+                    previous_bboxes[track_id] = bbox
             
             # Track fall detection results
             if track_result:
-                if track_result.get("status") == "fall":
-                    current_fall_detected = True
-                    current_fall_counter += 1
+                track_id = track_result.get("track_id")
+                
+                # Check if analytics server has fall detection result
+                if get_flag("analytics_mode", False) and is_analytics_server_available():
+                    analytics_fall = get_analytics_fall_data(track_id)
+                    if analytics_fall and analytics_fall.get("primary_alert"):
+                        current_fall_detected = True
+                        current_fall_counter += 1
+                        print(f"[Analytics] Fall detected from server: track_id={track_id}")
+                    elif analytics_fall and (analytics_fall.get("counter_method3", 0) > 0 or 
+                                             analytics_fall.get("counter_method2", 0) > 0 or
+                                             analytics_fall.get("counter_method1", 0) > 0):
+                        # Track as unsafe if any counter is active
+                        pass
+                else:
+                    # Fall back to local fall detection result
+                    if track_result.get("status") == "fall":
+                        current_fall_detected = True
+                        current_fall_counter += 1
         frame_profiler.end_task("tracking")
         
         # 9. Draw UI elements

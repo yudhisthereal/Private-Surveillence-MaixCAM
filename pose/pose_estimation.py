@@ -3,54 +3,25 @@ from collections import deque
 import random
 import math
 
-# === HME PARAMETERS (only used if HME mode is enabled via control_flags["hme"]) ===
-def get_hme_parameters():
-    """Get HME parameters - only used if HME mode is enabled via control_flags["hme"]"""
-    # Secret keys at caregiver (should match pose_estimation_enc_gsplit.py)
+class PoseEstimation:
+    """Pose classifier for CAMERA SIDE ONLY (camera → analytics → caregiver architecture)
+    
+    This version implements the camera side of the HME workflow:
+    1. Camera: Calculates pose features and encrypts them with simple 2-component encryption
+    2. Analytics: Performs comparisons on encrypted data (not in this file)
+    3. Caregiver: Decrypts results and determines pose (not in this file)
+    
+    Camera should ONLY have the public parameters for encryption, NOT decryption keys.
+    """
+    
+    # ============================================
+    # PUBLIC PARAMETERS FOR ENCRYPTION (camera has these)
+    # ============================================
+    # These are the public parameters needed for encryption
+    # Camera should NOT have decryption keys or other private parameters
     p1 = 234406548094233827948571379965547188853
     q1 = 583457592311129510314141861330330044443
-    r = 696522972436164062959242838052087531431
-    s = 374670603170509799404699393785831797599
-    t = 443137959904584298054176676987615849169
-    w = 391475886865055383118586393345880578361
     u = 2355788435550222327802749264573303139783
-    
-    n1 = p1 * q1 * r * s * t * w
-    n11 = p1 * q1
-    
-    # Modular inverses
-    pinvq = 499967064455987294076532081570894386372
-    qinvp = 33542671637141449679641257954160235148
-    gu = u.bit_length() // 2
-    u1 = u // 2
-    
-    # Partial products
-    np1prod = q1 * r * s * t * w
-    nq1prod = p1 * r * s * t * w
-    nrprod = p1 * q1 * s * t * w
-    nsprod = p1 * q1 * r * t * w
-    ntprod = p1 * q1 * r * s * w
-    nwprod = p1 * q1 * r * t * s
-    
-    # Inverses
-    invnp1 = 205139046479782337030801215788009754117
-    invnq1 = 429235397156384978572995593851807405098
-    invnr = 592155359269217457562309991915739180471
-    invns = 115186784058467557094932562011798848762
-    invnt = 51850665316568177665825586294193267244
-    invnw = 44855536902472009823152313099539628632
-    
-    return {
-        'p1': p1, 'q1': q1, 'r': r, 's': s, 't': t, 'w': w, 'u': u,
-        'n1': n1, 'n11': n11, 'pinvq': pinvq, 'qinvp': qinvp, 'gu': gu, 'u1': u1,
-        'np1prod': np1prod, 'nq1prod': nq1prod, 'nrprod': nrprod, 
-        'nsprod': nsprod, 'ntprod': ntprod, 'nwprod': nwprod,
-        'invnp1': invnp1, 'invnq1': invnq1, 'invnr': invnr, 
-        'invns': invns, 'invnt': invnt, 'invnw': invnw
-    }
-
-class PoseEstimation:
-    """Pose classifier with optional Homomorphic Encryption support"""
     
     def __init__(self, keypoints_window_size=5, missing_value=-1):
         self.keypoints_map_deque = deque(maxlen=keypoints_window_size)
@@ -58,21 +29,21 @@ class PoseEstimation:
         self.pose_data = {}  # Store detailed pose data
         self.missing_value = missing_value
         
-        # Thresholds for limb length ratios (plain mode only)
-        self.thigh_calf_ratio_threshold = 0.7
-        self.torso_leg_ratio_threshold = 0.5
-        
-        print("[HME] Pose Estimation initialized")
-
-    # === PLAIN MODE METHODS ===
+        print(f"[Camera] Pose Estimation initialized (window={keypoints_window_size})")
     
-    def feed_keypoints_17(self, keypoints_17, use_hme=False):
-        """Process 17 keypoints in either plain or HME mode"""
+    # ============================================
+    # KEYPOINT PROCESSING (Camera)
+    # ============================================
+    
+    def feed_keypoints_17(self, keypoints_17):
+        """Process 17 keypoints: flattened list/array [x0,y0, x1,y1, ..., x16,y16]"""
         try:
             keypoints = np.array(keypoints_17).reshape((-1, 2))
             if keypoints.shape != (17, 2):
+                print(f"[Camera] Invalid keypoints shape: {keypoints.shape}")
                 return None
-        except:
+        except Exception as e:
+            print(f"[Camera] Error parsing keypoints: {e}")
             return None
 
         kp_map = {
@@ -86,22 +57,19 @@ class PoseEstimation:
             'Right Ankle': keypoints[16]
         }
 
-        if use_hme:
-            return self.feed_keypoints_map_hme(kp_map)
-        else:
-            return self.feed_keypoints_map_plain(kp_map)
-
+        return self.feed_keypoints_map(kp_map)
+    
     def _is_frame_complete(self, keypoints_map):
-        """Check if all keypoints are present"""
+        """Check if all required keypoints are present (no missing values)"""
         for k, v in keypoints_map.items():
             if v is None:
                 return False
             if v[0] == self.missing_value or v[1] == self.missing_value:
                 return False
         return True
-
+    
     def _calculate_limb_lengths(self, km):
-        """Calculate limb lengths for plain mode"""
+        """Calculate limb lengths from keypoints"""
         try:
             # Calculate thigh length (hip to knee)
             left_thigh = np.linalg.norm(km['Left Hip'] - km['Left Knee'])
@@ -123,382 +91,326 @@ class PoseEstimation:
             right_leg = np.linalg.norm(km['Right Hip'] - km['Right Ankle'])
             leg_length = (left_leg + right_leg) / 2.0
             
-            # Calculate ratios
-            thigh_calf_ratio = thigh_length / calf_length if calf_length > 0 else 1.0
-            torso_leg_ratio = torso_height / leg_length if leg_length > 0 else 1.0
-            
-            return thigh_calf_ratio, torso_leg_ratio, thigh_length, calf_length, torso_height, leg_length
-        except:
-            return 1.0, 1.0, 0.0, 0.0, 0.0, 0.0
-
-    def feed_keypoints_map_plain(self, keypoints_map):
-        """Plain mode pose classification"""
-        if not self._is_frame_complete(keypoints_map):
-            self.status = []
-            self.pose_data = {}
-            return None
-
-        self.keypoints_map_deque.append(keypoints_map)
-
-        try:
-            # Compute averaged keypoints
-            km = {
-                key: sum(d[key] for d in self.keypoints_map_deque) / len(self.keypoints_map_deque)
-                for key in self.keypoints_map_deque[0].keys()
-            }
-
-            # Compute centers
-            shoulder_center = (km['Left Shoulder'] + km['Right Shoulder']) / 2.0
-            hip_center = (km['Left Hip'] + km['Right Hip']) / 2.0
-            knee_center = (km['Left Knee'] + km['Right Knee']) / 2.0
-
-            torso_vec = shoulder_center - hip_center
-            thigh_vec = knee_center - hip_center
-            up_vector = np.array([0.0, -1.0])
-
-            # Safe angle computation
-            torso_norm = np.linalg.norm(torso_vec)
-            thigh_norm = np.linalg.norm(thigh_vec)
-            if torso_norm == 0 or thigh_norm == 0:
-                self.status = []
-                self.pose_data = {}
-                return None
-
-            torso_angle = np.degrees(np.arccos(np.clip(
-                np.dot(torso_vec, up_vector) / (torso_norm * np.linalg.norm(up_vector)), -1.0, 1.0)))
-
-            thigh_angle = np.degrees(np.arccos(np.clip(
-                np.dot(thigh_vec, up_vector) / (thigh_norm * np.linalg.norm(up_vector)), -1.0, 1.0)))
-
-            thigh_uprightness = abs(thigh_angle - 180.0)
-
-            # Calculate limb length ratios
-            thigh_calf_ratio, torso_leg_ratio, thigh_length, calf_length, torso_height, leg_length = self._calculate_limb_lengths(km)
-
-            # Classification
-            if torso_angle < 30 and thigh_uprightness < 40:
-                if thigh_calf_ratio < self.thigh_calf_ratio_threshold:
-                    label = "sitting"
-                elif torso_leg_ratio < self.torso_leg_ratio_threshold:
-                    label = "bending_down"
-                else:
-                    label = "standing"
-            elif torso_angle < 30 and thigh_uprightness >= 40:
-                label = "sitting"
-            elif 30 <= torso_angle < 80 and thigh_uprightness < 60:
-                label = "bending_down"
-            else:
-                label = "lying_down"
-
-            # Store detailed pose data
-            self.pose_data = {
-                'label': label,
-                'torso_angle': torso_angle,
-                'thigh_uprightness': thigh_uprightness,
-                'thigh_calf_ratio': thigh_calf_ratio,
-                'torso_leg_ratio': torso_leg_ratio,
-                'thigh_angle': thigh_angle,
-                'thigh_length': thigh_length,
-                'calf_length': calf_length,
-                'torso_height': torso_height,
-                'leg_length': leg_length
-            }
-            
-            self.status = [label]
-            return self.pose_data
-            
+            return thigh_length, calf_length, torso_height, leg_length
         except Exception as e:
-            print(f"Pose estimation error: {e}")
-            self.status = []
-            self.pose_data = {}
-            return None
-
-    # === HME MODE METHODS ===
+            print(f"[Camera] Error calculating limb lengths: {e}")
+            return 0.0, 0.0, 0.0, 0.0
     
-    def _truncate(self, num):
-        """Convert real number to integer with 2 decimal precision"""
-        factor = 100
-        return math.trunc(num * factor)
-
-    def _encrypt_value(self, m, hme_params):
-        """Encrypt a single value (used by camera)"""
-        g = random.randint(1, 2**32 - 1)
-        c1 = ((g * hme_params['u']) + m) % hme_params['p1']
-        c2 = ((g * hme_params['u']) + m) % hme_params['q1']
-        c3 = ((g * hme_params['u']) + m) % hme_params['r']
-        c4 = ((g * hme_params['u']) + m) % hme_params['s']
-        c5 = ((g * hme_params['u']) + m) % hme_params['t']
-        c6 = ((g * hme_params['u']) + m) % hme_params['w']
-        return [c1, c2, c3, c4, c5, c6]
-
-    def _encrypt_simple(self, m, hme_params):
-        """Simpler encryption for feature values (2 components)"""
-        g = random.randint(1, 2**32 - 1)
-        cth1 = ((g * hme_params['u']) + m) % hme_params['p1']
-        cth2 = ((g * hme_params['u']) + m) % hme_params['q1']
-        return [cth1, cth2]
-
-    def _decrypt_value(self, c_values, hme_params):
-        """Decrypt a value (used by caregiver)"""
-        if len(c_values) != 6:
-            return None
-            
-        c1, c2, c3, c4, c5, c6 = c_values
-        mout = (((c1 % hme_params['p1']) * hme_params['invnp1'] * hme_params['np1prod'] + 
-                 (c2 % hme_params['q1']) * hme_params['invnq1'] * hme_params['nq1prod'] + 
-                 (c3 % hme_params['r']) * hme_params['invnr'] * hme_params['nrprod'] + 
-                 (c4 % hme_params['s']) * hme_params['invns'] * hme_params['nsprod'] + 
-                 (c5 % hme_params['t']) * hme_params['invnt'] * hme_params['ntprod'] + 
-                 (c6 % hme_params['w']) * hme_params['invnw'] * hme_params['nwprod']) % hme_params['n1'])
-        
-        if mout > hme_params['n1'] // 2:
-            mout = mout - hme_params['n1']
-        mout = mout % hme_params['u']
-        return mout
-
-    def feed_keypoints_map_hme(self, keypoints_map, use_hme=False):
-        """HME mode: Calculate features and prepare encrypted data"""
+    def feed_keypoints_map(self, keypoints_map):
+        """Main processing: extract features and prepare encrypted data for analytics"""
+        # Step 1: Check if frame is complete
         if not self._is_frame_complete(keypoints_map):
             self.status = []
             self.pose_data = {}
             return None
-
+        
+        # Step 2: Add to smoothing deque
         self.keypoints_map_deque.append(keypoints_map)
-
+        
         try:
-            # Compute averaged keypoints
+            # Step 3: Compute averaged keypoints (temporal smoothing)
             km = {
                 key: sum(d[key] for d in self.keypoints_map_deque) / len(self.keypoints_map_deque)
                 for key in self.keypoints_map_deque[0].keys()
             }
-
-            # Compute centers and angles (same as plain mode)
+            
+            # Step 4: Compute centers for angle calculations
             shoulder_center = (km['Left Shoulder'] + km['Right Shoulder']) / 2.0
             hip_center = (km['Left Hip'] + km['Right Hip']) / 2.0
             knee_center = (km['Left Knee'] + km['Right Knee']) / 2.0
-
+            
+            # Step 5: Calculate vectors
             torso_vec = shoulder_center - hip_center
             thigh_vec = knee_center - hip_center
-            up_vector = np.array([0.0, -1.0])
-
+            up_vector = np.array([0.0, -1.0])  # Upward direction (negative y)
+            
+            # Step 6: Safe angle computations
             torso_norm = np.linalg.norm(torso_vec)
             thigh_norm = np.linalg.norm(thigh_vec)
+            
             if torso_norm == 0 or thigh_norm == 0:
                 self.status = []
                 self.pose_data = {}
                 return None
-
+            
+            # Torso angle with vertical (0° = upright, 90° = horizontal)
             torso_angle = np.degrees(np.arccos(np.clip(
                 np.dot(torso_vec, up_vector) / (torso_norm * np.linalg.norm(up_vector)), -1.0, 1.0)))
-
+            
+            # Thigh angle with vertical
             thigh_angle = np.degrees(np.arccos(np.clip(
                 np.dot(thigh_vec, up_vector) / (thigh_norm * np.linalg.norm(up_vector)), -1.0, 1.0)))
-
+            
+            # Convert thigh angle to "uprightness" (0° = upright, 180° = inverted)
             thigh_uprightness = abs(thigh_angle - 180.0)
-
-            # Calculate limb lengths
-            thigh_calf_ratio, torso_leg_ratio, thigh_length, calf_length, torso_height, leg_length = self._calculate_limb_lengths(km)
-
-            # Convert to integers for encryption
-            Thl = self._truncate(thigh_length)
-            cl = self._truncate(calf_length)
-            Trl = self._truncate(torso_height)
-            ll = self._truncate(leg_length)
-            Tra = self._truncate(torso_angle)
-            Tha = self._truncate(thigh_uprightness)
-
-            if use_hme:
-                # Get HME parameters
-                hme_params = get_hme_parameters()
-                
-                # Encrypt features (simpler 2-component encryption for features)
-                encrypted_features = {
-                    'Tra': self._encrypt_simple(Tra, hme_params),  # Torso angle
-                    'Tha': self._encrypt_simple(Tha, hme_params),  # Thigh uprightness
-                    'Thl': self._encrypt_simple(Thl, hme_params),  # Thigh length
-                    'cl': self._encrypt_simple(cl, hme_params),    # Calf length
-                    'Trl': self._encrypt_simple(Trl, hme_params),  # Torso height
-                    'll': self._encrypt_simple(ll, hme_params)     # Leg length
-                }
-            else:
-                encrypted_features = {}
-
-            # Store both raw and encrypted data
+            
+            # Step 7: Calculate limb lengths
+            thigh_length, calf_length, torso_height, leg_length = self._calculate_limb_lengths(km)
+            
+            # Step 8: Convert real numbers to integers (2 decimal precision)
+            # This is necessary for homomorphic encryption
+            Thl = self._truncate(thigh_length)      # Thigh length
+            cl = self._truncate(calf_length)        # Calf length
+            Trl = self._truncate(torso_height)      # Torso height
+            ll = self._truncate(leg_length)         # Leg length
+            Tra = self._truncate(torso_angle)       # Torso angle
+            Tha = self._truncate(thigh_uprightness) # Thigh uprightness
+            
+            # Step 9: Encrypt features using 2-component encryption
+            # Camera only knows p1, q1, u (public parameters)
+            encrypted_features = {
+                'Tra': self._encrypt_simple(Tra),  # Torso angle
+                'Tha': self._encrypt_simple(Tha),  # Thigh uprightness
+                'Thl': self._encrypt_simple(Thl),  # Thigh length
+                'cl': self._encrypt_simple(cl),    # Calf length
+                'Trl': self._encrypt_simple(Trl),  # Torso height
+                'll': self._encrypt_simple(ll)     # Leg length
+            }
+            
+            # Step 10: Store all data for this frame
             self.pose_data = {
-                'label': None,  # Will be determined after HME processing
-                'torso_angle': torso_angle,
-                'thigh_uprightness': thigh_uprightness,
-                'thigh_length': thigh_length,
-                'calf_length': calf_length,
-                'torso_height': torso_height,
-                'leg_length': leg_length,
-                'encrypted_features': encrypted_features,
-                'raw_int_values': {
+                # Raw calculated values (for debugging/visualization)
+                'raw_features': {
+                    'torso_angle': torso_angle,
+                    'thigh_uprightness': thigh_uprightness,
+                    'thigh_length': thigh_length,
+                    'calf_length': calf_length,
+                    'torso_height': torso_height,
+                    'leg_length': leg_length,
+                    'thigh_angle': thigh_angle
+                },
+                
+                # Integer representations (before encryption)
+                'int_features': {
                     'Tra': Tra,
                     'Tha': Tha,
                     'Thl': Thl,
                     'cl': cl,
                     'Trl': Trl,
                     'll': ll
-                }
+                },
+                
+                # Encrypted features (to send to analytics server)
+                'encrypted_features': encrypted_features,
+                
+                # Pose label will be filled later by caregiver
+                'label': None,
+                
+                # Metadata
+                'timestamp': time.time(),
+                'frame_complete': True
             }
             
-            self.status = ["encrypted_features_ready"]
+            # Camera status is just that we have features ready
+            self.status = ['features_ready']
+            
+            print(f"[Camera] Features extracted and encrypted:")
+            print(f"  Torso angle: {torso_angle:.2f}° → {Tra}")
+            print(f"  Thigh uprightness: {thigh_uprightness:.2f}° → {Tha}")
+            print(f"  Thigh length: {thigh_length:.2f} → {Thl}")
+            print(f"  Calf length: {calf_length:.2f} → {cl}")
+            
             return self.pose_data
             
         except Exception as e:
-            print(f"HME pose estimation error: {e}")
+            print(f"[Camera] Error processing keypoints: {e}")
             self.status = []
             self.pose_data = {}
             return None
-
-    def perform_hme_comparisons(self, encrypted_features):
-        """Analytics: Perform encrypted comparisons"""
-        try:
-            hme_params = get_hme_parameters()
-            Tra1, Tra2 = encrypted_features.get('Tra', [0, 0])
-            Tha1, Tha2 = encrypted_features.get('Tha', [0, 0])
-            Thl1, Thl2 = encrypted_features.get('Thl', [0, 0])
-            cl1, cl2 = encrypted_features.get('cl', [0, 0])
-            Trl1, Trl2 = encrypted_features.get('Trl', [0, 0])
-            ll1, ll2 = encrypted_features.get('ll', [0, 0])
-
-            # Threshold values (multiplied by 100 for integer comparison)
-            threshold_30 = 3000  # 30.00 degrees
-            threshold_40 = 4000  # 40.00 degrees
-            threshold_60 = 6000  # 60.00 degrees
-            threshold_80 = 8000  # 80.00 degrees
-
-            # Generate random values for homomorphic operations
-            r1 = random.randint(1, 2**22 - 1)
-            r2 = random.randint(1, 2**10 - 1)
-
-            # Perform comparisons (Algorithm 1: compare with plain threshold)
-            T301 = (r2 + (r1 * 2 * (Tra1 - threshold_30))) % hme_params['p1']
-            T302 = (r2 + (r1 * 2 * (Tra2 - threshold_30))) % hme_params['q1']
-            
-            T401 = (r2 + (r1 * 2 * (Tha1 - threshold_40))) % hme_params['p1']
-            T402 = (r2 + (r1 * 2 * (Tha2 - threshold_40))) % hme_params['q1']
-            
-            T801 = (r2 + (r1 * 2 * (Tra1 - threshold_80))) % hme_params['p1']
-            T802 = (r2 + (r1 * 2 * (Tra2 - threshold_80))) % hme_params['q1']
-            
-            T601 = (r2 + (r1 * 2 * (Tha1 - threshold_60))) % hme_params['p1']
-            T602 = (r2 + (r1 * 2 * (Tha2 - threshold_60))) % hme_params['q1']
-
-            # Algorithm 2: Compare two encrypted values
-            # Compare thigh_length * 10 vs calf_length * 7
-            TC1 = (r2 + (r1 * 2 * (Thl1 * 10 - cl1 * 7))) % hme_params['p1']
-            TC2 = (r2 + (r1 * 2 * (Thl2 * 10 - cl2 * 7))) % hme_params['q1']
-            
-            # Compare torso_height * 10 vs leg_length * 5
-            TL1 = (r2 + (r1 * 2 * (Trl1 * 10 - ll1 * 5))) % hme_params['p1']
-            TL2 = (r2 + (r1 * 2 * (Trl2 * 10 - ll2 * 5))) % hme_params['q1']
-
-            comparison_results = {
-                'T30': [T301, T302],
-                'T40': [T401, T402],
-                'T80': [T801, T802],
-                'T60': [T601, T602],
-                'TC': [TC1, TC2],
-                'TL': [TL1, TL2]
-            }
-
-            return comparison_results
-            
-        except Exception as e:
-            print(f"HME comparison error: {e}")
-            return None
-
-    def decrypt_comparison_results(self, comparison_results):
-        """Caregiver: Decrypt comparison results and determine pose"""
-        try:
-            hme_params = get_hme_parameters()
-            # Decrypt each comparison result
-            T30 = self._decrypt_simple_comparison(comparison_results.get('T30', [0, 0]), hme_params)
-            T40 = self._decrypt_simple_comparison(comparison_results.get('T40', [0, 0]), hme_params)
-            T80 = self._decrypt_simple_comparison(comparison_results.get('T80', [0, 0]), hme_params)
-            T60 = self._decrypt_simple_comparison(comparison_results.get('T60', [0, 0]), hme_params)
-            TC = self._decrypt_simple_comparison(comparison_results.get('TC', [0, 0]), hme_params)
-            TL = self._decrypt_simple_comparison(comparison_results.get('TL', [0, 0]), hme_params)
-
-            # Convert comparison results to boolean (0: False, 1: True)
-            a = 1 if T30 == 1 else 0  # torso_angle > 30
-            b = 1 if T40 == 1 else 0  # thigh_uprightness > 40
-            c = 1 if T80 == 1 else 0  # torso_angle > 80
-            d = 1 if TC == 1 else 0   # thigh_length*10 > calf_length*7
-            e = 1 if TL == 1 else 0   # torso_height*10 > leg_length*5
-            f = 1 if T60 == 1 else 0  # thigh_uprightness > 60
-
-            # Determine pose using the polynomial logic from pose_estimation_enc_gsplit.py
-            # LSB calculation
-            lsb = (a & b & d) | (a & ~b) | (~a & ~c & ~f)
-            
-            # MSB calculation
-            msb = (a & b & ~d & e) | ~a
-            
-            # Combine MSB and LSB
-            pose_code = (msb << 1) | lsb
-            
-            # Map pose code to label
-            pose_map = {
-                0: "standing",
-                1: "sitting",
-                2: "bending_down",
-                3: "lying_down"
-            }
-            
-            label = pose_map.get(pose_code, "unknown")
-            
-            # Update pose data
-            if 'raw_int_values' in self.pose_data:
-                self.pose_data['label'] = label
-                self.pose_data['comparison_flags'] = {'a': a, 'b': b, 'c': c, 'd': d, 'e': e, 'f': f}
-                self.pose_data['pose_code'] = pose_code
-                self.status = [label]
-            
-            return label
-            
-        except Exception as e:
-            print(f"HME decryption error: {e}")
-            return None
-
-    def _decrypt_simple_comparison(self, c_values, hme_params):
-        """Decrypt simple 2-component comparison result"""
-        if len(c_values) != 2:
-            return 0
-            
-        c11, c12 = c_values
-        mout = (((c11 % hme_params['p1']) * hme_params['qinvp'] * hme_params['q1']) + 
-                ((c12 % hme_params['q1']) * hme_params['pinvq'] * hme_params['p1'])) % hme_params['n11']
+    
+    # ============================================
+    # ENCRYPTION METHODS (Camera only has these)
+    # ============================================
+    
+    def _truncate(self, num):
+        """Convert real number to integer with 2 decimal precision"""
+        factor = 100
+        return math.trunc(num * factor)
+    
+    def _encrypt_simple(self, m):
+        """Simple 2-component encryption (camera → analytics)
         
-        # Adjust for negative values
-        if mout > hme_params['n11'] // 2:
-            mout = mout - hme_params['n11']
+        Args:
+            m: Integer value to encrypt
+            
+        Returns:
+            list: [c1, c2] encrypted values using public parameters p1, q1, u
+        """
+        # Random value for encryption
+        g = random.randint(1, 2**32 - 1)
         
-        mout = mout % hme_params['u']
-        bit_length = mout.bit_length()
+        # Encrypt using Chinese Remainder Theorem with 2 primes
+        c1 = ((g * self.u) + m) % self.p1
+        c2 = ((g * self.u) + m) % self.q1
         
-        # Compare with gu (half of u's bit length)
-        if hme_params['gu'] > bit_length:
-            return 0  # m < threshold
-        elif hme_params['gu'] < bit_length:
-            return 1  # m > threshold
-        else:
-            return -1  # m == threshold (unlikely with randomization)
-
-    def evaluate_pose(self, keypoints, use_hme=False):
-        """Main entry point: returns pose data dict or None"""
-        res = self.feed_keypoints_17(keypoints, use_hme)
+        return [c1, c2]
+    
+    # ============================================
+    # PUBLIC INTERFACE METHODS
+    # ============================================
+    
+    def evaluate_pose(self, keypoints):
+        """Main entry point for camera: returns pose data with encrypted features
+        
+        Args:
+            keypoints: List of 34 floats (17 keypoints × 2 coordinates)
+            
+        Returns:
+            dict: Pose data including raw features, integer features, and encrypted features
+                  Returns None if keypoints are invalid
+        """
+        res = self.feed_keypoints_17(keypoints)
         if res is None:
             return None
         return self.pose_data
-
+    
+    def get_encrypted_features(self):
+        """Get encrypted features for transmission to analytics server
+        
+        Returns:
+            dict: Encrypted features ready for transmission, or None if not available
+        """
+        if self.pose_data and 'encrypted_features' in self.pose_data:
+            return self.pose_data['encrypted_features']
+        return None
+    
+    def get_raw_features(self):
+        """Get raw calculated features (for debugging/visualization only)
+        
+        Note: In a real deployment, raw features should not leave the camera
+              for privacy reasons. This is for testing only.
+        """
+        if self.pose_data and 'raw_features' in self.pose_data:
+            return self.pose_data['raw_features']
+        return None
+    
+    def get_int_features(self):
+        """Get integer features (before encryption, for debugging only)"""
+        if self.pose_data and 'int_features' in self.pose_data:
+            return self.pose_data['int_features']
+        return None
+    
+    def reset(self):
+        """Reset the pose estimator (clear history)"""
+        self.keypoints_map_deque.clear()
+        self.status = []
+        self.pose_data = {}
+        print("[Camera] Pose estimator reset")
+    
+    def get_status(self):
+        """Get current status"""
+        return self.status
+    
+    def set_pose_label(self, label):
+        """Set the pose label (called when caregiver returns decrypted result)
+        
+        Args:
+            label: The pose label determined by caregiver ("standing", "sitting", etc.)
+        """
+        if self.pose_data:
+            self.pose_data['label'] = label
+            self.status = [label]
+            print(f"[Camera] Pose label received from caregiver: {label}")
+    
     def get_pose_data(self):
-        """Get the latest pose data"""
+        """Get complete pose data (including any label from caregiver)"""
         return self.pose_data
 
-    def is_hme_enabled(self):
-        """Check if HME mode is enabled"""
-        # This function is deprecated - use control_flags["hme"] from main.py instead
-        return False
+
+# ============================================
+# TESTING/DEMO CODE
+# ============================================
+
+def test_camera_side():
+    """Test the camera-side pose estimation"""
+    print("\n" + "="*60)
+    print("Testing Camera-Side Pose Estimation")
+    print("="*60)
+    
+    # Create pose estimator
+    pose_estimator = PoseEstimationCamera(keypoints_window_size=3)
+    
+    # Create dummy keypoints (simulating a standing person)
+    # Format: [x0,y0, x1,y1, ..., x16,y16]
+    dummy_keypoints = []
+    
+    # Fill with dummy coordinates (simplified skeleton)
+    # Shoulders (indices 5,6)
+    dummy_keypoints.extend([320, 100])  # Left shoulder
+    dummy_keypoints.extend([400, 100])  # Right shoulder
+    
+    # Add other keypoints (not used in pose estimation)
+    for _ in range(5):
+        dummy_keypoints.extend([0, 0])
+    
+    # Hips (indices 11,12)
+    dummy_keypoints.extend([330, 200])  # Left hip
+    dummy_keypoints.extend([390, 200])  # Right hip
+    
+    # Knees (indices 13,14)
+    dummy_keypoints.extend([335, 300])  # Left knee
+    dummy_keypoints.extend([385, 300])  # Right knee
+    
+    # Ankles (indices 15,16)
+    dummy_keypoints.extend([335, 400])  # Left ankle
+    dummy_keypoints.extend([385, 400])  # Right ankle
+    
+    # Process keypoints
+    pose_data = pose_estimator.evaluate_pose(dummy_keypoints)
+    
+    if pose_data:
+        print("\n[SUCCESS] Camera processed keypoints successfully")
+        print("\nRaw Features:")
+        for key, value in pose_data['raw_features'].items():
+            print(f"  {key}: {value:.2f}")
+        
+        print("\nInteger Features (before encryption):")
+        for key, value in pose_data['int_features'].items():
+            print(f"  {key}: {value}")
+        
+        print("\nEncrypted Features (first few values):")
+        encrypted = pose_data['encrypted_features']
+        for key, value in encrypted.items():
+            print(f"  {key}: [{value[0]:.3e}, {value[1]:.3e}]")
+        
+        print("\nThese encrypted features should be sent to the Analytics Server.")
+        print("\nAnalytics Server will:")
+        print("  1. Receive encrypted features")
+        print("  2. Perform homomorphic comparisons")
+        print("  3. Send comparison results to Caregiver")
+        print("\nCaregiver will:")
+        print("  1. Decrypt comparison results")
+        print("  2. Determine pose using polynomial logic")
+        print("  3. Send pose label back to Camera")
+    else:
+        print("\n[FAILED] Could not process keypoints")
+    
+    return pose_estimator
+
+
+if __name__ == "__main__":
+    # Import time for testing
+    import time
+    
+    # Run test
+    estimator = test_camera_side()
+    
+    print("\n" + "="*60)
+    print("Architecture Summary")
+    print("="*60)
+    print("\nCORRECT HME ARCHITECTURE:")
+    print("1. CAMERA (this file):")
+    print("   • Calculates features from keypoints")
+    print("   • Encrypts with public parameters (p1, q1, u)")
+    print("   • Sends encrypted features to Analytics")
+    print("\n2. ANALYTICS SERVER (separate file):")
+    print("   • Receives encrypted features")
+    print("   • Performs comparisons (priv_comp_an)")
+    print("   • Evaluates polynomial")
+    print("   • Sends encrypted results to Caregiver")
+    print("\n3. CAREGIVER (separate file):")
+    print("   • Decrypts comparison results")
+    print("   • Determines pose label")
+    print("   • Sends pose label back to Camera")
+    print("\nNOTE: Camera NEVER has decryption keys!")
+    print("      Camera ONLY has public encryption parameters.")

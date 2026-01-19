@@ -10,7 +10,8 @@ import threading
 from config import (
     STREAMING_HTTP_URL, FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
-    LOCAL_PORT
+    LOCAL_PORT, ANALYTICS_API_URL, ANALYTICS_TIMEOUT,
+    ANALYTICS_RETRY_COUNT, ANALYTICS_RETRY_BACKOFF
 )
 from control_manager import (
     get_camera_state_from_server, get_safe_areas_from_server, report_state,
@@ -512,4 +513,450 @@ def get_is_recording():
         Boolean indicating if recording is currently active
     """
     return _recording_state["is_recording"]
+
+
+# ============================================
+# ANALYTICS CLIENT AND WORKER
+# ============================================
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+class AnalyticsClient:
+    """Client for interacting with the Analytics Server (http://103.127.136.213:5000)
+    
+    Provides pose estimation and fall detection capabilities through REST API endpoints.
+    """
+    
+    def __init__(self, base_url=None, timeout=10, max_retries=3, backoff_factor=1.0):
+        self.base_url = base_url or ANALYTICS_API_URL
+        self.timeout = timeout
+        
+        # Setup session with retry strategy
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=max_retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=[429, 500, 502, 503, 504]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+    
+    def health_check(self):
+        """Check if the analytics server is healthy.
+        
+        Returns:
+            bool: True if server is healthy, False otherwise
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/analytics/health",
+                timeout=self.timeout
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("status") == "healthy"
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"[AnalyticsClient] Health check failed: {e}")
+            return False
+    
+    def analyze_pose(self, keypoints, bbox=None, track_id=0, camera_id="", use_hme=False):
+        """Analyze pose from 17 keypoints (COCO format).
+        
+        Args:
+            keypoints: List of 34 floats (17 keypoints × 2 coordinates)
+            bbox: Optional bounding box [x, y, width, height]
+            track_id: Optional track ID for multi-object tracking
+            camera_id: Optional camera identifier
+            use_hme: Whether to use Homomorphic Encryption (default: False)
+        
+        Returns:
+            dict: Pose analysis result or None on failure
+        """
+        payload = {
+            "keypoints": keypoints,
+            "track_id": track_id,
+            "camera_id": camera_id,
+            "use_hme": use_hme
+        }
+        if bbox is not None:
+            payload["bbox"] = bbox
+        
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/analytics/analyze-pose",
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"[AnalyticsClient] Pose analysis failed: {e}")
+            return None
+    
+    def detect_fall(self, camera_id, track_id, pose_data, current_bbox, 
+                    previous_bbox=None, elapsed_ms=33.33, use_hme=False):
+        """Detect falls using pose data and bounding box motion analysis.
+        
+        Args:
+            camera_id: Camera identifier (required)
+            track_id: Track ID (required)
+            pose_data: Pose data from analyze-pose (optional)
+            current_bbox: Current bounding box [x, y, width, height] (required)
+            previous_bbox: Previous frame's bounding box (optional)
+            elapsed_ms: Time since last frame in milliseconds (default: 33.33)
+            use_hme: Whether to use HME mode (default: False)
+        
+        Returns:
+            dict: Fall detection result or None on failure
+        """
+        payload = {
+            "camera_id": camera_id,
+            "track_id": track_id,
+            "pose_data": pose_data,
+            "current_bbox": current_bbox,
+            "elapsed_ms": elapsed_ms,
+            "use_hme": use_hme
+        }
+        if previous_bbox is not None:
+            payload["previous_bbox"] = previous_bbox
+        
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/analytics/detect-fall",
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"[AnalyticsClient] Fall detection failed: {e}")
+            return None
+
+
+# Shared state for analytics results (thread-safe access)
+_analytics_state = {
+    "pose_data": {},          # track_id -> pose_data mapping
+    "fall_data": {},          # track_id -> fall_data mapping
+    "server_available": False,  # Whether analytics server is reachable
+    "last_health_check": 0     # Timestamp of last successful health check
+}
+_analytics_lock = threading.Lock()
+
+
+def get_analytics_pose_data(track_id):
+    """Get the latest pose data for a track from analytics server.
+    
+    Args:
+        track_id: The track ID to query
+    
+    Returns:
+        dict or None: Pose data for the track, or None if not available
+    """
+    with _analytics_lock:
+        return _analytics_state["pose_data"].get(track_id)
+
+
+def get_analytics_fall_data(track_id):
+    """Get the latest fall detection data for a track from analytics server.
+    
+    Args:
+        track_id: The track ID to query
+    
+    Returns:
+        dict or None: Fall data for the track, or None if not available
+    """
+    with _analytics_lock:
+        return _analytics_state["fall_data"].get(track_id)
+
+
+def is_analytics_server_available():
+    """Check if the analytics server is available.
+    
+    Returns:
+        bool: True if server is available, False otherwise
+    """
+    with _analytics_lock:
+        return _analytics_state["server_available"]
+
+
+class AnalyticsWorker(threading.Thread):
+    """Background worker for fetching pose and fall detection from Analytics Server.
+    
+    This worker is only started if control_flags["analytics_mode"] is True.
+    It receives track data (keypoints, bbox, track_id) from the main thread via a queue,
+    sends it to the Analytics Server for analysis, and updates shared variables with results.
+    
+    The worker runs asynchronously and doesn't block the main processing loop.
+    """
+    
+    def __init__(self, track_queue, camera_id, check_interval_ms=50):
+        super().__init__(daemon=True)
+        self.camera_id = camera_id
+        self.check_interval = check_interval_ms / 1000.0  # Convert to seconds
+        self.running = True
+        self.track_queue = track_queue
+        
+        # Analytics client
+        self.client = AnalyticsClient()
+        
+        # Statistics for monitoring
+        self.pose_requests = 0
+        self.fall_requests = 0
+        self.errors = 0
+        
+        # Health check interval (every 30 seconds)
+        self.health_check_interval = 30.0
+        self.last_health_check = 0
+        
+    def run(self):
+        """Main worker loop - process track data from queue."""
+        print(f"[AnalyticsWorker] Starting worker for camera: {self.camera_id}")
+        
+        # Initial health check
+        self._check_health()
+        
+        while self.running:
+            try:
+                # Check if analytics mode is still enabled
+                from control_manager import get_flag
+                if not get_flag("analytics_mode", False):
+                    # Analytics mode disabled, sleep and continue checking
+                    time.sleep(1.0)
+                    continue
+                
+                # Periodic health check
+                current_time = time.time()
+                if current_time - self.last_health_check > self.health_check_interval:
+                    self._check_health()
+                
+                # Check if server is available
+                if not is_analytics_server_available():
+                    # Server not available, sleep and retry later
+                    time.sleep(1.0)
+                    continue
+                
+                # Get next track data from queue (non-blocking)
+                try:
+                    track_data = self.track_queue.get_nowait()
+                    self._process_track(track_data)
+                except queue.Empty:
+                    # No track data available, sleep briefly
+                    time.sleep(0.01)  # 10ms
+                    
+            except Exception as e:
+                print(f"[AnalyticsWorker] Error in main loop: {e}")
+                self.errors += 1
+                time.sleep(0.1)  # Sleep on error
+        
+        print(f"[AnalyticsWorker] Stopped (pose_requests={self.pose_requests}, fall_requests={self.fall_requests}, errors={self.errors})")
+    
+    def _check_health(self):
+        """Check if analytics server is healthy and update control_flags accordingly."""
+        try:
+            is_healthy = self.client.health_check()
+            with _analytics_lock:
+                _analytics_state["server_available"] = is_healthy
+                if is_healthy:
+                    _analytics_state["last_health_check"] = time.time()
+            
+            # Update control_flags["analytics_mode"] based on server health
+            from control_manager import get_flag, update_control_flag
+            current_mode = get_flag("analytics_mode", False)
+            
+            if is_healthy:
+                if not current_mode:
+                    # Server is healthy, enable analytics mode
+                    update_control_flag("analytics_mode", True)
+                    print(f"[AnalyticsWorker] Server is healthy: {ANALYTICS_API_URL} - analytics_mode enabled")
+                else:
+                    print(f"[AnalyticsWorker] Server is healthy: {ANALYTICS_API_URL}")
+            else:
+                if current_mode:
+                    # Server is unhealthy, disable analytics mode
+                    update_control_flag("analytics_mode", False)
+                    print(f"[AnalyticsWorker] Server health check failed - analytics_mode disabled")
+                else:
+                    print(f"[AnalyticsWorker] Server health check failed")
+        except Exception as e:
+            print(f"[AnalyticsWorker] Health check error: {e}")
+            with _analytics_lock:
+                _analytics_state["server_available"] = False
+            # Disable analytics mode on error
+            try:
+                from control_manager import get_flag, update_control_flag
+                if get_flag("analytics_mode", False):
+                    update_control_flag("analytics_mode", False)
+            except:
+                pass
+    
+    def _process_track(self, track_data):
+        """Process a single track data item.
+        
+        Args:
+            track_data: Dictionary containing:
+                - track_id: int
+                - keypoints: list of 34 floats (17 keypoints × 2)
+                - bbox: list of [x, y, width, height]
+                - previous_bbox: optional previous bounding box
+                - elapsed_ms: time since last frame in ms
+        """
+        try:
+            track_id = track_data.get("track_id")
+            keypoints = track_data.get("keypoints")
+            bbox = track_data.get("bbox")
+            previous_bbox = track_data.get("previous_bbox")
+            elapsed_ms = track_data.get("elapsed_ms", 33.33)
+            use_hme = track_data.get("use_hme", False)
+            
+            if not keypoints or not bbox:
+                return
+            
+            # Step 1: Analyze pose
+            pose_result = self.client.analyze_pose(
+                keypoints=keypoints,
+                bbox=bbox,
+                track_id=track_id,
+                camera_id=self.camera_id,
+                use_hme=use_hme
+            )
+            
+            self.pose_requests += 1
+            
+            if pose_result and pose_result.get("status") == "success":
+                pose_data = pose_result.get("pose_data")
+                
+                # Update shared state with pose data
+                with _analytics_lock:
+                    _analytics_state["pose_data"][track_id] = {
+                        "label": pose_data.get("label"),
+                        "torso_angle": pose_data.get("torso_angle"),
+                        "thigh_uprightness": pose_data.get("thigh_uprightness"),
+                        "thigh_calf_ratio": pose_data.get("thigh_calf_ratio"),
+                        "torso_leg_ratio": pose_data.get("torso_leg_ratio"),
+                        "thigh_angle": pose_data.get("thigh_angle"),
+                        "thigh_length": pose_data.get("thigh_length"),
+                        "calf_length": pose_data.get("calf_length"),
+                        "torso_height": pose_data.get("torso_height"),
+                        "leg_length": pose_data.get("leg_length"),
+                        "server_analysis": pose_data.get("server_analysis", True),
+                        "timestamp": time.time()
+                    }
+                
+                # Step 2: Detect fall (only if we have previous bbox for motion analysis)
+                if previous_bbox is not None:
+                    fall_result = self.client.detect_fall(
+                        camera_id=self.camera_id,
+                        track_id=track_id,
+                        pose_data=pose_data,
+                        current_bbox=bbox,
+                        previous_bbox=previous_bbox,
+                        elapsed_ms=elapsed_ms,
+                        use_hme=use_hme
+                    )
+                    
+                    self.fall_requests += 1
+                    
+                    if fall_result and fall_result.get("status") == "success":
+                        fall_detection = fall_result.get("fall_detection", {})
+                        
+                        # Update shared state with fall data
+                        with _analytics_lock:
+                            _analytics_state["fall_data"][track_id] = {
+                                "fall_detected_method1": fall_detection.get("fall_detected_method1", False),
+                                "fall_detected_method2": fall_detection.get("fall_detected_method2", False),
+                                "fall_detected_method3": fall_detection.get("fall_detected_method3", False),
+                                "counter_method1": fall_detection.get("counter_method1", 0),
+                                "counter_method2": fall_detection.get("counter_method2", 0),
+                                "counter_method3": fall_detection.get("counter_method3", 0),
+                                "primary_alert": fall_detection.get("primary_alert", False),
+                                "timestamp": time.time()
+                            }
+                        
+                        # Log fall detection result
+                        if fall_detection.get("primary_alert"):
+                            print(f"[AnalyticsWorker] FALL DETECTED: track_id={track_id}, method3={fall_detection.get('fall_detected_method3')}")
+            else:
+                self.errors += 1
+                
+        except Exception as e:
+            print(f"[AnalyticsWorker] Error processing track: {e}")
+            self.errors += 1
+    
+    def stop(self):
+        """Stop the worker."""
+        self.running = False
+    
+    def get_stats(self):
+        """Get worker statistics.
+        
+        Returns:
+            dict: Statistics about the worker's activity
+        """
+        return {
+            "pose_requests": self.pose_requests,
+            "fall_requests": self.fall_requests,
+            "errors": self.errors,
+            "server_available": is_analytics_server_available()
+        }
+
+
+# Global analytics queue reference (set by main.py)
+_analytics_queue = None
+
+def set_analytics_queue(q):
+    """Set the analytics queue reference (called from main.py)"""
+    global _analytics_queue
+    _analytics_queue = q
+
+def send_track_to_analytics(track_id, keypoints, bbox, previous_bbox=None, elapsed_ms=33.33, use_hme=False):
+    """Send track data to analytics queue for processing.
+    
+    This function is called from the main thread to queue track data
+    for the AnalyticsWorker to process.
+    
+    Args:
+        track_id: The track ID
+        keypoints: List of 34 floats (17 keypoints × 2 coordinates)
+        bbox: Current bounding box [x, y, width, height]
+        previous_bbox: Previous frame's bounding box (optional)
+        elapsed_ms: Time since last frame in milliseconds
+        use_hme: Whether to use HME mode
+    
+    Returns:
+        bool: True if data was queued successfully, False otherwise
+    """
+    from control_manager import get_flag
+    
+    # Only queue if analytics mode is enabled
+    if not get_flag("analytics_mode", False):
+        return False
+    
+    # Check if queue is available
+    if _analytics_queue is None:
+        return False
+    
+    try:
+        track_data = {
+            "track_id": track_id,
+            "keypoints": keypoints,
+            "bbox": bbox,
+            "previous_bbox": previous_bbox,
+            "elapsed_ms": elapsed_ms,
+            "use_hme": use_hme
+        }
+        # Put data in the analytics queue for the worker to process
+        try:
+            _analytics_queue.put_nowait(track_data)
+            return True
+        except queue.Full:
+            # Queue is full, skip this frame
+            return False
+    except Exception as e:
+        print(f"[Analytics] Failed to prepare track data: {e}")
+        return False
 

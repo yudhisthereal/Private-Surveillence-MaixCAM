@@ -85,7 +85,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         # First get our local IP
         local_ip = get_local_ip()
         if local_ip == "unknown":
-            print("❌ Cannot determine local IP address")
+            print("Cannot determine local IP address")
             return "camera_000", "Unnamed Camera", "unregistered", local_ip
         
         url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/register"
@@ -103,7 +103,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         )
 
         if response.status_code != 200:
-            print(f"❌ Registration failed: HTTP {response.status_code}")
+            print(f"Registration failed: HTTP {response.status_code}")
             return "camera_000", "Unnamed Camera", "unregistered", local_ip
 
         result = response.json()
@@ -113,19 +113,19 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         
         if status == "registered":
             camera_name = result.get("camera_name", f"Camera {camera_id.split('_')[-1]}")
-            print(f"✅ Camera registered: {camera_name} ({camera_id})")
+            print(f"Camera registered: {camera_name} ({camera_id})")
         elif status == "pending":
             camera_name = f"Camera {camera_id.split('_')[-1]}"
-            print(f"⏳ Camera pending approval: {camera_id}")
+            print(f"Camera pending approval: {camera_id}")
             print(f"   Please approve registration on the web dashboard")
         else:
             camera_name = f"Camera {camera_id.split('_')[-1]}"
-            print(f"⚠️ Unknown status: {status}")
+            print(f"Unknown status: {status}")
 
         return camera_id, camera_name, status, local_ip
 
     except Exception as e:
-        print(f"❌ Registration error: {e}")
+        print(f"Registration error: {e}")
         local_ip = get_local_ip()
         return "camera_000", "Unnamed Camera", "unregistered", local_ip
 
@@ -133,37 +133,35 @@ def check_registration_status(server_ip, camera_id, local_ip):
     """Check if camera is already registered with server"""
     try:
         url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/registered"
-        
-        print(f"Checking registration status on streaming server...")
-        
-        response = requests.get(
-            url,
-            timeout=3.0
-        )
+        print("Checking registration status on streaming server...")
 
-        if response.status_code == 200:
-            result = response.json()
-            cameras = result.get("cameras", {})
-            
-            # Check if our camera ID is in the registered list
-            if camera_id in cameras:
-                camera_data = cameras[camera_id]
-                if camera_data.get("ip_address") == local_ip:
-                    print(f"✅ Camera {camera_id} is registered on server")
-                    return "registered"
-                else:
-                    print(f"⚠️ Camera ID {camera_id} exists but IP doesn't match")
-                    return "unregistered"
-            else:
-                print(f"ℹ️ Camera {camera_id} not found in server registry")
-                return "unregistered"
-        else:
-            print(f"❌ Failed to check registration: HTTP {response.status_code}")
+        response = requests.get(url, timeout=3.0)
+
+        if response.status_code != 200:
+            print(f"Failed to check registration: HTTP {response.status_code}")
             return "unknown"
-            
+
+        result = response.json()
+        cameras = result.get("cameras", [])
+
+        # Camera IP seen by the server != local IP → only check camera_id
+        camera_map = {
+            cam["camera_id"]: cam
+            for cam in cameras
+            if "camera_id" in cam
+        }
+
+        if camera_id in camera_map:
+            print(f"Camera {camera_id} found in server registry")
+            return "registered"
+
+        print(f"Camera {camera_id} not found in server registry")
+        return "unregistered"
+
     except Exception as e:
-        print(f"❌ Registration check error: {e}")
+        print(f"Registration check error: {e}")
         return "unknown"
+
 
 def initialize_camera():
     global CAMERA_ID, CAMERA_NAME
@@ -184,10 +182,10 @@ def initialize_camera():
         if server_status == "registered":
             # Camera is registered on server
             registration_status = "registered"
-            print(f"✅ Confirmed: Camera is registered on server")
+            print(f"Confirmed: Camera is registered on server")
         elif server_status == "unregistered":
             # Need to re-register
-            print(f"⚠️ Camera not registered on server, attempting registration...")
+            print(f"Camera not registered on server, attempting registration...")
             CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
                 STREAMING_SERVER_IP, 
                 existing_camera_id=CAMERA_ID
@@ -196,10 +194,10 @@ def initialize_camera():
             save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status, local_ip)
         else:
             # Server unavailable, use saved status
-            print(f"⚠️ Cannot reach server, using saved status: {registration_status}")
+            print(f"Cannot reach server, using saved status: {registration_status}")
     else:
         # First time registration
-        print(f"🔄 First time registration...")
+        print(f"First time registration...")
         CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
             STREAMING_SERVER_IP
         )
@@ -252,3 +250,12 @@ GC_INTERVAL_MS = 30000
 
 # Pose Analysis
 POSE_ANALYSIS_INTERVAL_MS = 50
+
+# ============================================
+# ANALYTICS SERVER CONFIGURATION
+# ============================================
+ANALYTICS_API_URL = "http://103.127.136.213:5000"
+ANALYTICS_TIMEOUT = 10
+ANALYTICS_RETRY_COUNT = 3
+ANALYTICS_RETRY_BACKOFF = 1.0  # seconds
+
