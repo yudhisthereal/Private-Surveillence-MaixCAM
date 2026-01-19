@@ -85,33 +85,48 @@ class PoseEstimation:
             return 0.0, 0.0, 0.0, 0.0, 1.0, 1.0
 
     def _classify_pose_plain(self, torso_angle, thigh_uprightness, thigh_calf_ratio, torso_leg_ratio):
-        a = 1 if torso_angle > 30.0 else 0
-        b = 1 if thigh_uprightness > 40.0 else 0
-        c = 1 if torso_angle > 80.0 else 0
-        d = 1 if thigh_calf_ratio < 0.7 else 0
-        e = 1 if torso_leg_ratio < 0.5 else 0
-        f = 1 if thigh_uprightness > 60.0 else 0
+        """Classify pose using simple if-else logic from pose_estimation_old.py.
+        
+        Returns:
+            tuple: (label, pose_code, flags)
+                label: One of 'standing', 'sitting', 'bending_down', 'lying_down'
+                pose_code: 0=standing, 1=sitting, 2=bending_down, 3=lying_down
+                flags: Dictionary of classification flags for debugging
+        """
+        # Classification with limb length ratios (from pose_estimation_old.py)
+        if torso_angle < 30 and thigh_uprightness < 40:
+            # Check if angles suggest standing but limb ratios suggest otherwise
+            if thigh_calf_ratio < self.thigh_calf_ratio_threshold:
+                label = "sitting"  # Thigh is significantly shorter than calf
+            elif torso_leg_ratio < self.torso_leg_ratio_threshold:
+                label = "bending_down"  # Torso is significantly shorter than leg
+            else:
+                label = "standing"
+        elif torso_angle < 30 and thigh_uprightness >= 40:
+            label = "sitting"
+        elif 30 <= torso_angle < 80 and thigh_uprightness < 60:
+            label = "bending_down"
+        else:
+            label = "lying_down"
 
-        not_a = 1 - a
-        not_b = 1 - b
-        not_c = 1 - c
-        not_f = 1 - f
-
-        lsb = (a & b & d) | (a & not_b) | (not_a & c & not_f)
-        msb = (a & b & (1 - d) & e) | not_a | not_c
-
-        pose_code = (msb << 1) | lsb
-
+        # Map label to pose code
         pose_map = {
-            0: "standing",
-            1: "sitting",
-            2: "bending_down",
-            3: "lying_down"
+            "standing": 0,
+            "sitting": 1,
+            "bending_down": 2,
+            "lying_down": 3
+        }
+        pose_code = pose_map.get(label, 0)
+
+        # Create flags for debugging (same as old method's boolean checks)
+        flags = {
+            'torso_angle': torso_angle,
+            'thigh_uprightness': thigh_uprightness,
+            'thigh_calf_ratio': thigh_calf_ratio,
+            'torso_leg_ratio': torso_leg_ratio
         }
 
-        return pose_map.get(pose_code, "unknown"), pose_code, {
-            'a': a, 'b': b, 'c': c, 'd': d, 'e': e, 'f': f
-        }
+        return label, pose_code, flags
 
     def feed_keypoints_map(self, keypoints_map, use_hme=True):
         if not self._is_frame_complete(keypoints_map):

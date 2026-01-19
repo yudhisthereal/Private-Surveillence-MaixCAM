@@ -14,3 +14,4 @@ TODO*.md
 .blackboxrules
 .env
 .env.local
+pose/pose_estimation_old.py

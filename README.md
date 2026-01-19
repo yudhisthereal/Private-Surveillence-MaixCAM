@@ -1,200 +1,523 @@
-# Private Human Pose Monitoring System for MaixCAM
-![maixcam](https://github.com/user-attachments/assets/25653e7d-aa29-4702-9b5c-b6a4c986b9ea)
+# Privacy-Preserving Patient Monitoring System - Camera Side
 
-## 📋 Overview
+![MaixCAM Platform](https://img.shields.io/badge/MaixCAM-Platform-blue)
+![Python](https://img.shields.io/badge/Python-3.x-green)
+![License](https://img.shields.io/badge/License-Research%20Use-orange)
 
-A comprehensive human pose monitoring system built for the MaixCAM platform that provides real-time pose estimation, fall detection, privacy protection, and remote monitoring capabilities. The system uses advanced computer vision and machine learning to track human activities while maintaining privacy through intelligent background management.
+A privacy-preserving patient monitoring system built for the **MaixCAM** platform that provides real-time pose estimation, fall detection, and remote monitoring capabilities while protecting patient privacy through intelligent background management and optional homomorphic encryption.
 
-> **⚠️ Important Requirement**: You must have a **MaixCAM device** to run this application. This software is specifically designed for the MaixCAM hardware platform and will not work on other devices.
+> **⚠️ Important Requirement**: You must have a **MaixCAM device** to run this application. This software is specifically designed for the MaixCAM hardware platform and will not work on conventional computers or other embedded systems.
+
+## 📋 System Architecture
+
+This project is one component of a three-part distributed system:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    PRIVACY-PRESERVING PATIENT                   │
+│                      MONITORING SYSTEM                          │
+├─────────────────┬─────────────────────┬─────────────────────────┤
+│                 │                     │                         │
+│    CAMERA       │   STREAMING SERVER  │      ANALYTICS          │
+│    (MaixCAM)    │   (Caregiver UI)    │      (Disabled)         │
+│                 │                     │                         │
+│  • Pose Est.    │  • MJPEG Streaming  │  • Cloud Processing     │
+│  • Fall Detect  │  • Web Dashboard    │  • HME Inference        │
+│  • Tracking     │  • Camera Mgmt      │  • Advanced Analytics   │
+│  • HME Encrypt  │  • Alert System     │                         │
+│                 │                     │                         │
+└─────────────────┴─────────────────────┴─────────────────────────┘
+```
+
+### Component Overview
+
+| Component | Repository | Description | Status |
+|-----------|------------|-------------|--------|
+| **Camera** | [private-cctv](https://github.com/yudhisthereal/private-cctv) | Edge device with pose estimation, fall detection, and privacy protection | ✅ Active |
+| **Streaming Server** | [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/) | Web interface for caregivers to monitor patients | ✅ Active |
+| **Analytics Server** | [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/) | Privacy-preserving cloud analytics using Homomorphic Encryption | ⚠️ Disabled (using local fallback) |
 
 ## ✨ Features
 
 ### 🎯 Core Functionality
-- **Real-time Pose Estimation**: Accurate human pose detection using YOLO11 pose model
-- **Multi-person Tracking**: Track multiple individuals with unique IDs using ByteTracker
-- **Fall Detection**: Intelligent fall detection algorithm with visual alerts
+
+- **Real-time Pose Estimation**: Accurate human pose detection using YOLO11 pose model (17 keypoints)
+- **Multi-person Tracking**: Track multiple individuals with unique IDs using ByteTracker algorithm
+- **Fall Detection**: Intelligent fall detection with three algorithms:
+  - Algorithm 1: Bounding box motion analysis
+  - Algorithm 2: Motion + strict pose verification
+  - Algorithm 3: Flexible verification (combines all methods)
 - **Privacy Protection**: Automatic background updating that excludes human subjects
 - **Remote Monitoring**: Web interface for remote viewing and control
 
+### 🔐 Privacy-Preserving Features
+
+- **Homomorphic Encryption (HME)**: Optional encryption of pose features for privacy-preserving analytics
+- **Background Management**: Privacy-focused background updates that only process non-human areas
+- **Local Fallback**: All pose classification and fall detection runs locally when analytics server is unavailable
+
 ### 🎥 Recording System
+
 - **Smart Recording**: Automatically starts/stops based on human presence
   - Starts after 3 consecutive frames with human detection
-  - Stops after 30 frames without humans or 90-second timeout
-- **Dual Output**: Saves both video recordings and skeleton CSV data
+  - Stops after 5 seconds without humans or 90-second timeout
+- **Dual Output**: Saves both video recordings (MP4) and skeleton CSV data
 - **Timestamped Files**: Organized storage with proper timestamps
 
 ### 🌐 Web Interface
+
 - **Live Streaming**: View real-time camera feed via MJPEG streaming
 - **Remote Control**: Toggle features without physical access to device
 - **Configuration**: Adjust settings through intuitive web controls
+- **Camera Registration**: Request-based camera approval system
 
-### 🔧 Advanced Features
-- **Background Management**: 
-  - Manual background setting option
-  - Automatic background updates every 10 seconds
-  - Privacy-focused: only updates non-human areas
-- **Pose Analysis**: Posture evaluation and status reporting
-- **Multi-model Integration**: Uses both segmentation and pose detection models
+### 🛡️ Safety Features
 
-## 🛠️ Installation & Setup
+- **Safe Area Monitoring**: Define custom safe zones for patient monitoring
+- **Multiple Check Methods**: Hip, torso, torso+head, torso+head+knees, full body
+- **Safety Status Reporting**: Normal, unsafe, and fall alerts
 
-### Prerequisites
-- **MaixCAM device** (required - will not work on other hardware)
-- MicroSD card with sufficient storage
-- Wi-Fi network access
+## 🏗️ Architecture
 
-### File Structure
+### Main Components
+
 ```
-/root/
-├── models/
-│   ├── yolo11n_pose.mud      # Pose estimation model
-│   └── yolo11n_seg.mud       # Segmentation model
-├── static/
-│   ├── background.jpg        # Background image
-│   ├── index.html           # Web interface
-│   ├── script.js            # JavaScript for controls
-│   └── style.css            # Stylesheet
-├── recordings/              # Auto-created for video storage
-├── pose/                   # Pose estimation modules
-├── tools/                  # Utility functions
-└── main.py                 # Main application
+private-cctv/
+├── main.py                    # Main entry point with processing loop
+├── config.py                  # Configuration and server settings
+├── camera_manager.py          # Camera and model initialization
+├── control_manager.py         # Control flags and state management
+├── streaming.py               # Streaming server communication
+├── tracking.py                # Multi-object tracking and fall detection
+├── workers.py                 # Async worker threads
+├── pose/
+│   ├── pose_estimation.py    # YOLO11 pose estimation with HME support
+│   └── judge_fall.py         # Fall detection algorithms
+├── tools/
+│   ├── skeleton_saver.py     # CSV skeleton data recording
+│   ├── video_record.py       # Video recording with MJPEG codec
+│   ├── safe_area.py          # Safe zone polygon checking
+│   ├── wifi_connect.py       # Wi-Fi connectivity
+│   └── time_utils.py         # Time utilities and profiling
+├── hme_from_sona/            # HME encryption research (legacy)
+├── model/                     # YOLO model files (.mud format)
+└── static/                    # Web interface files
 ```
 
-### Setup Steps
+### Processing Pipeline
 
-1. **Load Models**: Ensure both YOLO models are placed in `/root/models/`
-2. **Configure Wi-Fi**: Edit the SSID and password in `main.py`:
-   ```python
-   SSID = "YOUR_WIFI_NAME"
-   PASSWORD = "YOUR_WIFI_PASSWORD"
-   ```
-3. **Initial Background**: The system will create an initial background automatically
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Camera    │───▶│  Detection  │───▶│   Pose      │───▶│  Tracking   │
+│   Read      │    │  (YOLO11)   │    │  Extraction │    │  (ByteTrack)│
+└─────────────┘    └─────────────┘    └─────────────┘    └──────┬──────┘
+                                                                │
+                        ┌───────────────────────────────────────┼───────────────┐
+                        │                                       │               │
+                        ▼                                       ▼               ▼
+              ┌─────────────────┐                    ┌──────────────┐  ┌──────────────┐
+              │  Fall Detection │                    │  Streaming   │  │  Recording   │
+              │  (3 Algorithms) │                    │  Server      │  │  (Video/CSV) │
+              └────────┬────────┘                    └──────────────┘  └──────────────┘
+                       │                                       ▲
+                       │                                       │
+                       ▼                                       │
+              ┌─────────────────┐                               │
+              │    Safety       │◀──────────────────────────────┘
+              │    Status       │     Pose + Fall + Safety Data
+              └─────────────────┘
+```
 
-## 🚀 Usage
+## 🚀 Installation & Setup
 
-### Starting the Application
-1. Power on your MaixCAM device
-2. The system will automatically:
-   - Connect to Wi-Fi
-   - Start web servers
-   - Initialize camera and models
-   - Begin monitoring
+### ⚠️ Prerequisites - MAIXCAM DEVICE REQUIRED
 
-### Accessing Web Interface
-1. Check the console output for the device IP address
-2. Open a web browser and navigate to: `http://[DEVICE_IP]:80/`
-3. Use the web interface to:
-   - View live feed (MJPEG stream)
-   - Toggle recording
-   - Adjust settings
-   - Set manual background
+This application **requires a MaixCAM device**. It will not run on conventional computers, Raspberry Pi, or other development boards.
 
-### Control Flags
-The web interface provides these control options:
-- `show_raw`: Toggle between raw feed and privacy-protected view
-- `record`: Manual recording control
-- `auto_update_bg`: Enable/disable automatic background updates
-- `set_background`: Capture and set current frame as background
+#### Recommended Development Setup
+
+1. **MaixVision IDE** (Highly Recommended)
+   - Official IDE for MaixCAM development
+   - Download from: [MaixVision Releases](https://github.com/sipeed/MaixVision/releases)
+   - Features:
+     - Direct file deployment to MaixCAM
+     - Serial console output
+     - Model file management
+     - Live debugging capabilities
+
+2. **Alternative: MaixPy IDE**
+   - Legacy IDE option
+   - May have compatibility issues with latest firmware
+
+3. **Manual Deployment via SCP/SSH**
+   - Transfer files using SCP protocol
+   - Requires SSH access to MaixCAM
+
+#### Hardware Requirements
+
+- **MaixCAM device** (required - no substitutes)
+- MicroSD card (8GB+ recommended)
+- Wi-Fi network (2.4GHz recommended for better range)
+- Power supply (USB-C, 5V/2A recommended)
+
+### Model Files Required
+
+Place these files in `/root/models/` on your MaixCAM:
+
+| File | Description |
+|------|-------------|
+| `yolo11n_pose.mud` | YOLO11 pose estimation model (17 keypoints) |
+| `yolo11n.mud` | YOLO11 detection model (person detection) |
+
+### Configuration
+
+1. **Copy .env.example to .env** and configure:
+
+```bash
+STREAMING_SERVER_IP=your.server.ip
+STREAMING_SERVER_PORT=8000
+ANALYTICS_API_URL=http://analytics.server:5000  # Optional
+```
+
+2. **Configure Wi-Fi** in `main.py` or via environment:
+
+```python
+SSID = "YOUR_WIFI_NAME"
+PASSWORD = "YOUR_WIFI_PASSWORD"
+```
+
+### Deployment via MaixVision
+
+1. Connect MaixCAM to your computer via USB
+2. Open MaixVision IDE
+3. Create a new project or open existing project
+4. Copy all project files to the MaixCAM
+5. Upload model files to `/root/models/`
+6. Run the application from MaixVision
+
+### Deployment via Manual Transfer
+
+1. Upload all files to MaixCAM (using SCP or SD card)
+2. Ensure model files are in `/root/models/`
+3. Run the application:
+
+```bash
+python3 main.py
+```
 
 ## ⚙️ Configuration
 
 ### Recording Parameters
+
 ```python
-MIN_HUMAN_FRAMES_TO_START = 3    # Start after 3 human frames
-NO_HUMAN_FRAMES_TO_STOP = 30     # Stop after 30 no-human frames  
+MIN_HUMAN_FRAMES_TO_START = 3      # Start after 3 human frames
+NO_HUMAN_SECONDS_TO_STOP = 5       # 5 seconds at 60fps = 300 frames
 MAX_RECORDING_DURATION_MS = 90000  # 90-second maximum recording
 ```
 
 ### Background Settings
+
 ```python
-UPDATE_INTERVAL_MS = 10000       # Update background every 10 seconds
-NO_HUMAN_CONFIRM_FRAMES = 5      # Confirm human absence with 5 frames
-STEP = 8                         # Pixel step for background updates
+UPDATE_INTERVAL_MS = 10000         # Update background every 10 seconds
+NO_HUMAN_CONFIRM_FRAMES = 10       # Confirm human absence with 10 frames
 ```
 
 ### Fall Detection Parameters
+
 ```python
 fallParam = {
-    "v_bbox_y": 0.43,           # Vertical threshold for fall detection
-    "angle": 70                 # Angle threshold for fall detection
+    "v_bbox_y": 0.43,              # Vertical threshold for fall detection
+    "angle": 70                    # Angle threshold for fall detection
 }
+FALL_COUNT_THRES = 2               # Consecutive falls to confirm
 ```
+
+### Control Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `record` | False | Enable video recording |
+| `show_raw` | False | Show raw feed instead of privacy-protected |
+| `auto_update_bg` | False | Enable automatic background updates |
+| `set_background` | False | Capture current frame as background |
+| `analytics_mode` | True | Enable analytics server integration |
+| `hme` | False | Enable Homomorphic Encryption |
+| `fall_algorithm` | 3 | Fall detection algorithm (1, 2, or 3) |
+| `use_safety_check` | True | Enable safe area checking |
+| `show_safe_area` | False | Overlay safe areas on display |
 
 ## 📊 Output Files
 
 ### Video Recordings
-- Location: `/root/recordings/`
-- Format: MP4 with timestamped filenames
-- Example: `20240315_143022.mp4`
+
+- **Location**: `/root/recordings/`
+- **Format**: MJPEG-encoded MP4
+- **Naming**: `YYYYMMDD_HHMMSS.mp4`
+- **Example**: `20240315_143022.mp4`
 
 ### Skeleton Data
-- CSV files with detailed pose keypoints
-- Includes tracking IDs and fall detection status
-- Synchronized with video recordings
+
+- **Location**: `/root/extracted-skeleton-2d/`
+- **Format**: CSV with keypoint coordinates
+- **Naming**: Based on video timestamp
+- **Columns**: frame_id, person_id, x0, y0, x1, y1, ..., fall_status
+
+### Streaming Server Data
+
+The following data is sent to the Streaming Server in real-time:
+
+| Data Type | Endpoint | Description |
+|-----------|----------|-------------|
+| Pose Label | `/api/stream/pose-label` | Pose classification (standing/sitting/bending_down/lying_down) |
+| Safety Status | `/api/stream/pose-label` | Safety status (normal/unsafe/fall) |
+| Keypoints | `/api/stream/keypoints` | 17 keypoint coordinates (34 values) |
+| Fall Alerts | `/api/stream/pose-label` | Fall detection with track_id and timestamp |
+| Background | `/api/stream/upload-bg` | Privacy-protected background image |
+| Frames | `/api/stream/upload-frame` | Live video frames (when show_raw=True) |
+| Camera State | `/api/stream/report-state` | Heartbeat with recording status |
+
+### Camera Info
+
+- **Location**: `/root/camera_info.json`
+- **Contents**: camera_id, camera_name, registration_status, ip_address
+
+### Control Flags
+
+- **Location**: `/root/control_flags.json`
+- **Contents**: Persisted control flag values
+
+### Safe Areas
+
+- **Location**: `/root/safe_areas.json`
+- **Contents**: List of polygon definitions for safe zones
 
 ## 🔧 Technical Details
 
 ### Models Used
-1. **YOLO11 Pose**: `yolo11n_pose.mud` - Human pose estimation
-2. **YOLO11 Segmentation**: `yolo11n_seg.mud` - Human detection for privacy
+
+1. **YOLO11 Pose** (`yolo11n_pose.mud`)
+   - Input size: 320x320
+   - Output: 17 keypoints (COCO format)
+   - FPS: Up to 60 on MaixCAM
+
+2. **YOLO11 Detection** (`yolo11n.mud`)
+   - Person class detection only
+   - Used for human presence detection
 
 ### Tracking System
-- **ByteTracker** algorithm for robust multi-object tracking
-- Queue-based history for smooth trajectory analysis
-- Fall detection using temporal analysis
 
-### Privacy Protection
-- Dynamic background updating excludes human regions
-- Manual override available via web interface
-- No human data stored in background images
+- **Algorithm**: ByteTracker
+- **Parameters**:
+  - max_lost_buff_time: 30
+  - track_thresh: 0.4
+  - high_thresh: 0.6
+  - match_thresh: 0.8
+  - max_history_num: 5
+
+### Pose Classification
+
+Four pose classes are detected:
+
+| Class | Description | Code |
+|-------|-------------|------|
+| `standing` | Upright posture | 0 |
+| `sitting` | Seated posture | 1 |
+| `bending_down` | Bending/leaning forward | 2 |
+| `lying_down` | Horizontal posture | 3 |
+
+Classification is based on:
+- Torso angle (deviation from vertical)
+- Thigh uprightness
+- Limb length ratios (thigh:calf, torso:leg)
+
+### Fall Detection Output
+
+Fall detection results include:
+
+| Field | Description |
+|-------|-------------|
+| `fall_detected_method1` | Fall detected via bounding box motion |
+| `fall_detected_method2` | Fall detected via motion + strict pose |
+| `fall_detected_method3` | Fall detected via flexible verification |
+| `counter_method1` | Consecutive frames for method 1 |
+| `counter_method2` | Consecutive frames for method 2 |
+| `counter_method3` | Consecutive frames for method 3 |
+| `primary_alert` | True if any method confirms fall |
+
+### Homomorphic Encryption (HME)
+
+When `hme=True`, pose features are encrypted before transmission:
+
+```python
+# Features encrypted
+{
+    'Tra': [c1, c2],  # Torso angle (encrypted)
+    'Tha': [c1, c2],  # Thigh uprightness (encrypted)
+    'Thl': [c1, c2],  # Thigh length (encrypted)
+    'cl':  [c1, c2],  # Calf length (encrypted)
+    'Trl': [c1, c2],  # Torso height (encrypted)
+    'll':  [c1, c2]   # Leg length (encrypted)
+}
+```
+
+Encryption uses a Paillier-like scheme with large primes for privacy-preserving inference.
+
+### Async Workers
+
+The system uses multiple background workers for non-blocking operation:
+
+| Worker | Purpose | Interval |
+|--------|---------|----------|
+| `FlagAndSafeAreaSyncWorker` | Sync flags and safe areas from server | 1s / 5s |
+| `StateReporterWorker` | Report camera state to server | 30s |
+| `FrameUploadWorker` | Upload frames to streaming server | Continuous |
+| `PingWorker` | Heartbeat to streaming server | 250ms |
+| `CommandReceiver` | Receive commands from server | Event-driven |
+| `AnalyticsWorker` | Process with analytics server (optional) | Event-driven |
+| `KeypointsSenderWorker` | Send keypoints to streaming server | Continuous |
+
+## 🔒 Privacy Design
+
+### Data Minimization
+
+1. **Local Processing**: All pose estimation and fall detection runs locally
+2. **Encrypted Transmission**: HME encrypts features before sending
+3. **Background Privacy**: Background updates exclude human regions
+4. **No Raw Video Upload**: Only processed data and selective frames are sent
+
+### Fallback Mechanisms
+
+When the analytics server is unavailable:
+- All processing continues locally
+- Fall detection uses plain-domain algorithms
+- No data is sent to external servers
+- System maintains full functionality
 
 ## 🐛 Troubleshooting
 
 ### Common Issues
 
-1. **Wi-Fi Connection Failure**
-   - Verify SSID and password in code
-   - Check Wi-Fi signal strength
+#### Wi-Fi Connection Failure
+```
+Symptoms: No IP address, cannot reach server
+Solutions:
+- Verify SSID and password in code
+- Check Wi-Fi signal strength
+- Ensure Wi-Fi network allows device connections
+```
 
-2. **Model Loading Errors**
-   - Ensure models are in `/root/models/`
-   - Verify model compatibility with MaixCAM
+#### Model Loading Errors
+```
+Symptoms: "Model not found" or "Invalid model"
+Solutions:
+- Ensure models are in /root/models/
+- Verify model compatibility with MaixCAM firmware
+- Check model file permissions
+```
 
-3. **Web Interface Not Accessible**
-   - Check IP address in console output
-   - Verify device is connected to network
+#### Web Interface Not Accessible
+```
+Symptoms: Cannot connect to web UI
+Solutions:
+- Check IP address in console output
+- Verify device is connected to network
+- Ensure port 80 is not blocked
+- Check streaming server is running
+```
 
-4. **Recording Not Starting**
-   - Check human detection is working
-   - Verify storage space on SD card
+#### Recording Not Starting
+```
+Symptoms: Recording doesn't activate
+Solutions:
+- Check human detection is working
+- Verify storage space on SD card
+- Ensure record flag is enabled
+- Check MIN_HUMAN_FRAMES_TO_START setting
+```
 
-### Performance Tips
-- Ensure adequate lighting for better detection
-- Position camera at appropriate height for optimal coverage
-- Regularly check available storage space
+#### Fall Detection Too Sensitive / Not Sensitive Enough
+```
+Solutions:
+- Adjust fallParam["v_bbox_y"] (vertical speed threshold)
+- Adjust fallParam["angle"] (pose angle threshold)
+- Try different fall_algorithm (1, 2, or 3)
+- Adjust FALL_COUNT_THRES for consecutive frame count
+```
+
+### MaixCAM Specific Issues
+
+#### Device Not Recognized by MaixVision
+```
+Solutions:
+- Try different USB cable (data-capable, not charge-only)
+- Try different USB port (USB 2.0 often works better)
+- Restart MaixVision IDE
+- Reset MaixCAM by holding power button for 10 seconds
+```
+
+#### Out of Memory Errors
+```
+Solutions:
+- Reduce camera resolution/fps
+- Disable UI rendering (already disabled by default)
+- Increase garbage collection frequency
+- Use smaller YOLO model if available
+```
+
+### Performance Optimization
+
+1. **Frame Rate**: Target 30-60 FPS depending on scene complexity
+2. **Memory Management**: Periodic garbage collection every 30s
+3. **Queue Management**: Non-blocking queues prevent backpressure
+4. **UDP-like Frame Upload**: Latest frame always uploaded, old frames dropped
+
+### Debug Logging
+
+Enable detailed logging by checking console output for these prefixes:
+
+| Prefix | Description |
+|--------|-------------|
+| `[DEBUG]` | Detailed debugging information |
+| `[DEBUG POSE]` | Pose estimation details |
+| `[DEBUG HME]` | HME encryption details |
+| `[FLEXIBLE VERIFICATION]` | Fall detection verification |
+| `[ALGORITHM X]` | Fall detection algorithm output |
+| `[SYNC]` | Flag/state synchronization |
+| `[BACKGROUND]` | Background management |
 
 ## 📝 License & Acknowledgments
 
-You are free to modify and distribute this source code, even if it's commercialized, but it's encouraged that you give us some form of credit.
+This research software is developed for privacy-preserving patient monitoring. You are free to modify and distribute this source code, even for commercial purposes, but it's encouraged that you give appropriate credit.
 
-This project is built specifically for the MaixCAM platform using:
-- MaixPy framework
-- YOLO11 models optimized for MaixCAM
-- Open-source computer vision techniques
+### Built With
 
-> **Note**: This software is designed exclusively for MaixCAM devices and leverages hardware-specific optimizations that are not available on other platforms.
+- **MaixPy** - MaixCAM development framework
+- **MaixVision IDE** - Official development environment
+- **YOLO11** - State-of-the-art pose estimation
+- **ByteTracker** - Multi-object tracking algorithm
+- **Homomorphic Encryption** - Privacy-preserving computation
 
-## 🔮 Potential Enhancements
+### References
 
-Potential improvements include
-- Cloud integration for remote storage
-- Advanced analytics and reporting
-- Multi-camera support
-- Custom alert configurations
-- Export functionality for analysis
+- **This Project (Camera)**: [private-cctv](https://github.com/yudhisthereal/private-cctv)
+- **Analytics Server**: [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/)
+- **Streaming Server (Caregiver UI)**: [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/)
+- MaixCAM: [Sipeed MaixCAM](https://wiki.sipeed.com/maixcam)
+- MaixVision: [MaixVision GitHub](https://github.com/sipeed/MaixVision)
+- YOLO11: [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
+- ByteTracker: [ByteTrack](https://github.com/Zhongdao/Towards-Realtime-MOT)
+- COCO Keypoints: [COCO Dataset](https://cocodataset.org/)
+
+## 📞 Support
+
+- **MaixCAM Issues**: Refer to official MaixCAM documentation
+- **MaixVision IDE**: Check MaixVision GitHub for IDE-specific issues
+- **Project Issues**: Contact the research team
+- **Streaming Server**: See Streaming Server repository
 
 ---
 
-**📞 Support**: For issues specific to MaixCAM hardware, refer to the official MaixCAM documentation and support channels.
+**⚠️ Disclaimer**: This software is designed exclusively for MaixCAM devices and leverages hardware-specific optimizations not available on other platforms. A MaixCAM device is **REQUIRED** to run this application.
 
-**⚠️ Disclaimer**: Requires MaixCAM device - this software will not function on conventional computers or other embedded systems.
+**🎓 Research Use**: This software is developed for academic research purposes in privacy-preserving healthcare monitoring.
+
