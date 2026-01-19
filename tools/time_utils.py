@@ -51,9 +51,8 @@ class FrameProfiler:
             "display_prep",
             "pose_extraction",
             "tracking",
-            "ui_drawing",
+            "pose_label_handling",
             "recording",
-            "display",
             "frame_upload"
         ]
         
@@ -67,9 +66,8 @@ class FrameProfiler:
             "display_prep": "Display Prep",
             "pose_extraction": "Pose Extraction",
             "tracking": "Tracking",
-            "ui_drawing": "UI Drawing",
+            "pose_label_handling": "Pose Label Handling",
             "recording": "Recording",
-            "display": "Display Show",
             "frame_upload": "Frame Upload"
         }
     

@@ -907,11 +907,17 @@ class AnalyticsWorker(threading.Thread):
 
 # Global analytics queue reference (set by main.py)
 _analytics_queue = None
+_pose_label_queue = None  # Queue for pose label sender worker
 
 def set_analytics_queue(q):
     """Set the analytics queue reference (called from main.py)"""
     global _analytics_queue
     _analytics_queue = q
+
+def set_pose_label_queue(q):
+    """Set the pose label queue reference (called from main.py)"""
+    global _pose_label_queue
+    _pose_label_queue = q
 
 def send_track_to_analytics(track_id, keypoints, bbox, previous_bbox=None, elapsed_ms=33.33, use_hme=False):
     """Send track data to analytics queue for processing.
@@ -958,5 +964,131 @@ def send_track_to_analytics(track_id, keypoints, bbox, previous_bbox=None, elaps
             return False
     except Exception as e:
         print(f"[Analytics] Failed to prepare track data: {e}")
+        return False
+
+
+class PoseLabelSenderWorker(threading.Thread):
+    """Background worker for sending pose labels to streaming server asynchronously.
+    
+    This worker is used when the analytics server is NOT available.
+    It receives pose label data from the main thread via a queue and sends it
+    to the streaming server in the background, preventing blocking of the main loop.
+    """
+    
+    def __init__(self, pose_label_queue, camera_id):
+        super().__init__(daemon=True)
+        self.camera_id = camera_id
+        self.running = True
+        self.pose_label_queue = pose_label_queue
+        
+        # Statistics for monitoring
+        self.sent_count = 0
+        self.error_count = 0
+        
+    def run(self):
+        """Main worker loop - process pose label data from queue."""
+        from streaming import send_pose_label_to_streaming_server
+        
+        print(f"[PoseLabelSender] Starting worker for camera: {self.camera_id}")
+        
+        while self.running:
+            try:
+                # Get next pose label data from queue (non-blocking)
+                try:
+                    pose_data = self.pose_label_queue.get_nowait()
+                    self._send_pose_label(pose_data, send_pose_label_to_streaming_server)
+                except queue.Empty:
+                    # No data available, sleep briefly
+                    time.sleep(0.01)  # 10ms
+                    
+            except Exception as e:
+                print(f"[PoseLabelSender] Error in main loop: {e}")
+                self.error_count += 1
+                time.sleep(0.1)  # Sleep on error
+        
+        print(f"[PoseLabelSender] Stopped (sent={self.sent_count}, errors={self.error_count})")
+    
+    def _send_pose_label(self, pose_data, send_func):
+        """Send a single pose label to streaming server.
+        
+        Args:
+            pose_data: Dictionary containing:
+                - track_id: int
+                - pose_label: str (standing, sitting, bending_down, lying_down, unknown)
+                - safety_status: str (normal, unsafe, fall)
+            send_func: The send function to use
+        """
+        try:
+            track_id = pose_data.get("track_id")
+            pose_label = pose_data.get("pose_label", "unknown")
+            safety_status = pose_data.get("safety_status", "normal")
+            
+            success = send_func(
+                camera_id=self.camera_id,
+                track_id=track_id,
+                pose_label=pose_label,
+                safety_status=safety_status
+            )
+            
+            if success:
+                self.sent_count += 1
+                if self.sent_count % 30 == 0:
+                    print(f"[PoseLabelSender] Sent {self.sent_count} pose labels")
+            else:
+                self.error_count += 1
+                
+        except Exception as e:
+            print(f"[PoseLabelSender] Error sending pose label: {e}")
+            self.error_count += 1
+    
+    def stop(self):
+        """Stop the worker."""
+        self.running = False
+    
+    def get_stats(self):
+        """Get worker statistics.
+        
+        Returns:
+            dict: Statistics about the worker's activity
+        """
+        return {
+            "sent": self.sent_count,
+            "errors": self.error_count
+        }
+
+
+def send_pose_label_to_queue(track_id, pose_label, safety_status="normal"):
+    """Queue pose label data for async sending to streaming server.
+    
+    This function is called from the main thread to queue pose label data
+    for the PoseLabelSenderWorker to send asynchronously.
+    
+    Args:
+        track_id: The track ID
+        pose_label: Pose classification label (standing, sitting, bending_down, lying_down, unknown)
+        safety_status: Safety status (normal, unsafe, fall)
+    
+    Returns:
+        bool: True if data was queued successfully, False otherwise
+    """
+    # Check if queue is available
+    if _pose_label_queue is None:
+        return False
+    
+    try:
+        pose_data = {
+            "track_id": track_id,
+            "pose_label": pose_label,
+            "safety_status": safety_status
+        }
+        # Put data in the queue for the worker to send
+        try:
+            _pose_label_queue.put_nowait(pose_data)
+            return True
+        except queue.Full:
+            # Queue is full, skip this frame
+            return False
+    except Exception as e:
+        print(f"[PoseLabelSender] Failed to prepare pose data: {e}")
         return False
 

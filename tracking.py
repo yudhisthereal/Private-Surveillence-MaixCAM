@@ -237,10 +237,7 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                 else:
                     color = image.COLOR_GREEN
                 
-                # Draw pose label with same color as status
-                # Shows pose classification: standing, sitting, bending_down, lying_down, etc.
-                img.draw_string(int(tracker_obj.x), int(tracker_obj.y), f"POSE: {pose_label}", color=color, scale=0.5)
-                pose_extractor.draw_pose(img, obj.points, 8 if pose_extractor.input_width() > 480 else 4, color=color)
+                # NO UI RENDERING - Removed: img.draw_string and pose_extractor.draw_pose
                 
                 # Save to skeleton if recording
                 if is_recording and skeleton_saver:
@@ -252,6 +249,7 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                     "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
                     "keypoints": obj.points,
                     "keypoints_np": keypoints_np,
+                    "pose_label": pose_label,  # Return pose label for analytics/local processing
                     "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking")
                 }
     
@@ -286,7 +284,7 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
                     pass
                 
                 # Evaluate pose with keypoints
-                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints))
+                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints), use_hme)
                 
                 # Extract label from pose_data
                 if pose_data is not None:
