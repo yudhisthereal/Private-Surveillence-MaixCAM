@@ -119,6 +119,10 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
     """
     global online_targets, fall_ids, unsafe_ids, current_fps
     
+    # Initialize encrypted_features for all code paths
+    encrypted_features = None
+    pose_label = "unknown"
+    
     # Update global FPS
     current_fps = fps
     
@@ -127,6 +131,19 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
     
     # Import analytics functions here to avoid circular imports
     from workers import get_analytics_pose_data, get_analytics_fall_data, is_analytics_server_available
+    
+    # Determine if we should use HME (only when analytics server is available)
+    # use_hme is True only when:
+    # 1. Analytics server is reachable (is_analytics_server_available())
+    # 2. hme flag is set in control_manager
+    # Otherwise, use_hme is False and we do local processing only
+    use_hme = False
+    try:
+        from control_manager import get_flag
+        if is_analytics_server_available():
+            use_hme = get_flag("hme", False)
+    except ImportError:
+        pass
     
     # Find corresponding YOLO object
     for tracker_obj in track.history[-1:]:
@@ -149,10 +166,9 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                 online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
                 online_targets["points"][idx].put(obj.points)
                 
-                # Determine status based on analytics_mode
+                # Determine status based on analytics_mode and use_analytics result
                 if analytics_mode:
                     # In analytics mode, use AnalyticsWorker results
-                    pose_label = "unknown"
                     use_analytics = False
                     
                     # Get analytics data from shared state
@@ -191,7 +207,7 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                         if online_targets["bbox"][idx].qsize() >= 2:
                             fall_result = check_fall(tracker_obj, online_targets, idx, fps)
                             if fall_result:
-                                fall_info, pose_label = fall_result
+                                fall_info, pose_label, encrypted_features = fall_result
                                 (fall_detected_method1, counter_method1,
                                  fall_detected_method2, counter_method2,
                                  fall_detected_method3, counter_method3) = fall_info
@@ -208,11 +224,10 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                                         unsafe_ids.discard(track.id)
                 else:
                     # Not in analytics mode, use local fall detection
-                    pose_label = "unknown"
                     if online_targets["bbox"][idx].qsize() >= 2:
                         fall_result = check_fall(tracker_obj, online_targets, idx, fps)
                         if fall_result:
-                            fall_info, pose_label = fall_result
+                            fall_info, pose_label, encrypted_features = fall_result
                             (fall_detected_method1, counter_method1,
                              fall_detected_method2, counter_method2,
                              fall_detected_method3, counter_method3) = fall_info
@@ -229,16 +244,6 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                                 if track.id in unsafe_ids:
                                     unsafe_ids.discard(track.id)
                 
-                # Determine status color based on state (no text labels)
-                if track.id in fall_ids:
-                    color = image.COLOR_RED
-                elif track.id in unsafe_ids:
-                    color = image.COLOR_ORANGE
-                else:
-                    color = image.COLOR_GREEN
-                
-                # NO UI RENDERING - Removed: img.draw_string and pose_extractor.draw_pose
-                
                 # Save to skeleton if recording
                 if is_recording and skeleton_saver:
                     safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
@@ -250,13 +255,22 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                     "keypoints": obj.points,
                     "keypoints_np": keypoints_np,
                     "pose_label": pose_label,  # Return pose label for analytics/local processing
-                    "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking")
+                    "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking"),
+                    "encrypted_features": encrypted_features,  # Encrypted features for analytics server (when use_hme=True)
+                    "use_hme": use_hme  # Whether HME is enabled (True only when analytics server is available)
                 }
     
     return None
 
 def check_fall(tracker_obj, track_history, idx, fps=30):
-    """Check for fall using track history"""
+    """Check for fall using track history
+    
+    Returns:
+        tuple: (fall_info, pose_label, encrypted_features)
+               - fall_info: Fall detection result tuple
+               - pose_label: Pose classification label
+               - encrypted_features: Dict of encrypted features when use_hme=True, else None
+    """
     global current_fps, pose_estimator
     
     # Use provided fps or global fps
@@ -264,6 +278,7 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
     
     pose_data = None
     pose_label = "unknown"
+    encrypted_features = None
     
     # Get keypoints from history
     if not track_history["points"][idx].empty():
@@ -288,7 +303,10 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
                 
                 # Extract label from pose_data
                 if pose_data is not None:
-                    pose_label = pose_data['label']
+                    pose_label = pose_data.get('label', 'unknown')
+                    # Get encrypted features when HME is enabled
+                    if use_hme:
+                        encrypted_features = pose_estimator.get_encrypted_features()
             except ImportError:
                 # Fallback if pose_estimation not available
                 pass
@@ -314,7 +332,7 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
     )
     print(f"POSE DATA: {pose_data}")
     
-    return fall_info, pose_label
+    return fall_info, pose_label, encrypted_features
 
 def update_fall_counters(fall_info):
     """Update fall counters and IDs based on fall detection result"""

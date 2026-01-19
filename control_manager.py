@@ -383,6 +383,7 @@ def body_in_safe_zone(body_keypoints, check_method=CheckMethod.TORSO_HEAD):
 # ============================================
 
 import requests
+from debug_config import debug_print
 
 # Import STREAMING_HTTP_URL here to avoid circular import
 # This is done at the end so that config.py can safely import from control_manager
@@ -402,13 +403,15 @@ def send_background_updated(timestamp):
         camera_id = get_current_camera_id()
         STREAMING_HTTP_URL = _get_streaming_http_url()
         url = f"{STREAMING_HTTP_URL}/api/stream/command"
+        payload = {
+            "CameraId": camera_id,
+            "Command": "background_updated",
+            "Value": {"timestamp": timestamp}
+        }
+        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/command | payload: %s", "POST", str(payload)[:100])
         response = requests.post(
             url,
-            json={
-                "CameraId": camera_id,
-                "Command": "background_updated",
-                "Value": {"timestamp": timestamp}
-            },
+            json=payload,
             headers={'Content-Type': 'application/json'},
             timeout=2.0
         )
@@ -423,6 +426,7 @@ def get_camera_state_from_server():
         camera_id = get_current_camera_id()
         STREAMING_HTTP_URL = _get_streaming_http_url()
         url = f"{STREAMING_HTTP_URL}/api/stream/camera-state?camera_id={camera_id}"
+        debug_print("API_REQUEST", "GET %s | endpoint: /api/stream/camera-state | params: camera_id=%s", "GET", camera_id)
         response = requests.get(url, timeout=2.0)
         if response.status_code == 200:
             return response.json()
@@ -437,6 +441,7 @@ def get_safe_areas_from_server():
         camera_id = get_current_camera_id()
         STREAMING_HTTP_URL = _get_streaming_http_url()
         url = f"{STREAMING_HTTP_URL}/api/stream/safe-areas?camera_id={camera_id}"
+        debug_print("API_REQUEST", "GET %s | endpoint: /api/stream/safe-areas | params: camera_id=%s", "GET", camera_id)
         response = requests.get(url, timeout=2.0)
         if response.status_code == 200:
             return response.json()
@@ -457,6 +462,7 @@ def report_state(rtmp_connected=False, is_recording=False):
             "RtmpConnected": rtmp_connected
         }
         url = f"{STREAMING_HTTP_URL}/api/stream/report-state"
+        debug_print("API_REQUEST", "POST %s | endpoint: /api/stream/report-state | payload: %s", "POST", str(state_report)[:100])
         response = requests.post(
             url,
             json=state_report,

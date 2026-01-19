@@ -225,8 +225,14 @@ def main():
             background_img.save(BACKGROUND_PATH)
             background_update_in_progress = True
             update_control_flag("set_background", False)
+            # Upload background image to server via FrameUploadWorker
             if streaming_server_available:
-                send_background_updated(time_ms())
+                try:
+                    jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
+                    frame_upload_worker.update_background(jpeg_bytes)
+                    print("[BACKGROUND] Background queued for upload to server")
+                except Exception as e:
+                    print(f"[BACKGROUND] Failed to queue background for upload: {e}")
             background_update_in_progress = False
             print("[BACKGROUND] Background updated")
         frame_profiler.end_task("background_check")
@@ -243,6 +249,14 @@ def main():
                 if no_human_counter >= NO_HUMAN_CONFIRM_FRAMES:
                     background_img = raw_img.copy()
                     background_img.save(BACKGROUND_PATH)
+                    # Upload background image to server via FrameUploadWorker
+                    if streaming_server_available:
+                        try:
+                            jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
+                            frame_upload_worker.update_background(jpeg_bytes)
+                            print("[BACKGROUND] Auto-update background queued for upload")
+                        except Exception as e:
+                            print(f"[BACKGROUND] Auto-update failed to queue background: {e}")
                     last_update_ms = time_ms()
                     no_human_counter = 0
             else:
@@ -250,6 +264,14 @@ def main():
                 if time_ms() - last_update_ms > UPDATE_INTERVAL_MS:
                     background_img = raw_img.copy()
                     background_img.save(BACKGROUND_PATH)
+                    # Upload background image to server via FrameUploadWorker
+                    if streaming_server_available:
+                        try:
+                            jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
+                            frame_upload_worker.update_background(jpeg_bytes)
+                            print("[BACKGROUND] Auto-update background queued for upload")
+                        except Exception as e:
+                            print(f"[BACKGROUND] Auto-update failed to queue background: {e}")
                     last_update_ms = time_ms()
             prev_human_present = current_human_present
         frame_profiler.end_task("human detect")
@@ -348,29 +370,45 @@ def main():
             keypoints = track_result.get("keypoints")
             bbox = track_result.get("bbox")
             pose_label = track_result.get("pose_label", "unknown")
+            safety_status = track_result.get("status", "normal")
+            encrypted_features = track_result.get("encrypted_features")
+            use_hme = track_result.get("use_hme", False)
             
-            if analytics_available:
-                # ANALYTICS SERVER REACHABLE: Send encrypted keypoints to analytics
-                send_track_to_analytics(
-                    track_id=track_id,
-                    keypoints=keypoints,
-                    bbox=bbox,
-                    previous_bbox=previous_bboxes.get(track_id),
-                    elapsed_ms=elapsed_ms,
-                    use_hme=get_flag("hme", False)
-                )
-                previous_bboxes[track_id] = bbox
+            # Decide where to send data based on use_hme and analytics availability
+            # use_hme is automatically False when analytics server is unavailable
+            # (this is set in process_track based on is_analytics_server_available())
+            
+            if use_hme and analytics_available:
+                # HME mode with available analytics server: send encrypted features to Analytics Server
+                # Plain keypoints are NEVER sent to Analytics Server
+                if encrypted_features:
+                    send_track_to_analytics(
+                        track_id=track_id,
+                        bbox=bbox,
+                        previous_bbox=previous_bboxes.get(track_id),
+                        elapsed_ms=elapsed_ms,
+                        use_hme=True,
+                        encrypted_features=encrypted_features
+                    )
+                    previous_bboxes[track_id] = bbox
+                else:
+                    # No encrypted features available, fall back to local processing
+                    print(f"[Main] Warning: use_hme=True but no encrypted_features for track_id={track_id}")
+                    send_pose_label_to_queue(
+                        track_id=track_id,
+                        pose_label=pose_label,
+                        safety_status=safety_status
+                    )
             else:
-                # ANALYTICS SERVER NOT REACHABLE: Plain pose evaluation locally
-                # Queue pose label for async sending to streaming server
-                safety_status = "fall" if track_result.get("status") == "fall" else (
-                    "unsafe" if track_result.get("status") == "unsafe" else "normal"
-                )
+                # Either HME disabled OR analytics server unavailable
+                # NEVER send plain keypoints to Analytics Server
+                # Always do local fall detection and send results to Streaming Server
                 send_pose_label_to_queue(
                     track_id=track_id,
                     pose_label=pose_label,
                     safety_status=safety_status
                 )
+                previous_bboxes[track_id] = bbox
         
         frame_profiler.end_task("tracking")
         
@@ -390,13 +428,14 @@ def main():
         disp.show(img)
         frame_profiler.end_task("display")
         
-        # 12. Update FrameUploadWorker with latest rendered frame
+        # 12. Update FrameUploadWorker with latest rendered frame (only if show_raw is True)
         frame_profiler.start_task("frame_upload")
-        try:
-            jpeg_bytes = img.to_jpeg(quality=60).to_bytes(copy=False)
-            frame_upload_worker.update_frame(jpeg_bytes)
-        except Exception:
-            pass
+        if get_flag("show_raw", False):
+            try:
+                jpeg_bytes = img.to_jpeg(quality=60).to_bytes(copy=False)
+                frame_upload_worker.update_frame(jpeg_bytes)
+            except Exception:
+                pass
         frame_profiler.end_task("frame_upload")
         
         # End frame profiling

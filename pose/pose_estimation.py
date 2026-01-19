@@ -231,7 +231,34 @@ class PoseEstimation:
         return self.feed_keypoints_17(keypoints, use_hme)
 
     def get_encrypted_features(self):
-        return self.pose_data.get('encrypted_features') if self.pose_data else None
+        """Get encrypted features as a JSON-serializable dictionary.
+        
+        Returns:
+            dict: Encrypted features suitable for JSON transmission, or None if not available.
+                  Format: {'Tra': [c1, c2], 'Tha': [c1, c2], 'Thl': [c1, c2], ...}
+        """
+        if not self.pose_data:
+            return None
+        encrypted = self.pose_data.get('encrypted_features')
+        if not encrypted:
+            return None
+        # Ensure all values are plain Python lists (not numpy arrays) for JSON serialization
+        return {k: [int(v[0]), int(v[1])] if isinstance(v, (list, tuple, np.ndarray)) and len(v) == 2 else v 
+                for k, v in encrypted.items()}
+    
+    def get_int_features(self):
+        """Get integer features (before encryption) as a JSON-serializable dictionary.
+        
+        Returns:
+            dict: Integer features scaled by 100, or None if not available.
+                  Format: {'Tra': int_val, 'Tha': int_val, 'Thl': int_val, ...}
+        """
+        if not self.pose_data:
+            return None
+        int_features = self.pose_data.get('int_features')
+        if not int_features:
+            return None
+        return {k: int(v) for k, v in int_features.items()}
 
     def get_plain_label(self):
         return self.pose_data.get('plain_label') if self.pose_data else None

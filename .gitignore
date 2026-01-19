@@ -11,3 +11,4 @@ pose/__pycache__
 static/
 TODO*.md
 *PROMPT*.md
+.blackboxrules

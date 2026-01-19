@@ -7,6 +7,7 @@ import socket
 import select
 import json
 import threading
+from debug_config import debug_print
 from config import (
     STREAMING_HTTP_URL, FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
@@ -17,7 +18,7 @@ from control_manager import (
     get_camera_state_from_server, get_safe_areas_from_server, report_state,
     camera_state_manager
 )
-from streaming import send_frame_to_server
+from streaming import send_frame_to_server, send_background_to_server
 from tools.time_utils import time_ms, FrameProfiler
 
 class FlagAndSafeAreaSyncWorker(threading.Thread):
@@ -159,6 +160,8 @@ class FrameUploadWorker(threading.Thread):
     
     This achieves UDP-like behavior where slow uploads don't pile up - old frames
     are dropped and only the latest frame is uploaded.
+    
+    Background uploads have higher priority than regular frame uploads.
     """
     
     def __init__(self, streaming_url, camera_id):
@@ -174,9 +177,16 @@ class FrameUploadWorker(threading.Thread):
         self._current_frame = None
         self._frame_timestamp = 0
         
+        # Shared background reference - main thread writes, worker reads
+        # Using a separate lock for background-specific operations
+        self._background_lock = threading.Lock()
+        self._current_background = None
+        self._background_timestamp = 0
+        
         # Upload statistics for debugging
         self.upload_count = 0
         self.skip_count = 0
+        self.background_upload_count = 0
         
         # Profiler for upload FPS calculation
         self.upload_profiler = FrameProfiler(print_interval=30, enabled=True)
@@ -207,10 +217,71 @@ class FrameUploadWorker(threading.Thread):
         with self._frame_lock:
             self._current_frame = None
             
+    def update_background(self, background_data):
+        """Update the shared background reference (called when background is updated)
+        
+        Args:
+            background_data: JPEG bytes of the background image
+        """
+        with self._background_lock:
+            self._current_background = background_data
+            self._background_timestamp = time.time()
+        print(f"[FrameUploadWorker] Background update queued for upload")
+    
+    def get_background(self):
+        """Get the current background for upload (thread-safe)
+        
+        Returns:
+            The latest background data, or None if no background available
+        """
+        with self._background_lock:
+            return self._current_background
+            
+    def clear_background(self):
+        """Clear the current background after successful upload"""
+        with self._background_lock:
+            self._current_background = None
+            
     def run(self):
-        """Main worker loop - continuously try to upload latest frame"""
+        """Main worker loop - continuously try to upload latest frame
+        
+        Background uploads have higher priority than regular frame uploads.
+        """
         while self.running:
             try:
+                # PRIORITY 1: Check for background upload (higher priority)
+                current_background = self.get_background()
+                
+                if current_background is not None:
+                    # Check if we're already uploading
+                    if self.uploading:
+                        # Skip regular frame upload if background is pending
+                        time.sleep(0.005)
+                        continue
+                    
+                    # Start background upload
+                    self.uploading = True
+                    print(f"[FrameUploadWorker] Uploading background image...")
+                    
+                    # Upload the background
+                    bg_upload_start = time_ms()
+                    success = send_background_to_server(current_background, self.camera_id)
+                    bg_upload_duration = time_ms() - bg_upload_start
+                    
+                    if success:
+                        self.background_upload_count += 1
+                        self.clear_background()
+                        print(f"[FrameUploadWorker] Background uploaded successfully ({self.background_upload_count} total)")
+                    else:
+                        print(f"[FrameUploadWorker] Failed to upload background (will retry)")
+                        # Keep the background for retry on next iteration
+                    
+                    # Background upload complete
+                    self.uploading = False
+                    time.sleep(0.01)  # Brief pause after background upload
+                    continue
+                
+                # PRIORITY 2: Regular frame upload (only if show_raw is true in main)
                 # Get the current frame
                 current_frame = self.get_frame()
                 
@@ -552,8 +623,10 @@ class AnalyticsClient:
             bool: True if server is healthy, False otherwise
         """
         try:
+            endpoint = f"{self.base_url}/api/analytics/health"
+            debug_print("API_REQUEST", "GET %s | endpoint: /api/analytics/health", "GET")
             response = self.session.get(
-                f"{self.base_url}/api/analytics/health",
+                endpoint,
                 timeout=self.timeout
             )
             if response.status_code == 200:
@@ -564,31 +637,49 @@ class AnalyticsClient:
             print(f"[AnalyticsClient] Health check failed: {e}")
             return False
     
-    def analyze_pose(self, keypoints, bbox=None, track_id=0, camera_id="", use_hme=False):
-        """Analyze pose from 17 keypoints (COCO format).
+    def analyze_pose(self, use_hme=False, encrypted_features=None, bbox=None, track_id=0, camera_id=""):
+        """Analyze pose from encrypted features (HME mode) or skip (plain mode).
+        
+        IMPORTANT: This method NEVER accepts or processes plain keypoints.
+        - When use_hme=True: Analyze encrypted features for privacy-preserving pose estimation
+        - When use_hme=False: Returns None (local processing should be used instead)
         
         Args:
-            keypoints: List of 34 floats (17 keypoints × 2 coordinates)
+            use_hme: Whether to use Homomorphic Encryption (must be True to process)
+            encrypted_features: Dictionary of encrypted features - required when use_hme=True
             bbox: Optional bounding box [x, y, width, height]
             track_id: Optional track ID for multi-object tracking
             camera_id: Optional camera identifier
-            use_hme: Whether to use Homomorphic Encryption (default: False)
         
         Returns:
-            dict: Pose analysis result or None on failure
+            dict: Pose analysis result or None on failure/not applicable
         """
+        # Security check: Never process plain keypoints
+        if not use_hme:
+            # HME disabled means Analytics Server is not being used
+            # Return None to indicate local processing should be used
+            return None
+        
+        # encrypted_features is required when use_hme=True
+        if not encrypted_features:
+            print(f"[AnalyticsClient] Warning: use_hme=True but no encrypted_features provided")
+            return None
+        
         payload = {
-            "keypoints": keypoints,
             "track_id": track_id,
             "camera_id": camera_id,
-            "use_hme": use_hme
+            "use_hme": True,
+            "encrypted_features": encrypted_features
         }
+        
         if bbox is not None:
             payload["bbox"] = bbox
         
         try:
+            endpoint = f"{self.base_url}/api/analytics/analyze-pose"
+            debug_print("API_REQUEST", "POST %s | endpoint: /api/analytics/analyze-pose | payload: track_id=%d, camera_id=%s, encrypted_features=YES", "POST", track_id, camera_id)
             response = self.session.post(
-                f"{self.base_url}/api/analytics/analyze-pose",
+                endpoint,
                 json=payload,
                 timeout=self.timeout
             )
@@ -598,36 +689,54 @@ class AnalyticsClient:
             print(f"[AnalyticsClient] Pose analysis failed: {e}")
             return None
     
-    def detect_fall(self, camera_id, track_id, pose_data, current_bbox, 
-                    previous_bbox=None, elapsed_ms=33.33, use_hme=False):
-        """Detect falls using pose data and bounding box motion analysis.
+    def detect_fall(self, camera_id, track_id, current_bbox=None, 
+                    previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
+        """Detect falls using encrypted features (HME mode) or skip (plain mode).
+        
+        IMPORTANT: This method NEVER accepts or processes plain pose_data.
+        - When use_hme=True: Detect falls using encrypted features for privacy-preserving inference
+        - When use_hme=False: Returns None (local fall detection should be used instead)
         
         Args:
             camera_id: Camera identifier (required)
             track_id: Track ID (required)
-            pose_data: Pose data from analyze-pose (optional)
             current_bbox: Current bounding box [x, y, width, height] (required)
             previous_bbox: Previous frame's bounding box (optional)
             elapsed_ms: Time since last frame in milliseconds (default: 33.33)
-            use_hme: Whether to use HME mode (default: False)
+            use_hme: Whether to use HME mode (must be True to process)
+            encrypted_features: Dictionary of encrypted features - required when use_hme=True
         
         Returns:
-            dict: Fall detection result or None on failure
+            dict: Fall detection result or None on failure/not applicable
         """
+        # Security check: Never process plain pose_data
+        if not use_hme:
+            # HME disabled means Analytics Server is not being used
+            # Return None to indicate local fall detection should be used
+            return None
+        
+        # encrypted_features is required when use_hme=True
+        if not encrypted_features:
+            print(f"[AnalyticsClient] Warning: use_hme=True but no encrypted_features provided for track_id={track_id}")
+            return None
+        
         payload = {
             "camera_id": camera_id,
             "track_id": track_id,
-            "pose_data": pose_data,
             "current_bbox": current_bbox,
             "elapsed_ms": elapsed_ms,
-            "use_hme": use_hme
+            "use_hme": True,
+            "encrypted_features": encrypted_features
         }
+        
         if previous_bbox is not None:
             payload["previous_bbox"] = previous_bbox
         
         try:
+            endpoint = f"{self.base_url}/api/analytics/detect-fall"
+            debug_print("API_REQUEST", "POST %s | endpoint: /api/analytics/detect-fall | payload: track_id=%d, camera_id=%s, encrypted_features=YES", "POST", track_id, camera_id)
             response = self.session.post(
-                f"{self.base_url}/api/analytics/detect-fall",
+                endpoint,
                 json=payload,
                 timeout=self.timeout
             )
@@ -797,32 +906,47 @@ class AnalyticsWorker(threading.Thread):
     def _process_track(self, track_data):
         """Process a single track data item.
         
+        IMPORTANT: This method ONLY processes encrypted features. Plain keypoints are never sent.
+        
         Args:
             track_data: Dictionary containing:
                 - track_id: int
-                - keypoints: list of 34 floats (17 keypoints × 2)
+                - encrypted_features: dict - required for HME mode
                 - bbox: list of [x, y, width, height]
                 - previous_bbox: optional previous bounding box
                 - elapsed_ms: time since last frame in ms
+                - use_hme: bool - must be True
         """
         try:
             track_id = track_data.get("track_id")
-            keypoints = track_data.get("keypoints")
+            encrypted_features = track_data.get("encrypted_features")
             bbox = track_data.get("bbox")
             previous_bbox = track_data.get("previous_bbox")
             elapsed_ms = track_data.get("elapsed_ms", 33.33)
             use_hme = track_data.get("use_hme", False)
             
-            if not keypoints or not bbox:
+            # Security check: Never process plain keypoints
+            if not use_hme:
+                # HME disabled means we should not be sending data to Analytics Server
+                print(f"[AnalyticsWorker] Warning: use_hme=False but track_data received for track_id={track_id}")
                 return
             
-            # Step 1: Analyze pose
+            # encrypted_features is required when use_hme=True
+            if not encrypted_features:
+                print(f"[AnalyticsWorker] Warning: No encrypted_features provided for track_id={track_id}")
+                return
+            
+            if not bbox:
+                print(f"[AnalyticsWorker] Warning: No bbox provided for track_id={track_id}")
+                return
+            
+            # Step 1: Analyze pose using encrypted features
             pose_result = self.client.analyze_pose(
-                keypoints=keypoints,
+                use_hme=True,
+                encrypted_features=encrypted_features,
                 bbox=bbox,
                 track_id=track_id,
-                camera_id=self.camera_id,
-                use_hme=use_hme
+                camera_id=self.camera_id
             )
             
             self.pose_requests += 1
@@ -847,16 +971,16 @@ class AnalyticsWorker(threading.Thread):
                         "timestamp": time.time()
                     }
                 
-                # Step 2: Detect fall (only if we have previous bbox for motion analysis)
+                # Step 2: Detect fall using encrypted features (only if we have previous bbox for motion analysis)
                 if previous_bbox is not None:
                     fall_result = self.client.detect_fall(
                         camera_id=self.camera_id,
                         track_id=track_id,
-                        pose_data=pose_data,
                         current_bbox=bbox,
                         previous_bbox=previous_bbox,
                         elapsed_ms=elapsed_ms,
-                        use_hme=use_hme
+                        use_hme=True,
+                        encrypted_features=encrypted_features
                     )
                     
                     self.fall_requests += 1
@@ -919,24 +1043,35 @@ def set_pose_label_queue(q):
     global _pose_label_queue
     _pose_label_queue = q
 
-def send_track_to_analytics(track_id, keypoints, bbox, previous_bbox=None, elapsed_ms=33.33, use_hme=False):
+def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
     """Send track data to analytics queue for processing.
+    
+    IMPORTANT: This function NEVER sends plain keypoints to Analytics Server.
+    - When use_hme=True: Send encrypted features only
+    - When use_hme=False: Do not send anything to Analytics Server (fall back to local processing)
     
     This function is called from the main thread to queue track data
     for the AnalyticsWorker to process.
     
     Args:
         track_id: The track ID
-        keypoints: List of 34 floats (17 keypoints × 2 coordinates)
         bbox: Current bounding box [x, y, width, height]
         previous_bbox: Previous frame's bounding box (optional)
         elapsed_ms: Time since last frame in milliseconds
-        use_hme: Whether to use HME mode
+        use_hme: Whether to use HME mode (must be True to send to Analytics)
+        encrypted_features: Dictionary of encrypted features - required when use_hme=True
     
     Returns:
         bool: True if data was queued successfully, False otherwise
     """
     from control_manager import get_flag
+    
+    # Security check: Never send plain keypoints to Analytics Server
+    # Analytics Server only accepts encrypted features when use_hme=True
+    if not use_hme:
+        # HME disabled means Analytics Server is not being used for privacy-preserving inference
+        # Do not send anything to Analytics Server
+        return False
     
     # Only queue if analytics mode is enabled
     if not get_flag("analytics_mode", False):
@@ -946,15 +1081,23 @@ def send_track_to_analytics(track_id, keypoints, bbox, previous_bbox=None, elaps
     if _analytics_queue is None:
         return False
     
+    # Security check: encrypted_features must be provided when use_hme=True
+    if not encrypted_features:
+        print(f"[Analytics] Warning: use_hme=True but no encrypted_features provided for track_id={track_id}")
+        return False
+    
     try:
         track_data = {
             "track_id": track_id,
-            "keypoints": keypoints,
             "bbox": bbox,
             "previous_bbox": previous_bbox,
             "elapsed_ms": elapsed_ms,
-            "use_hme": use_hme
+            "use_hme": True,
+            "encrypted_features": encrypted_features
         }
+        
+        debug_print("ANALYTICS", "Queueing track with encrypted features: track_id=%d", track_id)
+        
         # Put data in the analytics queue for the worker to process
         try:
             _analytics_queue.put_nowait(track_data)
