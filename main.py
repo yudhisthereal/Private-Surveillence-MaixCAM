@@ -1,6 +1,7 @@
 # main.py - Modularized main entry point for Private CCTV System
 
 from maix import app, image, time
+from debug_config import DebugLogger
 from tools.wifi_connect import connect_wifi
 from tools.video_record import VideoRecorder
 from tools.skeleton_saver import SkeletonSaver2D
@@ -11,35 +12,33 @@ from config import (
     initialize_camera, save_camera_info, STREAMING_HTTP_URL,
     BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START, NO_HUMAN_FRAMES_TO_STOP,
     MAX_RECORDING_DURATION_MS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
-    FLAG_SYNC_INTERVAL_MS, GC_INTERVAL_MS, POSE_ANALYSIS_INTERVAL_MS,
-    NO_HUMAN_SECONDS_TO_STOP
+    GC_INTERVAL_MS, NO_HUMAN_SECONDS_TO_STOP
 )
 from camera_manager import (
     initialize_cameras, load_fonts,
 )
 from control_manager import (
-    load_initial_flags, get_control_flags, update_control_flags_from_server,
+    load_initial_flags, get_control_flags, send_background_updated, update_control_flags_from_server,
     update_control_flag, get_flag, initialize_safety_checker,
-    update_safety_checker_polygons, load_safe_areas,
-    send_background_updated, camera_state_manager, register_status_change_callback
+    update_safety_checker_polygons, load_safe_areas, camera_state_manager, register_status_change_callback
 )
 from workers import (
     FlagAndSafeAreaSyncWorker, StateReporterWorker, FrameUploadWorker,
     CommandReceiver, PingWorker, get_received_commands, handle_command,
     update_is_recording, AnalyticsWorker,
-    send_track_to_analytics, get_analytics_pose_data, get_analytics_fall_data,
-    is_analytics_server_available, set_analytics_queue, KeypointsSenderWorker,
-    set_keypoints_queue, send_keypoints_to_queue
+    send_track_to_analytics, is_analytics_server_available, set_analytics_queue, TracksSenderWorker,
+    set_tracks_worker, send_tracks_to_queue
 )
 from tracking import (
     update_tracks, process_track, set_fps
 )
-from streaming import send_frame_to_server, send_pose_label_to_streaming_server
-from tools.time_utils import time_ms, FrameProfiler
+from tools.time_utils import time_ms, FrameProfiler, get_timestamp_str
 
 import os
 import queue
 import gc
+
+logger = DebugLogger("MAIN", instance_enable=False)
 
 # ============================================
 # MAIN INITIALIZATION
@@ -52,7 +51,7 @@ def main():
     
     # 2. Connect to WiFi
     server_ip = connect_wifi("MaixCAM-Wifi", "maixcamwifi")
-    print(f"Camera IP: {server_ip}")
+    logger.print("MAIN", "Camera IP: %s", server_ip)
     
     # 3. Initialize cameras and detectors (RTMP removed, now returns 4 values)
     cam, disp, pose_extractor, detector = initialize_cameras()
@@ -67,7 +66,7 @@ def main():
     initialize_safety_checker(safety_checker)
     
     # 6. Load initial configuration
-    print("\n=== Loading Configuration ===")
+    logger.print("MAIN", "=== Loading Configuration ===")
     load_initial_flags()
     initial_safe_areas = load_safe_areas()
     update_safety_checker_polygons(initial_safe_areas)
@@ -76,11 +75,11 @@ def main():
     if os.path.exists(BACKGROUND_PATH):
         from maix import image as img_module
         background_img = image.load(BACKGROUND_PATH, format=image.Format.FMT_RGB888)
-        print("Loaded background image from file")
+        logger.print("MAIN", "Loaded background image from file")
     else:
         background_img = cam.read().copy()
         background_img.save(BACKGROUND_PATH)
-        print("Created new background image")
+        logger.print("MAIN", "Created new background image")
     
     # ============================================
     # ASYNC WORKERS SETUP
@@ -88,14 +87,14 @@ def main():
     flags_queue = queue.Queue(maxsize=10)
     safe_areas_queue = queue.Queue(maxsize=5)
     analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
-    keypoints_queue = queue.Queue(maxsize=30)  # Queue for keypoints sender
+    tracks_queue = queue.Queue(maxsize=30)  # Queue for tracks sender
     
     # Start command server
     command_receiver = CommandReceiver()
     command_receiver.start()
     
     # Start async workers
-    print("Starting async workers...")
+    logger.print("MAIN", "Starting async workers...")
     flag_sync_worker = FlagAndSafeAreaSyncWorker(
         flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID
     )
@@ -115,17 +114,17 @@ def main():
         set_analytics_queue(analytics_queue)
         analytics_worker = AnalyticsWorker(analytics_queue, CAMERA_ID)
         analytics_worker.start()
-        print("[Analytics] Worker started (analytics_mode=True)")
+        logger.print("MAIN", "[Analytics] Worker started (analytics_mode=True)")
     else:
-        print("[Analytics] Worker NOT started (analytics_mode=False)")
+        logger.print("MAIN", "[Analytics] Worker NOT started (analytics_mode=False)")
     
-    # Start Keypoints Sender Worker (always runs to send plain keypoints to Streaming Server)
-    set_keypoints_queue(keypoints_queue)
-    keypoints_sender = KeypointsSenderWorker(keypoints_queue, CAMERA_ID)
-    keypoints_sender.start()
-    print("[KeypointsSender] Worker started")
+    # Start Tracks Sender Worker (always runs to send all tracks to Streaming Server)
+    tracks_sender = TracksSenderWorker(CAMERA_ID)
+    set_tracks_worker(tracks_sender)
+    tracks_sender.start()
+    logger.print("MAIN", "[TracksSender] Worker started")
     
-    print("Async workers started successfully")
+    logger.print("MAIN", "Async workers started successfully")
     
     # Register callback for registration status changes
     def on_registration_status_changed(new_status):
@@ -133,7 +132,7 @@ def main():
         nonlocal registration_status
         old_status = registration_status
         registration_status = new_status
-        print(f"[StatusChange] Registration status changed: {old_status} -> {new_status}")
+        logger.print("MAIN", "[StatusChange] Registration status changed: %s -> %s", old_status, new_status)
         
         # If camera was approved, save the updated info
         if new_status == "registered" and old_status == "pending":
@@ -154,7 +153,7 @@ def main():
     last_update_ms = time_ms()
     last_gc_time = time_ms()
     streaming_server_available = True
-    frame_profiler = FrameProfiler()
+    frame_profiler = FrameProfiler(enabled=False)
     frame_start_time = time_ms()
     
     # ============================================
@@ -162,25 +161,25 @@ def main():
     # ============================================
     frame_counter = 0
     
-    print("\n=== Camera Stream Started ===")
+    logger.print("MAIN", "=== Camera Stream Started ===")
     control_flags = get_control_flags()
-    print(f"Final Configuration:")
-    print(f"  Camera: {CAMERA_NAME} ({CAMERA_ID})")
-    print(f"  Status: {registration_status}")
-    print(f"  Analytics Mode: {'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED'}")
-    print(f"  Recording: {'ENABLED' if control_flags.get('record') else 'DISABLED'}")
-    print(f"  UI Rendering: DISABLED (no text/skeleton)")
-    print(f"  Display: DISABLED")
-    print(f"  Fall Algorithm: {control_flags.get('fall_algorithm')}")
+    logger.print("MAIN", "Final Configuration:")
+    logger.print("MAIN", "  Camera: %s (%s)", CAMERA_NAME, CAMERA_ID)
+    logger.print("MAIN", "  Status: %s", registration_status)
+    logger.print("MAIN", "  Analytics Mode: %s", 'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED')
+    logger.print("MAIN", "  Recording: %s", 'ENABLED' if control_flags.get('record') else 'DISABLED')
+    logger.print("MAIN", "  UI Rendering: DISABLED (no text/skeleton)")
+    logger.print("MAIN", "  Display: DISABLED")
+    logger.print("MAIN", "  Fall Algorithm: %s", control_flags.get('fall_algorithm'))
     
     # Upload background image to server at startup
     if streaming_server_available and background_img is not None:
         try:
             jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
             frame_upload_worker.update_background(jpeg_bytes)
-            print("[BACKGROUND] Background queued for upload at startup")
+            logger.print("MAIN", "[BACKGROUND] Background queued for upload at startup")
         except Exception as e:
-            print(f"[BACKGROUND] Failed to queue background for upload at startup: {e}")
+            logger.print("MAIN", "[BACKGROUND] Failed to queue background for upload at startup: %s", e)
     
     while not app.need_exit():
         # Start frame profiling
@@ -228,8 +227,8 @@ def main():
         
         # 4. Check for background update request
         frame_profiler.start_task("background_check")
-        if get_flag("set_background", False) and not background_update_in_progress:
-            print("[BACKGROUND] Starting background update...")
+        if get_flag("set_background", False) and not background_update_in_progress and not get_flag("_background_update_pending", False):
+            logger.print("MAIN", "[BACKGROUND] Starting background update...")
             background_img = raw_img.copy()
             background_img.save(BACKGROUND_PATH)
             background_update_in_progress = True
@@ -239,11 +238,12 @@ def main():
                 try:
                     jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
                     frame_upload_worker.update_background(jpeg_bytes)
-                    print("[BACKGROUND] Background queued for upload to server")
+                    logger.print("MAIN", "[BACKGROUND] Background queued for upload to server")
                 except Exception as e:
-                    print(f"[BACKGROUND] Failed to queue background for upload: {e}")
+                    logger.print("MAIN", "[BACKGROUND] Failed to queue background for upload: %s", e)
+            send_background_updated(time.time())
             background_update_in_progress = False
-            print("[BACKGROUND] Background updated")
+            logger.print("MAIN", "[BACKGROUND] Background updated")
         frame_profiler.end_task("background_check")
         
         # 5. Person Detection
@@ -251,7 +251,7 @@ def main():
         objs_det = detector.detect(raw_img, conf_th=0.5, iou_th=0.45)
         current_human_present = any(detector.labels[obj.class_id] == "person" for obj in objs_det)
         
-        # Background update logic
+        # Auto background update logic
         if get_flag("auto_update_bg", False):
             if prev_human_present and not current_human_present:
                 no_human_counter += 1
@@ -263,9 +263,9 @@ def main():
                         try:
                             jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
                             frame_upload_worker.update_background(jpeg_bytes)
-                            print("[BACKGROUND] Auto-update background queued for upload")
+                            logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
                         except Exception as e:
-                            print(f"[BACKGROUND] Auto-update failed to queue background: {e}")
+                            logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
                     last_update_ms = time_ms()
                     no_human_counter = 0
             else:
@@ -278,9 +278,9 @@ def main():
                         try:
                             jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
                             frame_upload_worker.update_background(jpeg_bytes)
-                            print("[BACKGROUND] Auto-update background queued for upload")
+                            logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
                         except Exception as e:
-                            print(f"[BACKGROUND] Auto-update failed to queue background: {e}")
+                            logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
                     last_update_ms = time_ms()
             prev_human_present = current_human_present
         frame_profiler.end_task("human detect")
@@ -310,7 +310,7 @@ def main():
         if record_flag and not is_recording:
             if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
                 all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                timestamp = get_timestamp_str()
                 video_path = f"/root/recordings/{timestamp}.mp4"
                 recorder.start(video_path, pose_extractor.input_width(), pose_extractor.input_height())
                 skeleton_saver_2d.start_new_log(timestamp)
@@ -318,7 +318,7 @@ def main():
                 recording_start_time = now
                 is_recording = True
                 update_is_recording(True)
-                print(f"Started recording: {timestamp}")
+                logger.print("MAIN", "Started recording: %s", timestamp)
         
         if is_recording:
             no_human_count = 0
@@ -337,16 +337,16 @@ def main():
                 skeleton_saver_2d.save_to_csv()
                 is_recording = False
                 update_is_recording(False)
-                print("Stopped recording")
+                logger.print("MAIN", "Stopped recording")
         frame_profiler.end_task("pose_extraction")
         
-        # 8. Process tracking and handle data based on analytics server availability
+        # 8. Process tracking and collect all tracks into processed_tracks list
         frame_profiler.start_task("tracking")
         tracks = update_tracks(objs)
-        
+
         if is_recording:
             frame_id += 1
-        
+
         # Calculate FPS and elapsed time
         frame_end_time = time_ms()
         frame_duration = frame_end_time - frame_start_time
@@ -354,12 +354,9 @@ def main():
         set_fps(current_fps)
         frame_start_time = frame_end_time
         elapsed_ms = frame_duration if frame_duration > 0 else 33.33
-        
-        # Check analytics server availability
-        analytics_available = is_analytics_server_available()
-        
-        # Track previous bboxes for analytics server (per track_id)
-        previous_bboxes = {}
+
+        # Collect all processed tracks in a single list - single source of truth
+        processed_tracks = []
         
         for track in tracks:
             track_result = process_track(
@@ -375,68 +372,31 @@ def main():
             if not track_result:
                 continue
             
-            # print(f"process_track() -> main(): {track_result}")
-            print(f"pose_label <- track_result['pose_label]: {track_result.get('pose_label', 'unknown')}")
+            logger.print("MAIN", "pose_label <- track_result['pose_label']: %s", track_result.get('pose_label', 'unknown'))
             track_id = track_result.get("track_id")
             keypoints = track_result.get("keypoints")
             bbox = track_result.get("bbox")
             pose_label = track_result.get("pose_label", "unknown")
-            safety_status = track_result.get("status", "normal")
+            # Map "tracking" status to "normal" for safety_status
+            status = track_result.get("status", "tracking")
+            safety_status = "normal" if status == "tracking" else status
             encrypted_features = track_result.get("encrypted_features")
-            use_hme = track_result.get("use_hme", False)
-            
-            # Decide where to send data based on use_hme and analytics availability
-            # use_hme is automatically False when analytics server is unavailable
-            # (this is set in process_track based on is_analytics_server_available())
-            
-            if use_hme and analytics_available:
-                # HME mode with available analytics server: send encrypted features to Analytics Server
-                # Plain keypoints are NEVER sent to Analytics Server
-                if encrypted_features:
-                    send_track_to_analytics(
-                        track_id=track_id,
-                        bbox=bbox,
-                        previous_bbox=previous_bboxes.get(track_id),
-                        elapsed_ms=elapsed_ms,
-                        use_hme=True,
-                        encrypted_features=encrypted_features
-                    )
-                    previous_bboxes[track_id] = bbox
-                else:
-                    # No encrypted features available, fall back to local processing
-                    print(f"[Main] Warning: use_hme=True but no encrypted_features for track_id={track_id}")
-                    send_pose_label_to_streaming_server(
-                        camera_id=CAMERA_ID,
-                        track_id=track_id,
-                        pose_label=pose_label,
-                        safety_status=safety_status
-                    )
-            else:
-                # Either HME disabled OR analytics server unavailable
-                # NEVER send plain keypoints to Analytics Server
-                # Always do local fall detection and send results to Streaming Server
-                send_pose_label_to_streaming_server(
-                    camera_id=CAMERA_ID,
-                    track_id=track_id,
-                    pose_label=pose_label,
-                    safety_status=safety_status
-                )
-                # Always send plain keypoints to Streaming Server (not Analytics)
-                send_keypoints_to_queue(
-                    track_id=track_id,
-                    keypoints=keypoints,
-                    bbox=bbox,
-                    pose_label=pose_label,
-                    safety_status=safety_status
-                )
-                previous_bboxes[track_id] = bbox
+
+            # Create processed track entry with all required data
+            processed_track = {
+                "track_id": track_id,
+                "keypoints": keypoints,
+                "bbox": bbox,
+                "pose_label": pose_label,
+                "safety_status": safety_status,
+                "encrypted_features": encrypted_features  # Include for analytics server, omit when sending to streaming
+            }
+            processed_tracks.append(processed_track)
+        
+        # Send all processed tracks at once via queue (fire-and-forget)
+        send_tracks_to_queue(processed_tracks)
         
         frame_profiler.end_task("tracking")
-        
-        # 9. Pose label handling (direct sending)
-        frame_profiler.start_task("pose_label_handling")
-        # Pose labels are sent directly to streaming server (no queue)
-        frame_profiler.end_task("pose_label_handling")
         
         # 10. Recording (no display, no UI rendering)
         frame_profiler.start_task("recording")
@@ -470,12 +430,13 @@ def main():
         
         frame_counter += 1
         if frame_counter % 30 == 0:
-            print(f"Frame {frame_counter} processed")
+            logger.print("MAIN", "Frame %d processed", frame_counter)
             if frame_counter % 60 == 0:
                 control_flags = get_control_flags()
-                print(f"[STATUS] Flags: record={control_flags.get('record')}, "
-                      f"analytics_mode={control_flags.get('analytics_mode')}, "
-                      f"fall_algorithm={control_flags.get('fall_algorithm')}")
+                logger.print("MAIN", "[STATUS] Flags: record=%s, analytics_mode=%s, fall_algorithm=%s",
+                          control_flags.get('record'),
+                          control_flags.get('analytics_mode'),
+                          control_flags.get('fall_algorithm'))
 
     # ============================================
     # CLEANUP
@@ -485,7 +446,7 @@ def main():
     state_reporter_worker.stop()
     frame_upload_worker.stop()
     ping_worker.stop()
-    keypoints_sender.stop()
+    tracks_sender.stop()
     
     if is_recording:
         recorder.end()
@@ -494,14 +455,14 @@ def main():
     from control_manager import save_control_flags
     save_control_flags()
     
-    print("\n=== Camera Stream Stopped ===")
+    logger.print("MAIN", "=== Camera Stream Stopped ===")
     control_flags = get_control_flags()
-    print(f"Final Configuration:")
-    print(f"  Camera: {CAMERA_NAME} ({CAMERA_ID})")
-    print(f"  Status: {registration_status}")
-    print(f"  Analytics Mode: {'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED'}")
-    print(f"  Recording: {'ENABLED' if control_flags.get('record') else 'DISABLED'}")
-    print(f"  Fall Algorithm: {control_flags.get('fall_algorithm')}")
+    logger.print("MAIN", "Final Configuration:")
+    logger.print("MAIN", "  Camera: %s (%s)", CAMERA_NAME, CAMERA_ID)
+    logger.print("MAIN", "  Status: %s", registration_status)
+    logger.print("MAIN", "  Analytics Mode: %s", 'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED')
+    logger.print("MAIN", "  Recording: %s", 'ENABLED' if control_flags.get('record') else 'DISABLED')
+    logger.print("MAIN", "  Fall Algorithm: %s", control_flags.get('fall_algorithm'))
 
 if __name__ == "__main__":
     main()

@@ -5,6 +5,10 @@ import numpy as np
 from maix import tracker, image
 from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
 from pose.pose_estimation import PoseEstimation
+from debug_config import DebugLogger
+
+# Module-level debug logger instance
+logger = DebugLogger(tag="TRACKING", instance_enable=False)
 
 pose_estimator = PoseEstimation()
 

@@ -118,7 +118,7 @@ class PoseEstimation:
         }
         pose_code = pose_map.get(label, 0)
 
-        # Create flags for debugging (same as old method's boolean checks)
+        # Create flags for debugging
         flags = {
             'torso_angle': torso_angle,
             'thigh_uprightness': thigh_uprightness,
@@ -148,20 +148,19 @@ class PoseEstimation:
 
             torso_vec = shoulder_center - hip_center
             thigh_vec = knee_center - hip_center
-            up = np.array([0.0, -1.0])
+            up_vector = np.array([0.0, -1.0])
 
             torso_norm = np.linalg.norm(torso_vec)
             thigh_norm = np.linalg.norm(thigh_vec)
             if torso_norm == 0 or thigh_norm == 0:
                 return None
 
-            torso_angle = np.degrees(np.arccos(
-                np.clip(np.dot(torso_vec, up) / torso_norm, -1.0, 1.0)
-            ))
+            # Exact angle calculation from pose_estimation_old.py (lines 111-115)
+            torso_angle = np.degrees(np.arccos(np.clip(
+                np.dot(torso_vec, up_vector) / (torso_norm * np.linalg.norm(up_vector)), -1.0, 1.0)))
 
-            thigh_angle = np.degrees(np.arccos(
-                np.clip(np.dot(thigh_vec, up) / thigh_norm, -1.0, 1.0)
-            ))
+            thigh_angle = np.degrees(np.arccos(np.clip(
+                np.dot(thigh_vec, up_vector) / (thigh_norm * np.linalg.norm(up_vector)), -1.0, 1.0)))
 
             thigh_uprightness = abs(thigh_angle - 180.0)
 

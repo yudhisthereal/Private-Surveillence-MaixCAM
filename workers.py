@@ -7,13 +7,16 @@ import socket
 import select
 import json
 import threading
-from debug_config import debug_print
+from debug_config import DebugLogger
+
+# Module-level debug logger instance
+logger = DebugLogger(tag="WORKERS", instance_enable=True)
 from config import (
-    STREAMING_HTTP_URL, FLAG_SYNC_INTERVAL_MS, 
+    FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
-    LOCAL_PORT, ANALYTICS_API_URL, ANALYTICS_TIMEOUT,
-    ANALYTICS_RETRY_COUNT, ANALYTICS_RETRY_BACKOFF
+    LOCAL_PORT, ANALYTICS_API_URL
 )
+
 from control_manager import (
     get_camera_state_from_server, get_safe_areas_from_server, report_state,
     camera_state_manager
@@ -80,17 +83,17 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                         except queue.Full:
                             pass
                     else:
-                        print(f"[SafeAreaSync] Failed to get safe areas from server")
+                        logger.print("FLAG_SYNC", "Failed to get safe areas from server")
                 
             except requests.exceptions.Timeout:
                 self.connection_errors += 1
                 if self.connection_errors % 5 == 0:
-                    print(f"[FlagSync] Timeout connecting to server ({self.connection_errors} errors)")
+                    logger.print("FLAG_SYNC", "Timeout connecting to server (%d errors)", self.connection_errors)
             
             except Exception as e:
                 self.connection_errors += 1
                 if self.connection_errors % 10 == 0:
-                    print(f"[FlagSync] Error ({self.connection_errors}): {e}")
+                    logger.print("FLAG_SYNC", "Error (%d): %s", self.connection_errors, e)
             
             # Sleep for sync interval
             time.sleep(self.sync_interval)
@@ -133,9 +136,9 @@ class StateReporterWorker(threading.Thread):
                     )
                     
                     if success:
-                        print(f"[StateReporter] State reported successfully to /api/stream/report-state")
+                        logger.print("STATE_REPORT", "State reported successfully")
                     else:
-                        print(f"[StateReporter] Failed to report state")
+                        logger.print("STATE_REPORT", "Failed to report state")
                     
                     self.last_report_time = current_time
                 
@@ -143,7 +146,7 @@ class StateReporterWorker(threading.Thread):
                 time.sleep(self.report_interval)
                     
             except Exception as e:
-                print(f"[StateReporter] Error: {e}")
+                logger.print("STATE_REPORT", "Error: %s", e)
                 time.sleep(5.0)  # Sleep on error
     
     def stop(self):
@@ -189,7 +192,7 @@ class FrameUploadWorker(threading.Thread):
         self.background_upload_count = 0
         
         # Profiler for upload FPS calculation
-        self.upload_profiler = FrameProfiler(print_interval=30, enabled=True)
+        self.upload_profiler = FrameProfiler(print_interval=30, enabled=False)
         self.upload_profiler.start_frame()
         self.upload_profiler.start_task("frame_upload")
         
@@ -226,7 +229,7 @@ class FrameUploadWorker(threading.Thread):
         with self._background_lock:
             self._current_background = background_data
             self._background_timestamp = time.time()
-        print(f"[FrameUploadWorker] Background update queued for upload")
+        logger.print("FRAME_UPLOAD", "Background update queued for upload")
     
     def get_background(self):
         """Get the current background for upload (thread-safe)
@@ -261,7 +264,7 @@ class FrameUploadWorker(threading.Thread):
                     
                     # Start background upload
                     self.uploading = True
-                    print(f"[FrameUploadWorker] Uploading background image...")
+                    logger.print("FRAME_UPLOAD", "Uploading background image...")
                     
                     # Upload the background
                     bg_upload_start = time_ms()
@@ -271,9 +274,9 @@ class FrameUploadWorker(threading.Thread):
                     if success:
                         self.background_upload_count += 1
                         self.clear_background()
-                        print(f"[FrameUploadWorker] Background uploaded successfully ({self.background_upload_count} total)")
+                        logger.print("FRAME_UPLOAD", "Background uploaded successfully (%d total)", self.background_upload_count)
                     else:
-                        print(f"[FrameUploadWorker] Failed to upload background (will retry)")
+                        logger.print("FRAME_UPLOAD", "Failed to upload background (will retry)")
                         # Keep the background for retry on next iteration
                     
                     # Background upload complete
@@ -320,9 +323,9 @@ class FrameUploadWorker(threading.Thread):
                     if self.upload_count % 30 == 0:
                         avg_upload_time = upload_duration
                         upload_fps = 1000.0 / avg_upload_time if avg_upload_time > 0 else 0
-                        print(f"[FrameUpload] Uploaded {self.upload_count} frames, skipped {self.skip_count}, avg upload: {avg_upload_time:.2f}ms, FPS: {upload_fps:.2f}")
+                        logger.print("FRAME_UPLOAD", "Uploaded %d frames, skipped %d, avg upload: %.2fms, FPS: %.2f", self.upload_count, self.skip_count, avg_upload_time, upload_fps)
                 else:
-                    print(f"[FrameUpload] Failed to upload frame")
+                    logger.print("FRAME_UPLOAD", "Failed to upload frame")
                     # Keep the frame for retry on next iteration
                 
                 # Upload complete, check for new frame
@@ -332,7 +335,7 @@ class FrameUploadWorker(threading.Thread):
                 time.sleep(0.005)  # 5ms
                 
             except Exception as e:
-                print(f"[FrameUpload] Error: {e}")
+                logger.print("FRAME_UPLOAD", "Error: %s", e)
                 self.uploading = False
                 time.sleep(0.1)  # Longer sleep on error
     
@@ -409,7 +412,7 @@ class CommandReceiver(threading.Thread):
             self.sock.bind(('0.0.0.0', LOCAL_PORT))
             self.sock.listen(5)
             self.sock.settimeout(0.5)
-            print(f"Command server listening on port {LOCAL_PORT}")
+            logger.print("CMD_SERVER", "Command server listening on port %d", LOCAL_PORT)
             
             while self.running:
                 try:
@@ -428,11 +431,11 @@ class CommandReceiver(threading.Thread):
                 except socket.timeout:
                     continue
                 except Exception as e:
-                    print(f"Command server accept error: {e}")
+                    logger.print("CMD_SERVER", "Accept error: %s", e)
                     time.sleep(0.1)
                     
         except Exception as e:
-            print(f"Failed to start command server: {e}")
+            logger.print("CMD_SERVER", "Failed to start: %s", e)
         finally:
             if self.sock:
                 self.sock.close()
@@ -468,20 +471,20 @@ class CommandReceiver(threading.Thread):
                                 response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
                                 response += json.dumps({"status": "success", "camera_id": camera_state_manager.get_camera_id()})
                                 conn.send(response.encode())
-                                print(f"Received command from {addr[0]}: {data.get('command')} = {data.get('value')}")
+                                logger.print("CMD_SERVER", "Received command from %s: %s = %s", addr[0], data.get('command'), data.get('value'))
                     else:
                         response = "HTTP/1.1 404 Not Found\r\n\r\n"
                         conn.send(response.encode())
                         
                 except Exception as e:
-                    print(f"Command parsing error: {e}")
+                    logger.print("CMD_SERVER", "Command parsing error: %s", e)
                     response = "HTTP/1.1 400 Bad Request\r\n\r\nError"
                     conn.send(response.encode())
             
             conn.close()
             
         except Exception as e:
-            print(f"Client handling error: {e}")
+            logger.print("CMD_SERVER", "Client handling error: %s", e)
             try:
                 conn.close()
             except:
@@ -506,11 +509,11 @@ def get_received_commands():
 
 def handle_command(command, value, camera_id, registration_status, save_camera_info_func):
     """Handle command from streaming server"""
-    print(f"Processing command: {command} = {value}")
+    logger.print("CMD", "Processing command: %s = %s", command, value)
     
     if command == "set_background":
         if value:
-            print("Background update requested")
+            logger.print("CMD", "Background update requested")
             # Will be handled in main loop
     elif command == "update_safe_areas":
         if isinstance(value, list):
@@ -524,18 +527,18 @@ def handle_command(command, value, camera_id, registration_status, save_camera_i
         if algorithm in [1, 2, 3]:
             from control_manager import update_control_flag
             update_control_flag("fall_algorithm", algorithm)
-            print(f"Fall algorithm set to {algorithm}")
+            logger.print("CMD", "Fall algorithm set to %d", algorithm)
     elif command == "forget_camera":
         if value == camera_id:
-            print("⚠️ Camera forget command received!")
-            print("This camera will be removed from the registry.")
+            logger.print("CMD", "Camera forget command received!")
+            logger.print("CMD", "This camera will be removed from the registry.")
             save_camera_info_func("camera_000", "Unnamed Camera", "unregistered", "")
     elif command == "approve_camera":
-        print(f"✅ Camera approval received!")
+        logger.print("CMD", "Camera approval received!")
         if registration_status == "pending":
             registration_status = "registered"
             save_camera_info_func(camera_id, camera_state_manager.get_camera_name(), "registered", "")
-            print(f"Camera status updated to: registered")
+            logger.print("CMD", "Camera status updated to: registered")
 
 def get_default_control_flags():
     """Get default control flags"""
@@ -575,7 +578,7 @@ def update_is_recording(recording):
     old_state = _recording_state["is_recording"]
     _recording_state["is_recording"] = recording
     if old_state != recording:
-        print(f"[SYNC] is_recording updated: {old_state} -> {recording}")
+        logger.print("SYNC", "is_recording updated: %s -> %s", old_state, recording)
 
 def get_is_recording():
     """Get current recording state
@@ -624,7 +627,7 @@ class AnalyticsClient:
         """
         try:
             endpoint = f"{self.base_url}/api/analytics/health"
-            debug_print("API_REQUEST", "%s | endpoint: /api/analytics/health", "GET")
+            logger.print("API_REQUEST", "%s | endpoint: /api/analytics/health", "GET")
             response = self.session.get(
                 endpoint,
                 timeout=self.timeout
@@ -634,7 +637,7 @@ class AnalyticsClient:
                 return data.get("status") == "healthy"
             return False
         except requests.exceptions.RequestException as e:
-            print(f"[AnalyticsClient] Health check failed: {e}")
+            logger.print("ANALYTICS", "Health check failed: %s", e)
             return False
     
     def analyze_pose(self, use_hme=False, encrypted_features=None, bbox=None, track_id=0, camera_id=""):
@@ -662,7 +665,7 @@ class AnalyticsClient:
         
         # encrypted_features is required when use_hme=True
         if not encrypted_features:
-            print(f"[AnalyticsClient] Warning: use_hme=True but no encrypted_features provided")
+            logger.print("ANALYTICS", "Warning: use_hme=True but no encrypted_features provided")
             return None
         
         payload = {
@@ -677,7 +680,7 @@ class AnalyticsClient:
         
         try:
             endpoint = f"{self.base_url}/api/analytics/analyze-pose"
-            debug_print("API_REQUEST", "%s | endpoint: /api/analytics/analyze-pose | payload: track_id=%d, camera_id=%s, encrypted_features=YES", "POST", track_id, camera_id)
+            logger.print("API_REQUEST", "%s | endpoint: /api/analytics/analyze-pose | payload: track_id=%d, camera_id=%s, encrypted_features=YES", "POST", track_id, camera_id)
             response = self.session.post(
                 endpoint,
                 json=payload,
@@ -686,64 +689,7 @@ class AnalyticsClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"[AnalyticsClient] Pose analysis failed: {e}")
-            return None
-    
-    def detect_fall(self, camera_id, track_id, current_bbox=None, 
-                    previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
-        """Detect falls using encrypted features (HME mode) or skip (plain mode).
-        
-        IMPORTANT: This method NEVER accepts or processes plain pose_data.
-        - When use_hme=True: Detect falls using encrypted features for privacy-preserving inference
-        - When use_hme=False: Returns None (local fall detection should be used instead)
-        
-        Args:
-            camera_id: Camera identifier (required)
-            track_id: Track ID (required)
-            current_bbox: Current bounding box [x, y, width, height] (required)
-            previous_bbox: Previous frame's bounding box (optional)
-            elapsed_ms: Time since last frame in milliseconds (default: 33.33)
-            use_hme: Whether to use HME mode (must be True to process)
-            encrypted_features: Dictionary of encrypted features - required when use_hme=True
-        
-        Returns:
-            dict: Fall detection result or None on failure/not applicable
-        """
-        # Security check: Never process plain pose_data
-        if not use_hme:
-            # HME disabled means Analytics Server is not being used
-            # Return None to indicate local fall detection should be used
-            return None
-        
-        # encrypted_features is required when use_hme=True
-        if not encrypted_features:
-            print(f"[AnalyticsClient] Warning: use_hme=True but no encrypted_features provided for track_id={track_id}")
-            return None
-        
-        payload = {
-            "camera_id": camera_id,
-            "track_id": track_id,
-            "current_bbox": current_bbox,
-            "elapsed_ms": elapsed_ms,
-            "use_hme": True,
-            "encrypted_features": encrypted_features
-        }
-        
-        if previous_bbox is not None:
-            payload["previous_bbox"] = previous_bbox
-        
-        try:
-            endpoint = f"{self.base_url}/api/analytics/detect-fall"
-            debug_print("API_REQUEST", "%s | endpoint: /api/analytics/detect-fall | payload: track_id=%d, camera_id=%s, encrypted_features=YES", "POST", track_id, camera_id)
-            response = self.session.post(
-                endpoint,
-                json=payload,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"[AnalyticsClient] Fall detection failed: {e}")
+            logger.print("ANALYTICS", "Pose analysis failed: %s", e)
             return None
 
 
@@ -824,7 +770,7 @@ class AnalyticsWorker(threading.Thread):
         
     def run(self):
         """Main worker loop - process track data from queue."""
-        print(f"[AnalyticsWorker] Starting worker for camera: {self.camera_id}")
+        logger.print("ANALYTICS_WORKER", "Starting worker for camera: %s", self.camera_id)
         
         # Initial health check
         self._check_health()
@@ -858,11 +804,11 @@ class AnalyticsWorker(threading.Thread):
                     time.sleep(0.01)  # 10ms
                     
             except Exception as e:
-                print(f"[AnalyticsWorker] Error in main loop: {e}")
+                logger.print("ANALYTICS_WORKER", "Error in main loop: %s", e)
                 self.errors += 1
                 time.sleep(0.1)  # Sleep on error
         
-        print(f"[AnalyticsWorker] Stopped (pose_requests={self.pose_requests}, fall_requests={self.fall_requests}, errors={self.errors})")
+        logger.print("ANALYTICS_WORKER", "Stopped (pose_requests=%d, fall_requests=%d, errors=%d)", self.pose_requests, self.fall_requests, self.errors)
     
     def _check_health(self):
         """Check if analytics server is healthy and update control_flags accordingly."""
@@ -881,18 +827,18 @@ class AnalyticsWorker(threading.Thread):
                 if not current_mode:
                     # Server is healthy, enable analytics mode
                     update_control_flag("analytics_mode", True)
-                    print(f"[AnalyticsWorker] Server is healthy: {ANALYTICS_API_URL} - analytics_mode enabled")
+                    logger.print("ANALYTICS_WORKER", "Server is healthy: %s - analytics_mode enabled", ANALYTICS_API_URL)
                 else:
-                    print(f"[AnalyticsWorker] Server is healthy: {ANALYTICS_API_URL}")
+                    logger.print("ANALYTICS_WORKER", "Server is healthy: %s", ANALYTICS_API_URL)
             else:
                 if current_mode:
                     # Server is unhealthy, disable analytics mode
                     update_control_flag("analytics_mode", False)
-                    print(f"[AnalyticsWorker] Server health check failed - analytics_mode disabled")
+                    logger.print("ANALYTICS_WORKER", "Server health check failed - analytics_mode disabled")
                 else:
-                    print(f"[AnalyticsWorker] Server health check failed")
+                    logger.print("ANALYTICS_WORKER", "Server health check failed")
         except Exception as e:
-            print(f"[AnalyticsWorker] Health check error: {e}")
+            logger.print("ANALYTICS_WORKER", "Health check error: %s", e)
             with _analytics_lock:
                 _analytics_state["server_available"] = False
             # Disable analytics mode on error
@@ -928,16 +874,16 @@ class AnalyticsWorker(threading.Thread):
             # Security check: Never process plain keypoints
             if not use_hme:
                 # HME disabled means we should not be sending data to Analytics Server
-                print(f"[AnalyticsWorker] Warning: use_hme=False but track_data received for track_id={track_id}")
+                logger.print("ANALYTICS_WORKER", "Warning: use_hme=False but track_data received for track_id=%d", track_id)
                 return
             
             # encrypted_features is required when use_hme=True
             if not encrypted_features:
-                print(f"[AnalyticsWorker] Warning: No encrypted_features provided for track_id={track_id}")
+                logger.print("ANALYTICS_WORKER", "Warning: No encrypted_features provided for track_id=%d", track_id)
                 return
             
             if not bbox:
-                print(f"[AnalyticsWorker] Warning: No bbox provided for track_id={track_id}")
+                logger.print("ANALYTICS_WORKER", "Warning: No bbox provided for track_id=%d", track_id)
                 return
             
             # Step 1: Analyze pose using encrypted features
@@ -970,45 +916,13 @@ class AnalyticsWorker(threading.Thread):
                         "server_analysis": pose_data.get("server_analysis", True),
                         "timestamp": time.time()
                     }
-                
-                # Step 2: Detect fall using encrypted features (only if we have previous bbox for motion analysis)
-                if previous_bbox is not None:
-                    fall_result = self.client.detect_fall(
-                        camera_id=self.camera_id,
-                        track_id=track_id,
-                        current_bbox=bbox,
-                        previous_bbox=previous_bbox,
-                        elapsed_ms=elapsed_ms,
-                        use_hme=True,
-                        encrypted_features=encrypted_features
-                    )
                     
                     self.fall_requests += 1
-                    
-                    if fall_result and fall_result.get("status") == "success":
-                        fall_detection = fall_result.get("fall_detection", {})
-                        
-                        # Update shared state with fall data
-                        with _analytics_lock:
-                            _analytics_state["fall_data"][track_id] = {
-                                "fall_detected_method1": fall_detection.get("fall_detected_method1", False),
-                                "fall_detected_method2": fall_detection.get("fall_detected_method2", False),
-                                "fall_detected_method3": fall_detection.get("fall_detected_method3", False),
-                                "counter_method1": fall_detection.get("counter_method1", 0),
-                                "counter_method2": fall_detection.get("counter_method2", 0),
-                                "counter_method3": fall_detection.get("counter_method3", 0),
-                                "primary_alert": fall_detection.get("primary_alert", False),
-                                "timestamp": time.time()
-                            }
-                        
-                        # Log fall detection result
-                        if fall_detection.get("primary_alert"):
-                            print(f"[AnalyticsWorker] FALL DETECTED: track_id={track_id}, method3={fall_detection.get('fall_detected_method3')}")
             else:
                 self.errors += 1
                 
         except Exception as e:
-            print(f"[AnalyticsWorker] Error processing track: {e}")
+            logger.print("ANALYTICS_WORKER", "Error processing track: %s", e)
             self.errors += 1
     
     def stop(self):
@@ -1031,17 +945,17 @@ class AnalyticsWorker(threading.Thread):
 
 # Global analytics queue reference (set by main.py)
 _analytics_queue = None
-_keypoints_queue = None  # Queue for keypoints sender worker
+_tracks_worker = None  # Reference to tracks sender worker
 
 def set_analytics_queue(q):
     """Set the analytics queue reference (called from main.py)"""
     global _analytics_queue
     _analytics_queue = q
 
-def set_keypoints_queue(q):
-    """Set the keypoints queue reference (called from main.py)"""
-    global _keypoints_queue
-    _keypoints_queue = q
+def set_tracks_worker(worker):
+    """Set the tracks sender worker reference (called from main.py)"""
+    global _tracks_worker
+    _tracks_worker = worker
 
 def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
     """Send track data to analytics queue for processing.
@@ -1083,7 +997,7 @@ def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=N
     
     # Security check: encrypted_features must be provided when use_hme=True
     if not encrypted_features:
-        print(f"[Analytics] Warning: use_hme=True but no encrypted_features provided for track_id={track_id}")
+        logger.print("ANALYTICS", "Warning: use_hme=True but no encrypted_features provided for track_id=%d", track_id)
         return False
     
     try:
@@ -1096,7 +1010,7 @@ def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=N
             "encrypted_features": encrypted_features
         }
         
-        debug_print("ANALYTICS", "Queueing track with encrypted features: track_id=%d", track_id)
+        logger.print("ANALYTICS", "Queueing track with encrypted features: track_id=%d", track_id)
         
         # Put data in the analytics queue for the worker to process
         try:
@@ -1106,128 +1020,252 @@ def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=N
             # Queue is full, skip this frame
             return False
     except Exception as e:
-        print(f"[Analytics] Failed to prepare track data: {e}")
+        logger.print("ANALYTICS", "Failed to prepare track data: %s", e)
         return False
 
 
-def send_keypoints_to_queue(track_id, keypoints, bbox=None, pose_label=None, safety_status="normal"):
-    """Queue keypoints data for async sending to streaming server.
-    
-    This function is called from the main thread to queue keypoints data
-    for the KeypointsSenderWorker to send asynchronously.
-    
+def send_tracks_to_queue(processed_tracks):
+    """Update latest tracks for async sending to streaming and analytics servers.
+
+    This function is called from the main thread to update the latest tracks
+    for the TracksSenderWorker to send asynchronously. Always sends the latest
+    tracks, dropping old ones (UDP-like behavior).
+
     Args:
-        track_id: The track ID
-        keypoints: List of 34 floats (17 keypoints × 2 coordinates)
-        bbox: Optional bounding box [x, y, width, height]
-        pose_label: Optional pose classification label
-        safety_status: Safety status (normal, unsafe, fall)
-    
+        processed_tracks: List of track dictionaries, each containing:
+            - track_id: int
+            - keypoints: list of 34 floats (17 keypoints × 2 coordinates)
+            - bbox: list [x, y, w, h]
+            - pose_label: str
+            - safety_status: str (normal, unsafe, fall)
+            - encrypted_features: dict (only sent to analytics server, not streaming)
+
     Returns:
-        bool: True if data was queued successfully, False otherwise
+        bool: True if data was updated successfully, False otherwise
     """
-    # Check if queue is available
-    if _keypoints_queue is None:
+    # Check if worker is available
+    if _tracks_worker is None:
         return False
-    
+
     try:
-        keypoints_data = {
-            "track_id": track_id,
-            "keypoints": keypoints,
-            "bbox": bbox,
-            "pose_label": pose_label,
-            "safety_status": safety_status
-        }
-        # Put data in the queue for the worker to send
-        try:
-            _keypoints_queue.put_nowait(keypoints_data)
-            return True
-        except queue.Full:
-            # Queue is full, skip this frame
-            return False
+        # Update the latest tracks (always overwrites previous)
+        _tracks_worker.update_tracks(processed_tracks)
+        return True
     except Exception as e:
-        print(f"[KeypointsSender] Failed to prepare keypoints data: {e}")
+        logger.print("TRACKS_SENDER", "Failed to update tracks data: %s", e)
         return False
 
 
-class KeypointsSenderWorker(threading.Thread):
-    """Background worker for sending keypoints to streaming server asynchronously.
+class TracksSenderWorker(threading.Thread):
+    """Background worker for sending all processed tracks to streaming and analytics servers.
     
-    This worker receives keypoints data from the main thread via a queue and sends it
-    to the streaming server in the background, preventing blocking of the main loop.
+    This worker receives processed_tracks from the main thread via a shared reference and sends them
+    to the streaming server (omitting encrypted_features) and analytics server (only encrypted_features
+    when use_hme=True) in the background, preventing blocking of the main loop.
+    
+    UDP-like behavior: Always sends the latest tracks, dropping old ones if sending is in progress.
+    Fire-and-forget pattern: sends every 1ms.
     """
     
-    def __init__(self, keypoints_queue, camera_id):
+    def __init__(self, camera_id):
         super().__init__(daemon=True)
         self.camera_id = camera_id
         self.running = True
-        self.keypoints_queue = keypoints_queue
+        
+        # Shared tracks reference - main thread writes, worker reads
+        # Using a lock for thread-safe access
+        self._tracks_lock = threading.Lock()
+        self._current_tracks = None
+        self._tracks_timestamp = 0
+        self._sending = False
         
         # Statistics for monitoring
         self.sent_count = 0
         self.error_count = 0
+        self.skip_count = 0
         
-    def run(self):
-        """Main worker loop - process keypoints data from queue."""
-        from streaming import send_keypoints_to_streaming_server
+        # Track previous bboxes for analytics server (per track_id)
+        self.previous_bboxes = {}
         
-        print(f"[KeypointsSender] Starting worker for camera: {self.camera_id}")
+        # Profiler for tracks sending
+        self.profiler = FrameProfiler(print_interval=30, enabled=True)
+        self.profiler.start_frame()
         
-        while self.running:
-            try:
-                # Get next keypoints data from queue (non-blocking)
-                try:
-                    keypoints_data = self.keypoints_queue.get_nowait()
-                    self._send_keypoints(keypoints_data, send_keypoints_to_streaming_server)
-                except queue.Empty:
-                    # No data available, sleep briefly
-                    time.sleep(0.01)  # 10ms
-                    
-            except Exception as e:
-                print(f"[KeypointsSender] Error in main loop: {e}")
-                self.error_count += 1
-                time.sleep(0.1)  # Sleep on error
-        
-        print(f"[KeypointsSender] Stopped (sent={self.sent_count}, errors={self.error_count})")
-    
-    def _send_keypoints(self, keypoints_data, send_func):
-        """Send a single keypoints data to streaming server.
+    def update_tracks(self, processed_tracks):
+        """Update the latest tracks to send (called from main thread).
         
         Args:
-            keypoints_data: Dictionary containing:
+            processed_tracks: List of track dictionaries
+        """
+        with self._tracks_lock:
+            self._current_tracks = processed_tracks
+            self._tracks_timestamp = time_ms()
+        
+    def _get_current_tracks(self):
+        """Get current tracks (thread-safe).
+        
+        Returns:
+            tuple: (tracks, timestamp) or (None, 0) if no tracks
+        """
+        with self._tracks_lock:
+            if self._current_tracks is not None:
+                return (self._current_tracks.copy(), self._tracks_timestamp)
+            return (None, 0)
+        
+    def run(self):
+        """Main worker loop - send latest tracks every 1ms.
+
+        UDP-like behavior: If sending is in progress, skip and wait for next iteration.
+        Always sends the latest tracks, dropping old ones.
+        """
+        logger.print("TRACKS_SENDER", "Starting worker for camera: %s", self.camera_id)
+
+        while self.running:
+            try:
+                # Get current tracks
+                current_tracks, _ = self._get_current_tracks()
+                
+                if current_tracks is None:
+                    # No tracks available yet, sleep briefly
+                    time.sleep(0.001)  # 1ms
+                    continue
+                
+                # Check if we're already sending
+                if self._sending:
+                    # UDP-like behavior: skip this frame, will send latest on next iteration
+                    self.skip_count += 1
+                    time.sleep(0.001)  # 1ms
+                    continue
+                
+                # Start sending with profiling
+                self._sending = True
+                self.profiler.start_frame()
+                self.profiler.start_task("tracks_send")
+                
+                # Send the tracks
+                send_start = time_ms()
+                self._send_tracks(current_tracks)
+                send_duration = time_ms() - send_start
+                
+                # End profiling for this send
+                self.profiler.end_task("tracks_send")
+                self.profiler.end_frame()
+                
+                self.sent_count += 1
+                
+                # Log periodically with send stats
+                if self.sent_count % 30 == 0:
+                    avg_send_time = send_duration
+                    send_fps = 1000.0 / avg_send_time if avg_send_time > 0 else 0
+                    logger.print("TRACKS_SENDER", "Sent %d batches, skipped %d, avg send: %.2fms, FPS: %.2f", 
+                                self.sent_count, self.skip_count, avg_send_time, send_fps)
+                
+                # Send complete, check for new tracks
+                self._sending = False
+
+            except Exception as e:
+                logger.print("TRACKS_SENDER", "Error in main loop: %s", e)
+                self.error_count += 1
+                self._sending = False
+                time.sleep(0.1)  # Sleep on error
+
+        logger.print("TRACKS_SENDER", "Stopped (sent=%d, errors=%d, skipped=%d)", self.sent_count, self.error_count, self.skip_count)
+    
+    def _send_tracks(self, processed_tracks):
+        """Send all processed tracks to streaming and analytics servers asynchronously.
+        
+        Args:
+            processed_tracks: List of track dictionaries, each containing:
                 - track_id: int
-                - keypoints: list of 34 floats
+                - keypoints: list of 34 floats (17 keypoints × 2 coordinates)
                 - bbox: list [x, y, w, h]
                 - pose_label: str
                 - safety_status: str (normal, unsafe, fall)
-            send_func: The send function to use
+                - encrypted_features: dict (only sent to analytics server, not streaming)
         """
         try:
-            track_id = keypoints_data.get("track_id")
-            keypoints = keypoints_data.get("keypoints", [])
-            bbox = keypoints_data.get("bbox")
-            pose_label = keypoints_data.get("pose_label")
-            safety_status = keypoints_data.get("safety_status", "normal")
+            from streaming import send_all_tracks_to_streaming_server
+            from control_manager import get_flag
             
-            success = send_func(
-                camera_id=self.camera_id,
-                track_id=track_id,
-                keypoints=keypoints,
-                bbox=bbox,
-                pose_label=pose_label,
-                safety_status=safety_status
-            )
+            # Prepare tracks for streaming server (omit encrypted_features)
+            tracks_for_streaming = []
+            for track in processed_tracks:
+                track_for_streaming = {
+                    "track_id": track.get("track_id"),
+                    "keypoints": track.get("keypoints", []),
+                    "bbox": track.get("bbox"),
+                    "pose_label": track.get("pose_label", "unknown"),
+                    "safety_status": track.get("safety_status", "normal")
+                    # encrypted_features is omitted for streaming server
+                }
+                tracks_for_streaming.append(track_for_streaming)
             
-            if success:
-                self.sent_count += 1
-                if self.sent_count % 30 == 0:
-                    print(f"[KeypointsSender] Sent {self.sent_count} keypoints data")
-            else:
-                self.error_count += 1
+            # Send to streaming server asynchronously (fire-and-forget)
+            # Always send tracks, even if empty list, to ensure server knows current state
+            self.profiler.start_task("streaming_send")
+            self._send_to_streaming_async(self.camera_id, tracks_for_streaming)
+            self.profiler.end_task("streaming_send")
+            
+            # Send to analytics server if analytics_mode is enabled and use_hme is True
+            analytics_mode = get_flag("analytics_mode", False)
+            use_hme = get_flag("hme", False)
+            
+            if analytics_mode and use_hme and is_analytics_server_available():
+                # Calculate elapsed_ms (approximate, using 33.33ms as default)
+                elapsed_ms = 33.33
+                
+                # Send encrypted features to analytics server for each track asynchronously
+                self.profiler.start_task("analytics_send")
+                for track in processed_tracks:
+                    track_id = track.get("track_id")
+                    encrypted_features = track.get("encrypted_features")
+                    bbox = track.get("bbox")
+                    previous_bbox = self.previous_bboxes.get(track_id)
+                    
+                    if encrypted_features and bbox:
+                        self._send_to_analytics_async(
+                            track_id=track_id,
+                            bbox=bbox,
+                            previous_bbox=previous_bbox,
+                            elapsed_ms=elapsed_ms,
+                            encrypted_features=encrypted_features
+                        )
+                        self.previous_bboxes[track_id] = bbox
+                self.profiler.end_task("analytics_send")
                 
         except Exception as e:
-            print(f"[KeypointsSender] Error sending keypoints: {e}")
+            logger.print("TRACKS_SENDER", "Error sending tracks: %s", e)
             self.error_count += 1
+    
+    def _send_to_streaming_async(self, camera_id, tracks):
+        """Send tracks to streaming server asynchronously using a thread."""
+        def _send():
+            try:
+                from streaming import send_all_tracks_to_streaming_server
+                send_all_tracks_to_streaming_server(camera_id, tracks)
+            except Exception as e:
+                logger.print("TRACKS_SENDER", "Error in async streaming send: %s", e)
+        
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()
+    
+    def _send_to_analytics_async(self, track_id, bbox, previous_bbox, elapsed_ms, encrypted_features):
+        """Send track to analytics server asynchronously using a thread."""
+        def _send():
+            try:
+                send_track_to_analytics(
+                    track_id=track_id,
+                    bbox=bbox,
+                    previous_bbox=previous_bbox,
+                    elapsed_ms=elapsed_ms,
+                    use_hme=True,
+                    encrypted_features=encrypted_features
+                )
+            except Exception as e:
+                logger.print("TRACKS_SENDER", "Error in async analytics send: %s", e)
+        
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()
     
     def stop(self):
         """Stop the worker."""

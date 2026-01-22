@@ -3,6 +3,7 @@ import threading
 import os
 import time
 import json
+from debug_config import debug_print
 
 # For MJPEG stream
 from io import BytesIO
@@ -48,24 +49,24 @@ class WebServer:
             if os.path.exists(self.SAFE_AREA_FILE):
                 with open(self.SAFE_AREA_FILE, 'r') as f:
                     self.safe_areas = json.load(f)
-                print(f"Loaded {len(self.safe_areas)} safe area(s) from file")
+                debug_print("WEB_SERVER", "Loaded %d safe area(s) from file", len(self.safe_areas))
                 self.safe_areas_updated = True
         except Exception as e:
-            print(f"Error loading safe areas: {e}")
+            debug_print("WEB_SERVER", "Error loading safe areas: %s", e)
     
     def save_safe_areas(self):
         """Save safe areas to file"""
         try:
             with open(self.SAFE_AREA_FILE, 'w') as f:
                 json.dump(self.safe_areas, f)
-            print(f"Saved {len(self.safe_areas)} safe area(s) to file")
+            debug_print("WEB_SERVER", "Saved %d safe area(s) to file", len(self.safe_areas))
             self.safe_areas_updated = True
             # Notify main.py that safe areas have been updated
             if self.safe_areas_callback:
                 self.safe_areas_callback(self.safe_areas)
             return True
         except Exception as e:
-            print(f"Error saving safe areas: {e}")
+            debug_print("WEB_SERVER", "Error saving safe areas: %s", e)
             return False
     
     def get_safe_areas(self):
@@ -112,12 +113,12 @@ class WebServer:
             elif path == "/command":
                 try:
                     header, body = request.split("\r\n\r\n", 1)
-                    print("[Command] Body:", body)
+                    debug_print("WEB_SERVER", "[Command] Body: %s", body)
                     msg = json.loads(body)
                     self.handle_command(msg)
                     conn.send(b"HTTP/1.1 200 OK\r\n\r\n")
                 except Exception as e:
-                    print("Command error:", e)
+                    debug_print("WEB_SERVER", "Command error: %s", e)
                     conn.send(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                 conn.close()
                 return
@@ -141,7 +142,7 @@ class WebServer:
                     else:
                         conn.send(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
                 except Exception as e:
-                    print("Set safe areas error:", e)
+                    debug_print("WEB_SERVER", "Set safe areas error: %s", e)
                     conn.send(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                 conn.close()
                 return
@@ -155,7 +156,7 @@ class WebServer:
             header = f"HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {len(body)}\r\n\r\n"
             conn.send(header.encode("utf-8") + body)
         except Exception as e:
-            print("HTTP error:", e)
+            debug_print("WEB_SERVER", "HTTP error: %s", e)
         finally:
             conn.close()
 
@@ -203,7 +204,7 @@ class WebServer:
             with open(self.STREAM_JPG_PATH, "rb") as f:
                 self.latest_jpeg = f.read()
         except Exception as e:
-            print("Error saving JPEG for stream:", e)
+            debug_print("WEB_SERVER", "Error saving JPEG for stream: %s", e)
 
     def get_control_flags(self):
         return self.control_flags
@@ -219,7 +220,7 @@ class WebServer:
             sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sk.bind(("0.0.0.0", self.HTTP_PORT))
             sk.listen(5)
-            print(f"[HTTP] Listening on port {self.HTTP_PORT}")
+            debug_print("WEB_SERVER", "[HTTP] Listening on port %d", self.HTTP_PORT)
             while True:
                 conn, addr = sk.accept()
                 threading.Thread(target=self.handle_http, args=(conn, addr), daemon=True).start()
@@ -228,3 +229,4 @@ class WebServer:
 
 # Create global instance for backward compatibility
 web_server = WebServer()
+

@@ -1,6 +1,10 @@
 # camera_manager.py - Camera and display initialization (RTMP removed)
 
 from maix import camera, display, nn, image
+from debug_config import DebugLogger
+
+# Module-level debug logger instance
+logger = DebugLogger(tag="CAM_MGR", instance_enable=False)
 
 # Global references
 cam = None
@@ -35,9 +39,9 @@ def initialize_cameras():
     cam = camera.Camera(pose_extractor.input_width(), pose_extractor.input_height(), pose_extractor.input_format(), fps=60)
     disp = display.Display()
 
-    print(f"Camera initialized: {pose_extractor.input_width()}x{pose_extractor.input_height()} @ {cam.fps()} fps")
-    print(f"Pose extractor: /root/models/yolo11n_pose.mud")
-    print(f"Person detector: /root/models/yolo11n.mud")
+    logger.print("CAM_MGR", "Camera initialized: %sx%s @ %d fps", pose_extractor.input_width(), pose_extractor.input_height(), cam.fps())
+    logger.print("CAM_MGR", "Pose extractor: /root/models/yolo11n_pose.mud")
+    logger.print("CAM_MGR", "Person detector: /root/models/yolo11n.mud")
     
     return cam, disp, pose_extractor, detector
 

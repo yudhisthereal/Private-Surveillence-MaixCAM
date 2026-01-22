@@ -3,6 +3,11 @@
 import os
 import json
 import time
+import threading
+from debug_config import DebugLogger
+
+# Module-level debug logger instance
+logger = DebugLogger(tag="CTRL_MGR", instance_enable=False)
 
 # ============================================
 # FILE PATHS (defined locally to avoid circular imports)
@@ -45,7 +50,7 @@ class CameraStateManager:
         old_id = self._camera_id
         self._camera_id = camera_id
         if old_id != camera_id:
-            print(f"[CameraStateManager] Camera ID updated: {old_id} -> {camera_id}")
+            logger.print("CAM_STATE", "Camera ID updated: %s -> %s", old_id, camera_id)
     
     def get_registration_status(self):
         """Get current registration status"""
@@ -56,7 +61,7 @@ class CameraStateManager:
         old_status = self._registration_status
         self._registration_status = status
         if old_status != status:
-            print(f"[CameraStateManager] Registration status updated: {old_status} -> {status}")
+            logger.print("CAM_STATE", "Registration status updated: %s -> %s", old_status, status)
             if notify:
                 self._notify_status_change(status)
     
@@ -84,7 +89,7 @@ class CameraStateManager:
         """
         if callback not in self._status_change_callbacks:
             self._status_change_callbacks.append(callback)
-            print(f"[CameraStateManager] Registered status change callback")
+            logger.print("CAM_STATE", "Registered status change callback")
     
     def unregister_status_change_callback(self, callback):
         """Unregister a status change callback"""
@@ -97,7 +102,7 @@ class CameraStateManager:
             try:
                 callback(new_status)
             except Exception as e:
-                print(f"[CameraStateManager] Callback error: {e}")
+                logger.print("CAM_STATE", "Callback error: %s", e)
     
     def get_state(self):
         """Get complete camera state as a dictionary"""
@@ -165,11 +170,11 @@ def save_control_flags():
         
         with open(LOCAL_FLAGS_FILE, 'w') as f:
             json.dump(flags_data, f, indent=2)
-        print(f"Control flags saved locally to {LOCAL_FLAGS_FILE}")
+        logger.print("FLAGS", "Control flags saved locally to %s", LOCAL_FLAGS_FILE)
         return True
         
     except Exception as e:
-        print(f"Error saving control flags: {e}")
+        logger.print("FLAGS", "Error saving control flags: %s", e)
         return False
 
 def load_initial_flags():
@@ -187,12 +192,12 @@ def load_initial_flags():
                         for key in control_flags.keys():
                             if key in data["control_flags"]:
                                 control_flags[key] = data["control_flags"][key]
-                        print(f"Loaded flags from local storage (saved {((current_time - saved_time)/1000):.0f}s ago)")
+                        logger.print("FLAGS", "Loaded flags from local storage (saved %ds ago)", (current_time - saved_time) / 1000)
                         return True
                     else:
-                        print(f"Local flags too old ({((current_time - saved_time)/1000):.0f}s), ignoring")
+                        logger.print("FLAGS", "Local flags too old (%ds), ignoring", (current_time - saved_time) / 1000)
     except Exception as e:
-        print(f"Error loading initial flags from local file: {e}")
+        logger.print("FLAGS", "Error loading initial flags from local file: %s", e)
     
     return False
 
@@ -206,7 +211,7 @@ def update_control_flag(flag_name, value):
         old_value = control_flags[flag_name]
         if old_value != value:
             control_flags[flag_name] = value
-            print(f"[SYNC] Flag updated: {flag_name} = {value}")
+            logger.print("FLAGS", "Flag updated: %s = %s", flag_name, value)
             notify_flag_change(flag_name, value)
             save_control_flags()
         return True
@@ -221,7 +226,7 @@ def update_control_flags_from_server(flags_data):
             new_value = flags_data[key]
             if old_value != new_value:
                 control_flags[key] = new_value
-                print(f"[SYNC] Flag updated: {key} = {new_value}")
+                logger.print("FLAGS", "Flag updated: %s = %s", key, new_value)
                 flags_updated = True
     
     if flags_updated:
@@ -300,13 +305,13 @@ def load_safe_areas():
         if os.path.exists(SAFE_AREA_FILE):
             with open(SAFE_AREA_FILE, 'r') as f:
                 safe_areas = json.load(f)
-            print(f"Loaded {len(safe_areas)} safe area(s) from file")
+            logger.print("SAFE_AREA", "Loaded %d safe area(s) from file", len(safe_areas))
             return safe_areas
         else:
-            print("No safe areas file found, using default")
+            logger.print("SAFE_AREA", "No safe areas file found, using default")
             return []
     except Exception as e:
-        print(f"Error loading safe areas: {e}")
+        logger.print("SAFE_AREA", "Error loading safe areas: %s", e)
         return []
 
 def save_safe_areas(safe_areas):
@@ -314,10 +319,10 @@ def save_safe_areas(safe_areas):
     try:
         with open(SAFE_AREA_FILE, 'w') as f:
             json.dump(safe_areas, f, indent=2)
-        print(f"Saved {len(safe_areas)} safe area(s) to file")
+        logger.print("SAFE_AREA", "Saved %d safe area(s) to file", len(safe_areas))
         return True
     except Exception as e:
-        print(f"Error saving safe areas: {e}")
+        logger.print("SAFE_AREA", "Error saving safe areas: %s", e)
         return False
 
 def update_safety_checker_polygons(safe_areas):
@@ -329,7 +334,7 @@ def update_safety_checker_polygons(safe_areas):
             if isinstance(polygon, list) and len(polygon) >= 3:
                 safety_checker.add_safe_polygon(polygon)
         
-        print(f"Updated safety checker with {len(safe_areas)} polygon(s)")
+        logger.print("SAFE_AREA", "Updated safety checker with %d polygon(s)", len(safe_areas))
         
         # Save to local file
         save_safe_areas(safe_areas)
@@ -337,7 +342,7 @@ def update_safety_checker_polygons(safe_areas):
         return True
         
     except Exception as e:
-        print(f"Error updating safety checker: {e}")
+        logger.print("SAFE_AREA", "Error updating safety checker: %s", e)
         return False
 
 def add_safe_area(polygon):
@@ -345,7 +350,7 @@ def add_safe_area(polygon):
     global safety_checker
     
     safety_checker.add_safe_polygon(polygon)
-    print(f"Added safe area polygon with {len(polygon)} points")
+    logger.print("SAFE_AREA", "Added safe area polygon with %d points", len(polygon))
     
     # Save all safe areas
     save_all_safe_areas()
@@ -355,7 +360,7 @@ def clear_safe_areas():
     """Clear all safe areas"""
     if safety_checker:
         safety_checker.clear_safe_polygons()
-        print("Cleared all safe areas")
+        logger.print("SAFE_AREA", "Cleared all safe areas")
         save_safe_areas([])
 
 def save_all_safe_areas():
@@ -383,7 +388,6 @@ def body_in_safe_zone(body_keypoints, check_method=CheckMethod.TORSO_HEAD):
 # ============================================
 
 import requests
-from debug_config import debug_print
 
 # Import STREAMING_HTTP_URL here to avoid circular import
 # This is done at the end so that config.py can safely import from control_manager
@@ -408,7 +412,7 @@ def send_background_updated(timestamp):
             "Command": "background_updated",
             "Value": {"timestamp": timestamp}
         }
-        debug_print("API_REQUEST", "%s | endpoint: /api/stream/command | payload: %s", "POST", str(payload)[:100])
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/command | payload: %s", "POST", str(payload)[:100])
         response = requests.post(
             url,
             json=payload,
@@ -417,7 +421,7 @@ def send_background_updated(timestamp):
         )
         return response.status_code == 200
     except Exception as e:
-        print(f"Background update notification error: {e}")
+        logger.print("CTRL_MGR", "Background update notification error: %s", e)
         return False
 
 def get_camera_state_from_server():
@@ -426,13 +430,13 @@ def get_camera_state_from_server():
         camera_id = get_current_camera_id()
         STREAMING_HTTP_URL = _get_streaming_http_url()
         url = f"{STREAMING_HTTP_URL}/api/stream/camera-state?camera_id={camera_id}"
-        debug_print("API_REQUEST", "%s | endpoint: /api/stream/camera-state | params: camera_id=%s", "GET", camera_id)
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/camera-state | params: camera_id=%s", "GET", camera_id)
         response = requests.get(url, timeout=2.0)
         if response.status_code == 200:
             return response.json()
         return None
     except Exception as e:
-        print(f"Get camera state error: {e}")
+        logger.print("CTRL_MGR", "Get camera state error: %s", e)
         return None
 
 def get_safe_areas_from_server():
@@ -441,36 +445,44 @@ def get_safe_areas_from_server():
         camera_id = get_current_camera_id()
         STREAMING_HTTP_URL = _get_streaming_http_url()
         url = f"{STREAMING_HTTP_URL}/api/stream/safe-areas?camera_id={camera_id}"
-        debug_print("API_REQUEST", "%s | endpoint: /api/stream/safe-areas | params: camera_id=%s", "GET", camera_id)
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/safe-areas | params: camera_id=%s", "GET", camera_id)
         response = requests.get(url, timeout=2.0)
         if response.status_code == 200:
             return response.json()
         return []
     except Exception as e:
-        print(f"Get safe areas error: {e}")
+        logger.print("CTRL_MGR", "Get safe areas error: %s", e)
         return []
 
 def report_state(rtmp_connected=False, is_recording=False):
-    """Report camera state to streaming server"""
-    try:
-        camera_id = get_current_camera_id()
-        STREAMING_HTTP_URL = _get_streaming_http_url()
-        state_report = {
-            "CameraId": camera_id,
-            "Status": "online",
-            "IsRecording": is_recording,
-            "RtmpConnected": rtmp_connected
-        }
-        url = f"{STREAMING_HTTP_URL}/api/stream/report-state"
-        debug_print("API_REQUEST", "%s | endpoint: /api/stream/report-state | payload: %s", "POST", str(state_report)[:100])
-        response = requests.post(
-            url,
-            json=state_report,
-            headers={'Content-Type': 'application/json'},
-            timeout=2.0
-        )
-        return response.status_code == 200
-    except Exception as e:
-        print(f"State report error: {e}")
-        return False
+    """Report camera state to streaming server (async)
+    
+    Note: This is called from StateReporterWorker which already runs in a separate thread,
+    but we make the request itself async to avoid blocking the worker thread.
+    """
+    def _send():
+        try:
+            camera_id = get_current_camera_id()
+            STREAMING_HTTP_URL = _get_streaming_http_url()
+            state_report = {
+                "CameraId": camera_id,
+                "Status": "online",
+                "IsRecording": is_recording,
+                "RtmpConnected": rtmp_connected
+            }
+            url = f"{STREAMING_HTTP_URL}/api/stream/report-state"
+            logger.print("API_REQUEST", "%s | endpoint: /api/stream/report-state | payload: %s", "POST", str(state_report)[:100])
+            requests.post(
+                url,
+                json=state_report,
+                headers={'Content-Type': 'application/json'},
+                timeout=2.0
+            )
+        except Exception as e:
+            logger.print("CTRL_MGR", "State report error: %s", e)
+    
+    # Run in background thread for true async behavior
+    thread = threading.Thread(target=_send, daemon=True)
+    thread.start()
+    return True
 

@@ -1,5 +1,10 @@
 # judge_fall.py
 
+from debug_config import DebugLogger
+
+# Module-level debug logger instance
+logger = DebugLogger(tag="FALL_DETECT", instance_enable=False)
+
 FALL_COUNT_THRES = 2  # how many consecutive falls required to confirm
 
 # persistent counters for consecutive falls for different algorithms
@@ -69,13 +74,13 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     dh = pre_bbox[3] - cur_bbox[3]
     v_height = dh / elapsed_ms
 
-    print(f"[DEBUG] v_top = {v_top:.6f}, v_height = {v_height:.6f}, threshold = {fallParam['v_bbox_y']}")
+    logger.print("FALL_DETECT", "v_top=%.6f, v_height=%.6f, threshold=%s", v_top, v_height, fallParam['v_bbox_y'])
 
     if use_hme:
         # HME mode: use approximate values
         torso_angle = torso_angle_approx
         thigh_uprightness = thigh_uprightness_approx
-        print(f"[DEBUG HME] Approx torso_angle={torso_angle}, thigh_uprightness={thigh_uprightness}, label={label}")
+        logger.print("FALL_DETECT", "HME mode: torso_angle=%s, thigh_uprightness=%s, label=%s", torso_angle, thigh_uprightness, label)
     else:
         # Plain mode: extract from pose_data
         torso_angle = None
@@ -84,7 +89,7 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
         if pose_data and isinstance(pose_data, dict):
             torso_angle = pose_data.get('torso_angle')
             thigh_uprightness = pose_data.get('thigh_uprightness')
-            print(f"[DEBUG POSE] torso_angle={torso_angle}, thigh_uprightness={thigh_uprightness}")
+            logger.print("FALL_DETECT", "Pose mode: torso_angle=%s, thigh_uprightness=%s", torso_angle, thigh_uprightness)
 
     # Calculate bbox motion evidence
     bbox_motion_detected = (v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"])
@@ -138,15 +143,14 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     if flexible_pose_condition:
         if algorithm3_counter >= FALL_COUNT_THRES:
             fall_detected_flexible = True
-            print(f"[FLEXIBLE VERIFICATION] Fall detected using flexible verification")
+            logger.print("FALL_DETECT", "Fall detected using flexible verification")
 
     # Determine fall status for each algorithm
     if counter_bbox_only >= FALL_COUNT_THRES:
-        print(f"[ALGORITHM 1] Fall detected (BBox only, counter={counter_bbox_only})")
+        logger.print("FALL_DETECT", "Fall detected (BBox only, counter=%d)", counter_bbox_only)
         fall_detected_bbox_only = True
-    
     if counter_motion_pose_and >= FALL_COUNT_THRES:
-        print(f"[ALGORITHM 2] Fall detected (Motion+Pose AND, counter={counter_motion_pose_and})")
+        logger.print("FALL_DETECT", "Fall detected (Motion+Pose AND, counter=%d)", counter_motion_pose_and)
         fall_detected_motion_pose_and = True
 
     return (
