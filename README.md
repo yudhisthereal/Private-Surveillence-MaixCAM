@@ -6,7 +6,7 @@
 
 A privacy-preserving patient monitoring system built for the **MaixCAM** platform that provides real-time pose estimation, fall detection, and remote monitoring capabilities while protecting patient privacy through intelligent background management and optional homomorphic encryption.
 
-> **⚠️ Important Requirement**: You must have a **MaixCAM device** to run this application. This software is specifically designed for the MaixCAM hardware platform and will not work on conventional computers or other embedded systems.
+> **⚠️ Important Requirement**: This software is optimized for the **MaixCAM hardware platform**. However, a **PC-compatible version** (`main-alt.py`) is provided for development and testing on standard computers with webcams.
 
 ## 📋 System Architecture
 
@@ -159,6 +159,42 @@ This application **requires a MaixCAM device**. It will not run on conventional 
 - MicroSD card (8GB+ recommended)
 - Wi-Fi network (2.4GHz recommended for better range)
 - Power supply (USB-C, 5V/2A recommended)
+
+### 💻 Development on PC / Laptop (Alternative)
+
+For development and testing without a MaixCAM device, a PC-compatible version is available:
+
+**Prerequisites:**
+- Python 3.8+
+- Webcam
+- `mediapipe` (for multi-person pose estimation)
+- `ultralytics` (for YOLO detection)
+- `opencv-python`
+
+**Setup:**
+1. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Linux/Mac
+   # venv\Scripts\activate   # Windows
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   pip install mediapipe ultralytics opencv-python
+   ```
+
+**Running:**
+Run the alternative main script:
+```bash
+python main-alt.py
+```
+
+**Key Differences:**
+- Uses **MediaPipe Pose** (default) or YOLO11 for pose estimation.
+- Simulates MaixCAM hardware APIs using mocks.
+- Displays output in a standard OpenCV window ("Private CCTV").
+- Resolution is adapted to **320x224** to match MaixCAM constraints.
 
 ### Model Files Required
 
