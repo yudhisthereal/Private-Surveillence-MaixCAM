@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import CameraStateManager from control_manager for proper state management
-# This must be done early to ensure singleton pattern works correctly
 from control_manager import camera_state_manager
 
 # ============================================
@@ -21,8 +20,6 @@ from control_manager import camera_state_manager
 STREAMING_SERVER_IP = os.getenv("STREAMING_SERVER_IP", "103.150.93.198")
 STREAMING_SERVER_PORT = int(os.getenv("STREAMING_SERVER_PORT", "8000"))
 STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
-# OBSOLETE: RTMP functionality has been removed
-# RTMP_SERVER_URL = f"rtmp://{STREAMING_SERVER_IP}:1935"
 
 # ============================================
 # CAMERA IDENTITY
@@ -30,6 +27,51 @@ STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
 CAMERA_INFO_FILE = "/root/camera_info.json"
 CAMERA_ID = None
 CAMERA_NAME = None
+
+# ============================================
+# RECORDING PARAMETERS
+# ============================================
+MIN_HUMAN_FRAMES_TO_START = 3
+NO_HUMAN_FRAMES_TO_STOP = 30  # Will be overridden by NO_HUMAN_SECONDS_TO_STOP
+NO_HUMAN_SECONDS_TO_STOP = 5  # 5 seconds at 60fps = 300 frames before confirming no person
+MAX_RECORDING_DURATION_MS = 90000
+
+# Background update settings
+UPDATE_INTERVAL_MS = 10000
+NO_HUMAN_CONFIRM_FRAMES = 10
+STEP = 8
+
+# ============================================
+# ASYNC WORKER SETTINGS
+# ============================================
+FLAG_SYNC_INTERVAL_MS = 1000
+SAFE_AREA_SYNC_INTERVAL_MS = 5000
+STATE_REPORT_INTERVAL_MS = 30000
+FRAME_UPLOAD_INTERVAL_MS = 500
+
+# ============================================
+# LOCAL FILE PATHS
+# ============================================
+LOCAL_FLAGS_FILE = "/root/control_flags.json"
+SAFE_AREA_FILE = "/root/safe_areas.json"
+BACKGROUND_PATH = "/root/static/background.jpg"
+LOCAL_PORT = 8080
+
+# Garbage Collection
+GC_INTERVAL_MS = 30000
+
+# Pose Analysis
+POSE_ANALYSIS_INTERVAL_MS = 50
+
+# ============================================
+# ANALYTICS SERVER CONFIGURATION (loaded from .env)
+# ============================================
+ANALYTICS_SERVER_IP = os.getenv("ANALYTICS_SERVER_IP", "102.127.136.213")
+ANALYTICS_SERVER_PORT = int(os.getenv("ANALYTICS_SERVER_PORT", "5000"))
+ANALYTICS_API_URL = f"http://{ANALYTICS_SERVER_IP}:{ANALYTICS_SERVER_PORT}"
+ANALYTICS_TIMEOUT = 10
+ANALYTICS_RETRY_COUNT = 3
+ANALYTICS_RETRY_BACKOFF = 1.0  # seconds
 
 def get_local_ip():
     """Get local IP address"""
@@ -223,46 +265,4 @@ def initialize_camera():
 
     return CAMERA_ID, CAMERA_NAME, registration_status, local_ip
 
-# ============================================
-# RECORDING PARAMETERS
-# ============================================
-MIN_HUMAN_FRAMES_TO_START = 3
-NO_HUMAN_FRAMES_TO_STOP = 30  # Will be overridden by NO_HUMAN_SECONDS_TO_STOP
-NO_HUMAN_SECONDS_TO_STOP = 5  # 5 seconds at 60fps = 300 frames before confirming no person
-MAX_RECORDING_DURATION_MS = 90000
-
-# Background update settings
-UPDATE_INTERVAL_MS = 10000
-NO_HUMAN_CONFIRM_FRAMES = 10
-STEP = 8
-
-# ============================================
-# ASYNC WORKER SETTINGS
-# ============================================
-FLAG_SYNC_INTERVAL_MS = 1000
-SAFE_AREA_SYNC_INTERVAL_MS = 5000
-STATE_REPORT_INTERVAL_MS = 30000
-FRAME_UPLOAD_INTERVAL_MS = 500
-
-# ============================================
-# LOCAL FILE PATHS
-# ============================================
-LOCAL_FLAGS_FILE = "/root/control_flags.json"
-SAFE_AREA_FILE = "/root/safe_areas.json"
-BACKGROUND_PATH = "/root/static/background.jpg"
-LOCAL_PORT = 8080
-
-# Garbage Collection
-GC_INTERVAL_MS = 30000
-
-# Pose Analysis
-POSE_ANALYSIS_INTERVAL_MS = 50
-
-# ============================================
-# ANALYTICS SERVER CONFIGURATION (loaded from .env)
-# ============================================
-ANALYTICS_API_URL = os.getenv("ANALYTICS_API_URL", "http://102.127.136.213:5000")
-ANALYTICS_TIMEOUT = 10
-ANALYTICS_RETRY_COUNT = 3
-ANALYTICS_RETRY_BACKOFF = 1.0  # seconds
 

@@ -176,7 +176,8 @@ Place these files in `/root/models/` on your MaixCAM:
 ```bash
 STREAMING_SERVER_IP=your.server.ip
 STREAMING_SERVER_PORT=8000
-ANALYTICS_API_URL=http://analytics.server:5000  # Optional
+ANALYTICS_SERVER_IP=analytics.server
+ANALYTICS_SERVER_PORT=5000
 ```
 
 2. **Configure Wi-Fi** in `main.py` or via environment:

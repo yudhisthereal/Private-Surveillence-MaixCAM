@@ -10,7 +10,7 @@ import threading
 from debug_config import DebugLogger
 
 # Module-level debug logger instance
-logger = DebugLogger(tag="WORKERS", instance_enable=True)
+logger = DebugLogger(tag="WORKERS", instance_enable=False)
 from config import (
     FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
@@ -22,7 +22,7 @@ from control_manager import (
     camera_state_manager
 )
 from streaming import send_frame_to_server, send_background_to_server
-from tools.time_utils import time_ms, FrameProfiler
+from tools.time_utils import time_ms, TaskProfiler
 
 class FlagAndSafeAreaSyncWorker(threading.Thread):
     """Background thread for syncing flags AND safe areas from streaming server"""
@@ -129,9 +129,9 @@ class StateReporterWorker(threading.Thread):
                 
                 # Check if it's time to send a heartbeat/report
                 if current_time - self.last_report_time > self.report_interval:
-                    # Report state using the helper function (RTMP always False now)
+                    # Report state using the helper function
                     success = report_state(
-                        rtmp_connected=False,  # OBSOLETE: RTMP removed
+                        rtmp_connected=False,
                         is_recording=get_is_recording()
                     )
                     
@@ -192,7 +192,8 @@ class FrameUploadWorker(threading.Thread):
         self.background_upload_count = 0
         
         # Profiler for upload FPS calculation
-        self.upload_profiler = FrameProfiler(print_interval=30, enabled=False)
+        self.upload_profiler = TaskProfiler(task_name="Frame Upload", print_interval=30, enabled=False)
+        self.upload_profiler.register_subtasks(["frame_upload"])
         self.upload_profiler.start_frame()
         self.upload_profiler.start_task("frame_upload")
         
@@ -345,11 +346,11 @@ class FrameUploadWorker(threading.Thread):
 
 class PingWorker(threading.Thread):
     """Background thread for sending periodic pings to streaming server
-    
+
     This worker pings the streaming server every 250ms to notify the server
     that this camera is connected and alive. Uses fire-and-forget pattern.
-    
-    IMPORTANT: Pings are only sent when the camera is registered (not pending/unregistered).
+
+    Pings are only sent when the camera is registered (not pending/unregistered).
     The registration status is checked dynamically using CameraStateManager.
     """
     
@@ -554,12 +555,6 @@ def get_default_control_flags():
         "hme": False
     }
 
-# OBSOLETE: RTMP-related functions kept as reference only (commented out):
-# def update_rtmp_connected(value):
-#     """OBSOLETE: RTMP has been removed"""
-#     global rtmp_connected
-#     rtmp_connected = False  # Always False now
-
 # Recording state synchronization
 _recording_state = {
     "is_recording": False
@@ -642,18 +637,17 @@ class AnalyticsClient:
     
     def analyze_pose(self, use_hme=False, encrypted_features=None, bbox=None, track_id=0, camera_id=""):
         """Analyze pose from encrypted features (HME mode) or skip (plain mode).
-        
-        IMPORTANT: This method NEVER accepts or processes plain keypoints.
+
         - When use_hme=True: Analyze encrypted features for privacy-preserving pose estimation
         - When use_hme=False: Returns None (local processing should be used instead)
-        
+
         Args:
             use_hme: Whether to use Homomorphic Encryption (must be True to process)
             encrypted_features: Dictionary of encrypted features - required when use_hme=True
             bbox: Optional bounding box [x, y, width, height]
             track_id: Optional track ID for multi-object tracking
             camera_id: Optional camera identifier
-        
+
         Returns:
             dict: Pose analysis result or None on failure/not applicable
         """
@@ -851,9 +845,9 @@ class AnalyticsWorker(threading.Thread):
     
     def _process_track(self, track_data):
         """Process a single track data item.
-        
-        IMPORTANT: This method ONLY processes encrypted features. Plain keypoints are never sent.
-        
+
+        This method ONLY processes encrypted features. Plain keypoints are never sent.
+
         Args:
             track_data: Dictionary containing:
                 - track_id: int
@@ -959,14 +953,13 @@ def set_tracks_worker(worker):
 
 def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
     """Send track data to analytics queue for processing.
-    
-    IMPORTANT: This function NEVER sends plain keypoints to Analytics Server.
+
     - When use_hme=True: Send encrypted features only
     - When use_hme=False: Do not send anything to Analytics Server (fall back to local processing)
-    
+
     This function is called from the main thread to queue track data
     for the AnalyticsWorker to process.
-    
+
     Args:
         track_id: The track ID
         bbox: Current bounding box [x, y, width, height]
@@ -974,7 +967,7 @@ def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=N
         elapsed_ms: Time since last frame in milliseconds
         use_hme: Whether to use HME mode (must be True to send to Analytics)
         encrypted_features: Dictionary of encrypted features - required when use_hme=True
-    
+
     Returns:
         bool: True if data was queued successfully, False otherwise
     """
@@ -1088,7 +1081,8 @@ class TracksSenderWorker(threading.Thread):
         self.previous_bboxes = {}
         
         # Profiler for tracks sending
-        self.profiler = FrameProfiler(print_interval=30, enabled=True)
+        self.profiler = TaskProfiler(task_name="Tracks Sender", print_interval=30, enabled=False)
+        self.profiler.register_subtasks(["tracks_send", "streaming_send", "analytics_send"])
         self.profiler.start_frame()
         
     def update_tracks(self, processed_tracks):

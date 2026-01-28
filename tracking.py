@@ -150,84 +150,81 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
         pass
     
     # Find corresponding YOLO object
-    for tracker_obj in track.history[-1:]:
+    # Find corresponding YOLO object
+    # We want to associate the Tracked Object (detector) with a Pose Object (extractor)
+    # Strategy: Find the closest Pose Object to the current Tracked Object
+    if len(track.history) > 0 and len(objs) > 0:
+        tracker_obj = track.history[-1]
+        
+        # Find closest pose object (simple Euclidean distance of top-left corner)
+        # Ideally center distance is better, but this matches original logic style
+        best_obj = None
+        min_dist = float('inf')
+        
         for obj in objs:
-            if abs(obj.x - tracker_obj.x) < 10 and abs(obj.y - tracker_obj.y) < 10:
-                keypoints_np = to_keypoints_np(obj.points)
+            dist = (obj.x - tracker_obj.x)**2 + (obj.y - tracker_obj.y)**2
+            if dist < min_dist:
+                min_dist = dist
+                best_obj = obj
+        
+        # Always use the best match if we have one (User Request: "Always allow")
+        if best_obj:
+            obj = best_obj
+            keypoints_np = to_keypoints_np(obj.points)
+            
+            # Local tracking - add to history
+            if track.id not in online_targets["id"]:
+                online_targets["id"].append(track.id)
+                online_targets["bbox"].append(queue.Queue(maxsize=queue_size))
+                online_targets["points"].append(queue.Queue(maxsize=queue_size))
+            
+            idx = online_targets["id"].index(track.id)
+            
+            if online_targets["bbox"][idx].qsize() >= queue_size:
+                online_targets["bbox"][idx].get()
+                online_targets["points"][idx].get()
+            
+            online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
+            online_targets["points"][idx].put(obj.points)
                 
-                # Local tracking - add to history
-                if track.id not in online_targets["id"]:
-                    online_targets["id"].append(track.id)
-                    online_targets["bbox"].append(queue.Queue(maxsize=queue_size))
-                    online_targets["points"].append(queue.Queue(maxsize=queue_size))
+            # Determine status based on analytics_mode and use_analytics result
+            if analytics_mode:
+                # In analytics mode, use AnalyticsWorker results
+                use_analytics = False
                 
-                idx = online_targets["id"].index(track.id)
+                # Get analytics data from shared state
+                analytics_pose = get_analytics_pose_data(track.id)
+                analytics_fall = get_analytics_fall_data(track.id)
                 
-                if online_targets["bbox"][idx].qsize() >= queue_size:
-                    online_targets["bbox"][idx].get()
-                    online_targets["points"][idx].get()
-                
-                online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
-                online_targets["points"][idx].put(obj.points)
-                
-                # Determine status based on analytics_mode and use_analytics result
-                if analytics_mode:
-                    # In analytics mode, use AnalyticsWorker results
-                    use_analytics = False
+                if analytics_pose and analytics_fall:
+                    # Analytics server has results for this track
+                    pose_label = analytics_pose.get("label", "unknown")
                     
-                    # Get analytics data from shared state
-                    analytics_pose = get_analytics_pose_data(track.id)
-                    analytics_fall = get_analytics_fall_data(track.id)
+                    # Check fall detection results from analytics server
+                    fall_detected_method1 = analytics_fall.get("fall_detected_method1", False)
+                    fall_detected_method2 = analytics_fall.get("fall_detected_method2", False)
+                    fall_detected_method3 = analytics_fall.get("fall_detected_method3", False)
+                    counter_method1 = analytics_fall.get("counter_method1", 0)
+                    counter_method2 = analytics_fall.get("counter_method2", 0)
+                    counter_method3 = analytics_fall.get("counter_method3", 0)
                     
-                    if analytics_pose and analytics_fall:
-                        # Analytics server has results for this track
-                        pose_label = analytics_pose.get("label", "unknown")
-                        
-                        # Check fall detection results from analytics server
-                        fall_detected_method1 = analytics_fall.get("fall_detected_method1", False)
-                        fall_detected_method2 = analytics_fall.get("fall_detected_method2", False)
-                        fall_detected_method3 = analytics_fall.get("fall_detected_method3", False)
-                        counter_method1 = analytics_fall.get("counter_method1", 0)
-                        counter_method2 = analytics_fall.get("counter_method2", 0)
-                        counter_method3 = analytics_fall.get("counter_method3", 0)
-                        
-                        # Update fall_ids and unsafe_ids based on analytics results
-                        if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
-                            fall_ids.add(track.id)
+                    # Update fall_ids and unsafe_ids based on analytics results
+                    if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
+                        fall_ids.add(track.id)
+                        unsafe_ids.discard(track.id)
+                        use_analytics = True
+                    elif counter_method2 > 0 or counter_method1 > 0:
+                        unsafe_ids.add(track.id)
+                        fall_ids.discard(track.id)
+                        use_analytics = True
+                    else:
+                        # No detection, check if we should remove from unsafe
+                        if track.id in unsafe_ids:
                             unsafe_ids.discard(track.id)
-                            use_analytics = True
-                        elif counter_method2 > 0 or counter_method1 > 0:
-                            unsafe_ids.add(track.id)
-                            fall_ids.discard(track.id)
-                            use_analytics = True
-                        else:
-                            # No detection, check if we should remove from unsafe
-                            if track.id in unsafe_ids:
-                                unsafe_ids.discard(track.id)
-                            use_analytics = True
-                    
-                    if not use_analytics:
-                        # Analytics server not available or no data yet, fall back to local processing
-                        if online_targets["bbox"][idx].qsize() >= 2:
-                            fall_result = check_fall(tracker_obj, online_targets, idx, fps)
-                            if fall_result:
-                                fall_info, pose_label, encrypted_features = fall_result
-                                (fall_detected_method1, counter_method1,
-                                 fall_detected_method2, counter_method2,
-                                 fall_detected_method3, counter_method3) = fall_info
-                                
-                                # Update fall_ids and unsafe_ids based on detection results
-                                if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
-                                    fall_ids.add(track.id)
-                                    unsafe_ids.discard(track.id)
-                                elif counter_method2 > 0 or counter_method1 > 0:
-                                    unsafe_ids.add(track.id)
-                                    fall_ids.discard(track.id)
-                                else:
-                                    if track.id in unsafe_ids:
-                                        unsafe_ids.discard(track.id)
-                else:
-                    # Not in analytics mode, use local fall detection
+                        use_analytics = True
+                
+                if not use_analytics:
+                    # Analytics server not available or no data yet, fall back to local processing
                     if online_targets["bbox"][idx].qsize() >= 2:
                         fall_result = check_fall(tracker_obj, online_targets, idx, fps)
                         if fall_result:
@@ -244,28 +241,48 @@ def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton
                                 unsafe_ids.add(track.id)
                                 fall_ids.discard(track.id)
                             else:
-                                # No detection, check if we should remove from unsafe
                                 if track.id in unsafe_ids:
                                     unsafe_ids.discard(track.id)
-                
-                # Save to skeleton if recording
-                if is_recording and skeleton_saver:
-                    safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
-                    skeleton_saver.add_keypoints(frame_id, track.id, obj.points, safety_status)
-                
-                track_result = {
-                    "track_id": track.id,
-                    "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
-                    "keypoints": obj.points,
-                    "keypoints_np": keypoints_np,
-                    "pose_label": pose_label,  # Return pose label for analytics/local processing
-                    "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking"),
-                    "encrypted_features": encrypted_features,  # Encrypted features for analytics server (when use_hme=True)
-                    "use_hme": use_hme  # Whether HME is enabled (True only when analytics server is available)
-                }
-                # print(f"process_track() -> {track_result}")
-                
-                return track_result
+            else:
+                # Not in analytics mode, use local fall detection
+                if online_targets["bbox"][idx].qsize() >= 2:
+                    fall_result = check_fall(tracker_obj, online_targets, idx, fps)
+                    if fall_result:
+                        fall_info, pose_label, encrypted_features = fall_result
+                        (fall_detected_method1, counter_method1,
+                         fall_detected_method2, counter_method2,
+                         fall_detected_method3, counter_method3) = fall_info
+                        
+                        # Update fall_ids and unsafe_ids based on detection results
+                        if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
+                            fall_ids.add(track.id)
+                            unsafe_ids.discard(track.id)
+                        elif counter_method2 > 0 or counter_method1 > 0:
+                            unsafe_ids.add(track.id)
+                            fall_ids.discard(track.id)
+                        else:
+                            # No detection, check if we should remove from unsafe
+                            if track.id in unsafe_ids:
+                                unsafe_ids.discard(track.id)
+            
+            # Save to skeleton if recording
+            if is_recording and skeleton_saver:
+                safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
+                skeleton_saver.add_keypoints(frame_id, track.id, obj.points, safety_status)
+            
+            track_result = {
+                "track_id": track.id,
+                "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
+                "keypoints": obj.points,
+                "keypoints_np": keypoints_np,
+                "pose_label": pose_label,  # Return pose label for analytics/local processing
+                "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking"),
+                "encrypted_features": encrypted_features,  # Encrypted features for analytics server (when use_hme=True)
+                "use_hme": use_hme  # Whether HME is enabled (True only when analytics server is available)
+            }
+            # print(f"process_track() -> {track_result}")
+            
+            return track_result
     
     return None
 

@@ -1,4 +1,4 @@
-# camera_manager.py - Camera and display initialization (RTMP removed)
+# camera_manager.py - Camera and display initialization
 
 from maix import camera, display, nn, image
 from debug_config import DebugLogger
@@ -12,11 +12,6 @@ disp = None
 pose_extractor = None
 detector = None  # Person detection using YOLOv8
 
-# OBSOLETE: RTMP functionality has been removed
-# Old code kept as reference only (commented out):
-# from maix import rtmp
-# rtmp_streamer = None
-# cam_rtmp = None  # OBSOLETE: Separate camera for RTMP no longer needed
 
 def initialize_cameras():
     """Initialize camera, display, and YOLO detectors
@@ -45,14 +40,6 @@ def initialize_cameras():
     
     return cam, disp, pose_extractor, detector
 
-# OBSOLETE: RTMP functions kept as reference only (commented out):
-# def setup_rtmp_stream(cam, camera_id):
-#     """OBSOLETE: RTMP streaming has been removed"""
-#     pass
-#
-# def stop_rtmp_stream():
-#     """OBSOLETE: RTMP streaming has been removed"""
-#     pass
 
 def load_fonts():
     """Load default fonts for image rendering"""

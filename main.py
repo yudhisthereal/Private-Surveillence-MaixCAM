@@ -32,7 +32,7 @@ from workers import (
 from tracking import (
     update_tracks, process_track, set_fps
 )
-from tools.time_utils import time_ms, FrameProfiler, get_timestamp_str
+from tools.time_utils import time_ms, TaskProfiler, get_timestamp_str
 
 import os
 import queue
@@ -153,7 +153,19 @@ def main():
     last_update_ms = time_ms()
     last_gc_time = time_ms()
     streaming_server_available = True
-    frame_profiler = FrameProfiler(enabled=False)
+    frame_profiler = TaskProfiler(task_name="Main", enabled=False)
+    frame_profiler.register_subtasks([
+        "async_updates",
+        "commands",
+        "background_check",
+        "human detect",
+        "display_prep",
+        "pose_extraction",
+        "tracking",
+        "recording",
+        "display",
+        "frame_upload"
+    ])
     frame_start_time = time_ms()
     
     # ============================================

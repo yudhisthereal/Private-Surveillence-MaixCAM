@@ -390,7 +390,6 @@ def body_in_safe_zone(body_keypoints, check_method=CheckMethod.TORSO_HEAD):
 import requests
 
 # Import STREAMING_HTTP_URL here to avoid circular import
-# This is done at the end so that config.py can safely import from control_manager
 def _get_streaming_http_url():
     """Get STREAMING_HTTP_URL from config (lazy import to avoid circular dependency)"""
     from config import STREAMING_HTTP_URL

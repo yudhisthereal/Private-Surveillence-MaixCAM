@@ -1,0 +1,630 @@
+# main-alt.py - PC adaptation of main.py
+# Runs on standard Laptop with Webcam using OpenCV and Ultralytics
+
+import os
+import sys
+import queue
+import gc
+import time as py_time
+import numpy as np
+import cv2
+
+# ============================================
+# MOCK MAIX MODULE (To prevent hardware access)
+# ============================================
+# ============================================
+# MOCK MAIX MODULE (To prevent hardware access)
+# ============================================
+from unittest.mock import MagicMock
+import types
+
+# Create a module-like object for maix.tracker
+tracker_module = types.ModuleType("maix.tracker")
+
+class PCTrackerObject:
+    def __init__(self, x, y, w, h, class_id, score):
+        self.x = int(x)
+        self.y = int(y)
+        self.w = int(w)
+        self.h = int(h)
+        self.class_id = int(class_id)
+        self.score = float(score)
+
+class PCTrack:
+    def __init__(self, track_id, obj):
+        self.id = track_id
+        self.lost = False
+        self.history = [obj]
+
+class PCByteTracker:
+    """Simple pass-through tracker for PC testing"""
+    def __init__(self, *args, **kwargs):
+        self.tracks = []
+        self.next_id = 1
+        
+    def update(self, objs):
+        # Simple ID assignment (no real tracking for now to ensure robustness)
+        # Just map input objects to tracks 1:1
+        res = []
+        for i, obj in enumerate(objs):
+            # In a real tracker we would match IDs. 
+            # Here we just treat index as ID for this frame (unstable IDs across frames but shows keypoints)
+            t = PCTrack(i + 1, obj)
+            res.append(t)
+        return res
+
+tracker_module.ByteTracker = PCByteTracker
+tracker_module.Object = PCTrackerObject
+
+sys.modules["maix"] = MagicMock()
+sys.modules["maix.app"] = MagicMock()
+sys.modules["maix.app"].need_exit.return_value = False
+sys.modules["maix.time"] = MagicMock()
+sys.modules["maix.image"] = MagicMock()
+sys.modules["maix.display"] = MagicMock()
+sys.modules["maix.camera"] = MagicMock()
+sys.modules["maix.nn"] = MagicMock()
+sys.modules["maix"].tracker = tracker_module
+
+# ============================================
+# PATH PATCHING (Must be before importing modules that use these constants)
+# ============================================
+import config
+import control_manager
+
+# Redirect paths from /root/ (MaixCAM) to local directory
+config.CAMERA_INFO_FILE = os.path.abspath("./camera_info.json")
+config.BACKGROUND_PATH = os.path.abspath("./static/background.jpg")
+
+control_manager.LOCAL_FLAGS_FILE = os.path.abspath("./control_flags.json")
+control_manager.SAFE_AREA_FILE = os.path.abspath("./safe_areas.json")
+
+# Create necessary directories
+os.makedirs("./static", exist_ok=True)
+os.makedirs("./recordings", exist_ok=True)
+os.makedirs("./extracted-skeleton-2d", exist_ok=True)
+
+# ============================================
+# IMPORTS
+# ============================================
+
+# Use PC adaptations
+import pc_camera_manager as camera_manager
+from pc_video_record import VideoRecorder
+
+from debug_config import DebugLogger
+# tools.wifi_connect skipped on PC
+from tools.skeleton_saver import SkeletonSaver2D
+from tools.safe_area import BodySafetyChecker
+
+from config import (
+    initialize_camera, save_camera_info, STREAMING_HTTP_URL,
+    BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START, NO_HUMAN_FRAMES_TO_STOP,
+    MAX_RECORDING_DURATION_MS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
+    GC_INTERVAL_MS, NO_HUMAN_SECONDS_TO_STOP
+)
+
+
+
+# Fix import: camera_manager above is the module pc_camera_manager
+# But main.py did: from camera_manager import initialize_cameras...
+# Since we imported pc_camera_manager as camera_manager, we can use it.
+from pc_camera_manager import initialize_cameras, load_fonts
+
+from control_manager import (
+    load_initial_flags, get_control_flags, send_background_updated, update_control_flags_from_server,
+    update_control_flag, get_flag, initialize_safety_checker,
+    update_safety_checker_polygons, load_safe_areas, camera_state_manager, register_status_change_callback
+)
+from workers import (
+    FlagAndSafeAreaSyncWorker, StateReporterWorker, FrameUploadWorker,
+    CommandReceiver, PingWorker, get_received_commands, handle_command,
+    update_is_recording, AnalyticsWorker,
+    send_track_to_analytics, is_analytics_server_available, set_analytics_queue, TracksSenderWorker,
+    set_tracks_worker, send_tracks_to_queue
+)
+from tracking import (
+    update_tracks, process_track, set_fps
+)
+from tools.time_utils import time_ms, TaskProfiler, get_timestamp_str
+
+logger = DebugLogger("MAIN", instance_enable=False)
+
+# ============================================
+# MAIN INITIALIZATION
+# ============================================
+
+def main():
+    """Main entry point"""
+    # 1. Initialize camera identity
+    CAMERA_ID, CAMERA_NAME, registration_status, local_ip = initialize_camera()
+    
+    # 2. Connect to WiFi (Skipped on PC)
+    server_ip = local_ip
+    logger.print("MAIN", "PC IP: %s", server_ip)
+    
+    # 3. Initialize cameras and detectors
+    cam, disp, pose_extractor, detector = initialize_cameras()
+    load_fonts()
+    
+    # 4. Initialize tools
+    recorder = VideoRecorder()
+    skeleton_saver_2d = SkeletonSaver2D()
+    skeleton_saver_2d.log_dir = os.path.abspath("./extracted-skeleton-2d") # Patch path
+    
+    # 5. Initialize safety checker
+    safety_checker = BodySafetyChecker()
+    initialize_safety_checker(safety_checker)
+    
+    # 6. Load initial configuration
+    logger.print("MAIN", "=== Loading Configuration ===")
+    load_initial_flags()
+    initial_safe_areas = load_safe_areas()
+    update_safety_checker_polygons(initial_safe_areas)
+    
+    # 7. Load or create background image
+    background_img = None
+    if os.path.exists(BACKGROUND_PATH):
+        background_img = cv2.imread(BACKGROUND_PATH)
+        logger.print("MAIN", "Loaded background image from file")
+    else:
+        # Initial read to set background
+        background_img = cam.read()
+        cv2.imwrite(BACKGROUND_PATH, background_img)
+        logger.print("MAIN", "Created new background image")
+    
+    # ============================================
+    # ASYNC WORKERS SETUP
+    # ============================================
+    flags_queue = queue.Queue(maxsize=10)
+    safe_areas_queue = queue.Queue(maxsize=5)
+    analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
+    tracks_queue = queue.Queue(maxsize=30)  # Queue for tracks sender
+    
+    # Start command server (might conflict on port 8080 if running on PC, but we'll try)
+    command_receiver = CommandReceiver()
+    command_receiver.start()
+    
+    # Start async workers
+    logger.print("MAIN", "Starting async workers...")
+    flag_sync_worker = FlagAndSafeAreaSyncWorker(
+        flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID
+    )
+    state_reporter_worker = StateReporterWorker(STREAMING_HTTP_URL, CAMERA_ID)
+    frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID)
+    ping_worker = PingWorker(STREAMING_HTTP_URL, CAMERA_ID)
+    
+    flag_sync_worker.start()
+    state_reporter_worker.start()
+    frame_upload_worker.start()
+    ping_worker.start()
+    
+    # Start Analytics Worker (only if analytics_mode is True)
+    analytics_worker = None
+    if get_flag("analytics_mode", False):
+        # Register the analytics queue with the workers module
+        set_analytics_queue(analytics_queue)
+        analytics_worker = AnalyticsWorker(analytics_queue, CAMERA_ID)
+        analytics_worker.start()
+        logger.print("MAIN", "[Analytics] Worker started (analytics_mode=True)")
+    else:
+        logger.print("MAIN", "[Analytics] Worker NOT started (analytics_mode=False)")
+    
+    # Start Tracks Sender Worker
+    tracks_sender = TracksSenderWorker(CAMERA_ID)
+    set_tracks_worker(tracks_sender)
+    tracks_sender.start()
+    logger.print("MAIN", "[TracksSender] Worker started")
+    
+    logger.print("MAIN", "Async workers started successfully")
+    
+    # Register callback for registration status changes
+    def on_registration_status_changed(new_status):
+        """Callback to handle registration status changes"""
+        nonlocal registration_status
+        old_status = registration_status
+        registration_status = new_status
+        logger.print("MAIN", "[StatusChange] Registration status changed: %s -> %s", old_status, new_status)
+        
+        # If camera was approved, save the updated info
+        if new_status == "registered" and old_status == "pending":
+            save_camera_info(CAMERA_ID, CAMERA_NAME, "registered", local_ip)
+    
+    register_status_change_callback(on_registration_status_changed)
+    
+    # ============================================
+    # STATE VARIABLES
+    # ============================================
+    frame_id = 0
+    human_presence_history = []
+    recording_start_time = 0
+    is_recording = False
+    background_update_in_progress = False
+    prev_human_present = False
+    no_human_counter = 0
+    last_update_ms = time_ms()
+    last_gc_time = time_ms()
+    streaming_server_available = True
+    frame_profiler = TaskProfiler(task_name="Main", enabled=False)
+    frame_profiler.register_subtasks([
+        "async_updates",
+        "commands",
+        "background_check",
+        "human detect",
+        "display_prep",
+        "pose_extraction",
+        "tracking",
+        "recording",
+        "display",
+        "frame_upload"
+    ])
+    frame_start_time = time_ms()
+    
+    # ============================================
+    # MAIN LOOP
+    # ============================================
+    frame_counter = 0
+    
+    logger.print("MAIN", "=== Camera Stream Started (PC) ===")
+    logger.print("MAIN", "Press 'q' or 'ESC' in the display window to exit.")
+    
+    control_flags = get_control_flags()
+    
+    # FORCE SHOW RAW ON PC so the user sees the video stream
+    control_flags['show_raw'] = True
+    # Also update the global flag so it persists
+    update_control_flag('show_raw', True)
+    
+    logger.print("MAIN", "Final Configuration:")
+    logger.print("MAIN", "  Camera: %s (%s)", CAMERA_NAME, CAMERA_ID)
+    logger.print("MAIN", "  Status: %s", registration_status)
+    logger.print("MAIN", "  Analytics Mode: %s", 'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED')
+    logger.print("MAIN", "  Recording: %s", 'ENABLED' if control_flags.get('record') else 'DISABLED')
+    
+    # Upload background image to server at startup
+    if streaming_server_available and background_img is not None:
+        try:
+            # OpenCV JPEG encoding
+            success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if success:
+                frame_upload_worker.update_background(jpeg_bytes.tobytes())
+                logger.print("MAIN", "[BACKGROUND] Background queued for upload at startup")
+        except Exception as e:
+            logger.print("MAIN", "[BACKGROUND] Failed to queue background for upload at startup: %s", e)
+    
+    while True:
+        # Start frame profiling
+        frame_profiler.start_frame()
+        
+        # 1. Process async updates from workers
+        frame_profiler.start_task("async_updates")
+        try:
+            while not flags_queue.empty():
+                msg_type, data = flags_queue.get_nowait()
+                if msg_type == "flags_update":
+                    flags_updated = update_control_flags_from_server(data)
+                    if flags_updated:
+                        streaming_server_available = True
+        except queue.Empty:
+            pass
+        
+        try:
+            while not safe_areas_queue.empty():
+                msg_type, data = safe_areas_queue.get_nowait()
+                if msg_type == "safe_areas_update":
+                    if isinstance(data, list):
+                        update_safety_checker_polygons(data)
+        except queue.Empty:
+            pass
+        frame_profiler.end_task("async_updates")
+        
+        # 2. Process received commands
+        frame_profiler.start_task("commands")
+        commands = get_received_commands()
+        for cmd_data in commands:
+            handle_command(
+                cmd_data.get("command"), 
+                cmd_data.get("value"),
+                CAMERA_ID,
+                registration_status,
+                lambda cid, cname, status, ip: save_camera_info(cid, cname, status, ip)
+            )
+            if cmd_data.get("command") == "approve_camera":
+                camera_state_manager.set_registration_status("registered")
+        frame_profiler.end_task("commands")
+        
+        # 3. Camera Read
+        raw_img = cam.read()
+        if raw_img is None:
+            break
+            
+        # 4. Check for background update request
+        frame_profiler.start_task("background_check")
+        if get_flag("set_background", False) and not background_update_in_progress and not get_flag("_background_update_pending", False):
+            logger.print("MAIN", "[BACKGROUND] Starting background update...")
+            background_img = raw_img.copy()
+            cv2.imwrite(BACKGROUND_PATH, background_img)
+            background_update_in_progress = True
+            update_control_flag("set_background", False)
+            # Upload background image to server via FrameUploadWorker
+            if streaming_server_available:
+                try:
+                    success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                    if success:
+                        frame_upload_worker.update_background(jpeg_bytes.tobytes())
+                        logger.print("MAIN", "[BACKGROUND] Background queued for upload to server")
+                except Exception as e:
+                    logger.print("MAIN", "[BACKGROUND] Failed to queue background for upload: %s", e)
+            send_background_updated(py_time.time())
+            background_update_in_progress = False
+            logger.print("MAIN", "[BACKGROUND] Background updated")
+        frame_profiler.end_task("background_check")
+        
+        # 5. Person Detection
+        frame_profiler.start_task("human detect")
+        objs_det = detector.detect(raw_img, conf_th=0.5, iou_th=0.45)
+        
+        # Check if any object is 'person'. detector.labels might be dict {0: 'person', ...} or list
+        if isinstance(detector.labels, dict):
+            current_human_present = any(detector.labels.get(obj.class_id) == "person" for obj in objs_det)
+        else:
+            current_human_present = any(detector.labels[obj.class_id] == "person" for obj in objs_det)
+        
+        # Auto background update logic
+        if get_flag("auto_update_bg", False):
+            if prev_human_present and not current_human_present:
+                no_human_counter += 1
+                if no_human_counter >= NO_HUMAN_CONFIRM_FRAMES:
+                    background_img = raw_img.copy()
+                    cv2.imwrite(BACKGROUND_PATH, background_img)
+                    # Upload background image to server via FrameUploadWorker
+                    if streaming_server_available:
+                        try:
+                            success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                            if success:
+                                frame_upload_worker.update_background(jpeg_bytes.tobytes())
+                                logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
+                        except Exception as e:
+                            logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
+                    last_update_ms = time_ms()
+                    no_human_counter = 0
+            else:
+                no_human_counter = 0
+                if time_ms() - last_update_ms > UPDATE_INTERVAL_MS:
+                    background_img = raw_img.copy()
+                    cv2.imwrite(BACKGROUND_PATH, background_img)
+                    # Upload background image to server via FrameUploadWorker
+                    if streaming_server_available:
+                        try:
+                            success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                            if success:
+                                frame_upload_worker.update_background(jpeg_bytes.tobytes())
+                                logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
+                        except Exception as e:
+                            logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
+                    last_update_ms = time_ms()
+            prev_human_present = current_human_present
+        frame_profiler.end_task("human detect")
+        
+        # 6. Prepare display image (no UI rendering)
+        frame_profiler.start_task("display_prep")
+        if get_flag("show_raw", False):
+            img = raw_img.copy()
+        else:
+            img = background_img.copy() if background_img is not None else raw_img.copy()
+        frame_profiler.end_task("display_prep")
+        
+        # 7. Pose extraction and tracking
+        frame_profiler.start_task("pose_extraction")
+        objs = pose_extractor.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
+        pose_human_present = len(objs) > 0
+        human_present = current_human_present or pose_human_present
+        
+        human_presence_history.append(human_present)
+        if len(human_presence_history) > NO_HUMAN_FRAMES_TO_STOP + 1:
+            human_presence_history.pop(0)
+        
+        # Recording logic
+        record_flag = get_flag("record", False)
+        now = time_ms()
+        
+        if record_flag and not is_recording:
+            if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
+                all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
+                timestamp = get_timestamp_str()
+                # Use local recordings path
+                video_path = os.path.abspath(f"./recordings/{timestamp}.mp4")
+                recorder.start(video_path, pose_extractor.input_width(), pose_extractor.input_height())
+                skeleton_saver_2d.start_new_log(timestamp)
+                frame_id = 0
+                recording_start_time = now
+                is_recording = True
+                update_is_recording(True)
+                logger.print("MAIN", "Started recording: %s", timestamp)
+        
+        if is_recording:
+            no_human_count = 0
+            for presence in reversed(human_presence_history):
+                if not presence:
+                    no_human_count += 1
+                else:
+                    break
+            
+            no_human_frames_to_stop = NO_HUMAN_SECONDS_TO_STOP * 60
+            
+            if (no_human_count >= no_human_frames_to_stop or 
+                now - recording_start_time >= MAX_RECORDING_DURATION_MS or
+                not record_flag):
+                recorder.end()
+                skeleton_saver_2d.save_to_csv()
+                is_recording = False
+                update_is_recording(False)
+                logger.print("MAIN", "Stopped recording")
+        frame_profiler.end_task("pose_extraction")
+        
+        # 8. Process tracking and collect all tracks
+        frame_profiler.start_task("tracking")
+        tracks = update_tracks(objs)
+
+        if is_recording:
+            frame_id += 1
+
+        # Calculate FPS
+        frame_end_time = time_ms()
+        frame_duration = frame_end_time - frame_start_time
+        current_fps = 1000.0 / frame_duration if frame_duration > 0 else 30.0
+        set_fps(current_fps)
+        frame_start_time = frame_end_time
+        
+        processed_tracks = []
+        
+        for track in tracks:
+            track_result = process_track(
+                track, objs, pose_extractor, img,
+                is_recording=is_recording,
+                skeleton_saver=skeleton_saver_2d if is_recording else None,
+                frame_id=frame_id,
+                safety_checker=safety_checker,
+                fps=current_fps,
+                analytics_mode=get_flag("analytics_mode", False)
+            )
+            
+            if not track_result:
+                continue
+            
+            # Draw tracks on img for display visualization (PC only feature)
+            # Draw skeleton
+            # COCO Keypoints: 0:nose, 1:left_eye, 2:right_eye, 3:left_ear, 4:right_ear, 5:left_shoulder, 
+            # 6:right_shoulder, 7:left_elbow, 8:right_elbow, 9:left_wrist, 10:right_wrist, 
+            # 11:left_hip, 12:right_hip, 13:left_knee, 14:right_knee, 15:left_ankle, 16:right_ankle
+            connections = [
+                (0,1), (0,2), (1,3), (2,4), (5,6), (5,7), (7,9), (6,8), (8,10), 
+                (5,11), (6,12), (11,12), (11,13), (13,15), (12,14), (14,16)
+            ]
+            
+            # Keypoints are flattened [x1, y1, x2, y2, ...]
+            pts = []
+            if track_result.get("keypoints"):
+                kp_flat = track_result.get("keypoints")
+                for i in range(0, len(kp_flat), 2):
+                    pts.append((int(kp_flat[i]), int(kp_flat[i+1])))
+                
+                # Draw connections
+                for p1, p2 in connections:
+                    if p1 < len(pts) and p2 < len(pts):
+                        pt1 = pts[p1]
+                        pt2 = pts[p2]
+                        # Only draw if points are not (0,0) (assuming 0,0 is invalid/undetected, strictly speaking check confidence but we don't have it here easily)
+                        if pt1 != (0,0) and pt2 != (0,0):
+                            cv2.line(img, pt1, pt2, (0, 255, 0), 2)
+                
+                # Draw points
+                for pt in pts:
+                    if pt != (0,0):
+                        cv2.circle(img, pt, 4, (0, 0, 255), -1)
+
+            # Draw bounding box and label
+            if track_result.get("bbox"):
+                nx, ny, nw, nh = track_result.get("bbox")
+                cv2.rectangle(img, (int(nx), int(ny)), (int(nx+nw), int(ny+nh)), (255, 0, 0), 2)
+                cv2.putText(img, f"ID: {track_result.get('track_id')} {track_result.get('pose_label')}", 
+                           (int(nx), int(ny)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            logger.print("MAIN", "pose_label <- track_result['pose_label']: %s", track_result.get('pose_label', 'unknown'))
+            track_id = track_result.get("track_id")
+            keypoints = track_result.get("keypoints")
+            print(f"KEYPOINTS: {keypoints}")
+            bbox = track_result.get("bbox")
+            pose_label = track_result.get("pose_label", "unknown")
+            status = track_result.get("status", "tracking")
+            safety_status = "normal" if status == "tracking" else status
+            encrypted_features = track_result.get("encrypted_features")
+
+            processed_track = {
+                "track_id": track_id,
+                "keypoints": keypoints,
+                "bbox": bbox,
+                "pose_label": pose_label,
+                "safety_status": safety_status,
+                "encrypted_features": encrypted_features
+            }
+            processed_tracks.append(processed_track)
+        
+        send_tracks_to_queue(processed_tracks)
+        
+        frame_profiler.end_task("tracking")
+        
+        # 10. Recording
+        frame_profiler.start_task("recording")
+        if is_recording:
+            recorder.add_frame(img)
+        frame_profiler.end_task("recording")
+        
+        # 11. Display
+        frame_profiler.start_task("display")
+        disp.show(img)
+        
+        # Check for user exit - Ensure waitKey is called here if disp.show didn't do it enough
+        # Increase wait time to 10ms to process UI events better and cap FPS reasonably
+        key = cv2.waitKey(10) & 0xFF
+        if key in [ord('q'), 27]: # q or ESC
+            logger.print("MAIN", "Exit requested by user")
+            sys.modules["maix.app"].need_exit.return_value = True # Signal exit
+            break
+        frame_profiler.end_task("display")
+        
+        # 12. Update FrameUploadWorker
+        frame_profiler.start_task("frame_upload")
+        if get_flag("show_raw", False):
+            try:
+                success, jpeg_bytes = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                if success:
+                    frame_upload_worker.update_frame(jpeg_bytes.tobytes())
+            except Exception:
+                pass
+        frame_profiler.end_task("frame_upload")
+        
+        # End frame profiling
+        frame_profiler.end_frame()
+        
+        # 13. Periodic GC
+        current_time = time_ms()
+        if current_time - last_gc_time > GC_INTERVAL_MS:
+            gc.collect()
+            last_gc_time = current_time
+        
+        frame_counter += 1
+        if frame_counter % 30 == 0:
+            logger.print("MAIN", "Frame %d processed (FPS: %.1f)", frame_counter, current_fps)
+            if frame_counter % 60 == 0:
+                control_flags = get_control_flags()
+                logger.print("MAIN", "[STATUS] Flags: record=%s, analytics_mode=%s, fall_algorithm=%s",
+                          control_flags.get('record'),
+                          control_flags.get('analytics_mode'),
+                          control_flags.get('fall_algorithm'))
+
+    # ============================================
+    # CLEANUP
+    # ============================================
+    command_receiver.stop()
+    flag_sync_worker.stop()
+    state_reporter_worker.stop()
+    frame_upload_worker.stop()
+    ping_worker.stop()
+    tracks_sender.stop()
+    
+    if is_recording:
+        recorder.end()
+        skeleton_saver_2d.save_to_csv()
+    
+    from control_manager import save_control_flags
+    save_control_flags()
+    
+    # Cleanup OpenCV
+    cam.cap.release()
+    cv2.destroyAllWindows()
+    
+    logger.print("MAIN", "=== Camera Stream Stopped ===")
+
+if __name__ == "__main__":
+    main()

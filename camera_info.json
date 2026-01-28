@@ -1,7 +1,9 @@
 {
-  "camera_id": "maixcam_000",
-  "camera_name": "Unnamed Camera",
-  "mac_address": "unknown",
-  "saved_at": 32258514,
+  "camera_id": "camera_0001",
+  "camera_name": "Camera 0001",
+  "status": "registered",
+  "ip_address": "192.168.1.159",
+  "last_registration": 1769563000173,
+  "saved_at": 1769563000173,
   "saved_locally": true
 }
