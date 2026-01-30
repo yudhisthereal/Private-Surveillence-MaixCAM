@@ -5,7 +5,7 @@ from debug_config import DebugLogger
 from tools.wifi_connect import connect_wifi
 from tools.video_record import VideoRecorder
 from tools.skeleton_saver import SkeletonSaver2D
-from tools.safe_area import BodySafetyChecker
+from tools.safe_area import BodySafetyChecker, CheckMethod
 
 # Import modular components
 from config import (
@@ -376,7 +376,9 @@ def main():
                 skeleton_saver=skeleton_saver_2d if is_recording else None,
                 frame_id=frame_id,
                 fps=current_fps,
-                analytics_mode=get_flag("analytics_mode", False)
+                analytics_mode=get_flag("analytics_mode", False),
+                safety_checker=safety_checker,
+                check_method=CheckMethod.TORSO_HEAD
             )
             
             if not track_result:

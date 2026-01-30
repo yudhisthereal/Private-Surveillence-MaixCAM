@@ -1342,8 +1342,8 @@ class TracksSenderWorker(threading.Thread):
         """Send tracks to streaming server asynchronously using a thread."""
         def _send():
             try:
-                from streaming import send_all_tracks_to_streaming_server
-                send_all_tracks_to_streaming_server(camera_id, tracks)
+                from streaming import send_tracks_to_streaming_server
+                send_tracks_to_streaming_server(camera_id, tracks)
             except Exception as e:
                 logger.print("TRACKS_SENDER", "Error in async streaming send: %s", e)
         

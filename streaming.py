@@ -193,7 +193,7 @@ def send_background_to_server(background_data, camera_id):
     thread.start()
     return True
 
-def send_all_tracks_to_streaming_server(camera_id, tracks):
+def send_tracks_to_streaming_server(camera_id, tracks):
     """Send all tracks to streaming server (fire-and-forget).
 
     FIRE-AND-FORGET: This function sends data asynchronously with a short timeout.

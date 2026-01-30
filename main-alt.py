@@ -95,7 +95,7 @@ from pc_video_record import VideoRecorder
 from debug_config import DebugLogger
 # tools.wifi_connect skipped on PC
 from tools.skeleton_saver import SkeletonSaver2D
-from tools.safe_area import BodySafetyChecker
+from tools.safe_area import BodySafetyChecker, CheckMethod
 
 from config import (
     initialize_camera, save_camera_info, STREAMING_HTTP_URL,
@@ -483,7 +483,9 @@ def main():
                 skeleton_saver=skeleton_saver_2d if is_recording else None,
                 frame_id=frame_id,
                 fps=current_fps,
-                analytics_mode=get_flag("analytics_mode", False)
+                analytics_mode=get_flag("analytics_mode", False),
+                safety_checker=safety_checker,
+                check_method=CheckMethod.TORSO_HEAD
             )
             
             if not track_result:

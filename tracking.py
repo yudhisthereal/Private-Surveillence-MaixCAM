@@ -105,8 +105,8 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False):
-    """Process a single track - handle fall detection and return track info
+def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False, safety_checker=None, check_method=None):
+    """Process a single track - handle fall detection and safety checking
 
     Args:
         track: The track object from tracker
@@ -116,6 +116,8 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
         frame_id: Current frame ID
         fps: Current FPS for fall detection
         analytics_mode: If True, use AnalyticsWorker results; if False, use local fall detection
+        safety_checker: BodySafetyChecker instance for safe zone checking
+        check_method: CheckMethod enum for safety checking (e.g., CheckMethod.TORSO_HEAD)
     """
     global online_targets, fall_ids, unsafe_ids, current_fps
     
@@ -209,14 +211,10 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                         fall_ids.add(track.id)
                         unsafe_ids.discard(track.id)
                         use_analytics = True
-                    elif counter_method2 > 0 or counter_method1 > 0:
-                        unsafe_ids.add(track.id)
-                        fall_ids.discard(track.id)
-                        use_analytics = True
                     else:
-                        # No detection, check if we should remove from unsafe
-                        if track.id in unsafe_ids:
-                            unsafe_ids.discard(track.id)
+                        # No fall detected - remove from fall_ids
+                        if track.id in fall_ids:
+                            fall_ids.discard(track.id)
                         use_analytics = True
                 
                 if not use_analytics:
@@ -229,16 +227,14 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                              fall_detected_method2, counter_method2,
                              fall_detected_method3, counter_method3) = fall_info
                             
-                            # Update fall_ids and unsafe_ids based on detection results
+                            # Update fall_ids based on detection results
                             if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
                                 fall_ids.add(track.id)
                                 unsafe_ids.discard(track.id)
-                            elif counter_method2 > 0 or counter_method1 > 0:
-                                unsafe_ids.add(track.id)
-                                fall_ids.discard(track.id)
                             else:
-                                if track.id in unsafe_ids:
-                                    unsafe_ids.discard(track.id)
+                                # No fall detected - remove from fall_ids
+                                if track.id in fall_ids:
+                                    fall_ids.discard(track.id)
             else:
                 # Not in analytics mode, use local fall detection
                 if online_targets["bbox"][idx].qsize() >= 2:
@@ -249,18 +245,60 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                          fall_detected_method2, counter_method2,
                          fall_detected_method3, counter_method3) = fall_info
                         
-                        # Update fall_ids and unsafe_ids based on detection results
+                        # Update fall_ids based on detection results
                         if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
                             fall_ids.add(track.id)
                             unsafe_ids.discard(track.id)
-                        elif counter_method2 > 0 or counter_method1 > 0:
-                            unsafe_ids.add(track.id)
-                            fall_ids.discard(track.id)
                         else:
-                            # No detection, check if we should remove from unsafe
-                            if track.id in unsafe_ids:
-                                unsafe_ids.discard(track.id)
-            
+                            # No fall detected - remove from fall_ids
+                            if track.id in fall_ids:
+                                fall_ids.discard(track.id)
+
+            # Safety zone checking (only if not already marked as fall)
+            if track.id not in fall_ids:
+                # Check if safety checking is enabled
+                use_safety_check = False
+                try:
+                    from control_manager import get_flag
+                    use_safety_check = get_flag("use_safety_check", False)
+                except ImportError:
+                    pass
+
+                if use_safety_check and safety_checker is not None:
+                    # Convert keypoints to the format expected by BodySafetyChecker
+                    # BodySafetyChecker expects: List[Tuple[float, float, float]] (x, y, confidence)
+                    body_keypoints = []
+                    for i in range(0, len(obj.points), 2):
+                        if i + 1 < len(obj.points):
+                            x = float(obj.points[i])
+                            y = float(obj.points[i + 1])
+                            # Use a default confidence of 1.0 since pose extractor doesn't provide it
+                            body_keypoints.append((x, y, 1.0))
+
+                    # Use default check method if not provided
+                    if check_method is None:
+                        from tools.safe_area import CheckMethod
+                        check_method = CheckMethod.TORSO_HEAD
+
+                    # Check if body is in safe zone
+                    is_safe = safety_checker.body_in_safe_zone(body_keypoints, check_method)
+
+                    if not is_safe:
+                        # Person is outside safe zones - mark as unsafe
+                        unsafe_ids.add(track.id)
+                    else:
+                        # Person is in safe zone - remove from unsafe_ids
+                        if track.id in unsafe_ids:
+                            unsafe_ids.discard(track.id)
+                else:
+                    # Safety checking disabled - remove from unsafe_ids
+                    if track.id in unsafe_ids:
+                        unsafe_ids.discard(track.id)
+            else:
+                # Already marked as fall - ensure not in unsafe_ids (fall takes precedence)
+                if track.id in unsafe_ids:
+                    unsafe_ids.discard(track.id)
+
             # Save to skeleton if recording
             if is_recording and skeleton_saver:
                 safety_status = 1 if track.id in fall_ids else (2 if track.id in unsafe_ids else 0)
