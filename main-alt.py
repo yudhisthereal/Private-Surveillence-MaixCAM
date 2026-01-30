@@ -121,7 +121,7 @@ from workers import (
     CommandReceiver, PingWorker, get_received_commands, handle_command,
     update_is_recording, AnalyticsWorker,
     send_track_to_analytics, is_analytics_server_available, set_analytics_queue, TracksSenderWorker,
-    set_tracks_worker, send_tracks_to_queue
+    set_tracks_worker, update_latest_tracks, mark_tracks_as_ready
 )
 from tracking import (
     update_tracks, process_track, set_fps
@@ -191,7 +191,7 @@ def main():
         flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID
     )
     state_reporter_worker = StateReporterWorker(STREAMING_HTTP_URL, CAMERA_ID)
-    frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID)
+    frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID, profiler_enabled=True)
     ping_worker = PingWorker(STREAMING_HTTP_URL, CAMERA_ID)
     
     flag_sync_worker.start()
@@ -211,7 +211,7 @@ def main():
         logger.print("MAIN", "[Analytics] Worker NOT started (analytics_mode=False)")
     
     # Start Tracks Sender Worker
-    tracks_sender = TracksSenderWorker(CAMERA_ID)
+    tracks_sender = TracksSenderWorker(CAMERA_ID, profiler_enabled=False)
     set_tracks_worker(tracks_sender)
     tracks_sender.start()
     logger.print("MAIN", "[TracksSender] Worker started")
@@ -245,7 +245,7 @@ def main():
     last_update_ms = time_ms()
     last_gc_time = time_ms()
     streaming_server_available = True
-    frame_profiler = TaskProfiler(task_name="Main", enabled=False)
+    frame_profiler = TaskProfiler(task_name="Main", enabled=True)
     frame_profiler.register_subtasks([
         "async_updates",
         "commands",
@@ -269,12 +269,12 @@ def main():
     logger.print("MAIN", "Press 'q' or 'ESC' in the display window to exit.")
     
     control_flags = get_control_flags()
-    
-    # FORCE SHOW RAW ON PC so the user sees the video stream
+
+    # NOTE: This sets show_raw locally but the server sync may override it.
+    # If you want to force show_raw=True on PC, you need to also set it on the streaming server.
     control_flags['show_raw'] = True
-    # Also update the global flag so it persists
     update_control_flag('show_raw', True)
-    
+
     logger.print("MAIN", "Final Configuration:")
     logger.print("MAIN", "  Camera: %s (%s)", CAMERA_NAME, CAMERA_ID)
     logger.print("MAIN", "  Status: %s", registration_status)
@@ -360,17 +360,17 @@ def main():
             logger.print("MAIN", "[BACKGROUND] Background updated")
         frame_profiler.end_task("background_check")
         
-        # 5. Person Detection
-        frame_profiler.start_task("human detect")
-        objs_det = detector.detect(raw_img, conf_th=0.5, iou_th=0.45)
+        # 5. Pose extraction (Moved up to replace distinct human detection)
+        frame_profiler.start_task("pose_extraction")
+        objs = pose_extractor.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
+        pose_human_present = len(objs) > 0
         
-        # Check if any object is 'person'. detector.labels might be dict {0: 'person', ...} or list
-        if isinstance(detector.labels, dict):
-            current_human_present = any(detector.labels.get(obj.class_id) == "person" for obj in objs_det)
-        else:
-            current_human_present = any(detector.labels[obj.class_id] == "person" for obj in objs_det)
-        
-        # Auto background update logic
+        # Use pose objects as detection objects (Optimization: Skip separate YOLO detection)
+        objs_det = objs # MediaPipe 'objs' are compatible with PCTrackerObject logic if they have x,y,w,h
+        current_human_present = pose_human_present
+        frame_profiler.end_task("pose_extraction")
+
+        # 5b. Auto background update logic (using pose detection results)
         if get_flag("auto_update_bg", False):
             if prev_human_present and not current_human_present:
                 no_human_counter += 1
@@ -404,7 +404,6 @@ def main():
                             logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
                     last_update_ms = time_ms()
             prev_human_present = current_human_present
-        frame_profiler.end_task("human detect")
         
         # 6. Prepare display image (no UI rendering)
         frame_profiler.start_task("display_prep")
@@ -414,11 +413,11 @@ def main():
             img = background_img.copy() if background_img is not None else raw_img.copy()
         frame_profiler.end_task("display_prep")
         
-        # 7. Pose extraction and tracking
-        frame_profiler.start_task("pose_extraction")
-        objs = pose_extractor.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
-        pose_human_present = len(objs) > 0
-        human_present = current_human_present or pose_human_present
+        # 7. Pose extraction and tracking (Pose already done above)
+        # frame_profiler.start_task("pose_extraction")
+        # objs = pose_extractor.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
+        # pose_human_present = len(objs) > 0
+        human_present = current_human_present # or pose_human_present (same thing now)
         
         human_presence_history.append(human_present)
         if len(human_presence_history) > NO_HUMAN_FRAMES_TO_STOP + 1:
@@ -460,7 +459,6 @@ def main():
                 is_recording = False
                 update_is_recording(False)
                 logger.print("MAIN", "Stopped recording")
-        frame_profiler.end_task("pose_extraction")
         
         # 8. Process tracking and collect all tracks
         frame_profiler.start_task("tracking")
@@ -533,7 +531,6 @@ def main():
             logger.print("MAIN", "pose_label <- track_result['pose_label']: %s", track_result.get('pose_label', 'unknown'))
             track_id = track_result.get("track_id")
             keypoints = track_result.get("keypoints")
-            print(f"KEYPOINTS: {keypoints}")
             bbox = track_result.get("bbox")
             pose_label = track_result.get("pose_label", "unknown")
             status = track_result.get("status", "tracking")
@@ -549,9 +546,11 @@ def main():
                 "encrypted_features": encrypted_features
             }
             processed_tracks.append(processed_track)
-        
-        send_tracks_to_queue(processed_tracks)
-        
+
+        # Send tracks to queue and mark them as ready for sending
+        update_latest_tracks(processed_tracks)
+        mark_tracks_as_ready()
+
         frame_profiler.end_task("tracking")
         
         # 10. Recording
@@ -573,15 +572,15 @@ def main():
             break
         frame_profiler.end_task("display")
         
-        # 12. Update FrameUploadWorker
+        # 12. Update FrameUploadWorker with latest RAW frame (no overlays)
+        # Always send raw frame regardless of show_raw flag
         frame_profiler.start_task("frame_upload")
-        if get_flag("show_raw", False):
-            try:
-                success, jpeg_bytes = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-                if success:
-                    frame_upload_worker.update_frame(jpeg_bytes.tobytes())
-            except Exception:
-                pass
+        try:
+            success, jpeg_bytes = cv2.imencode('.jpg', raw_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            if success:
+                frame_upload_worker.update_frame(jpeg_bytes.tobytes())
+        except Exception:
+            pass
         frame_profiler.end_task("frame_upload")
         
         # End frame profiling

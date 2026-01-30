@@ -1,7 +1,7 @@
 {
   "control_flags": {
     "record": false,
-    "show_raw": false,
+    "show_raw": true,
     "set_background": false,
     "auto_update_bg": false,
     "show_safe_area": true,
@@ -10,7 +10,7 @@
     "fall_algorithm": 3,
     "hme": false
   },
-  "timestamp": 1769567338875,
+  "timestamp": 1769746916913,
   "camera_id": "camera_0001",
   "saved_locally": true
 }

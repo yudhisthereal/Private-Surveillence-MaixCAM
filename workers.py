@@ -154,45 +154,53 @@ class StateReporterWorker(threading.Thread):
 
 class FrameUploadWorker(threading.Thread):
     """Background thread for uploading frames to streaming server (UDP-like behavior)
-    
+
     This worker works asynchronously from the main loop. It shares a reference to
     the latest frame with the main thread. When uploading:
     - If no upload is in progress: upload the current latest frame
     - If upload is already in progress: skip and wait for next frame
     - When upload finishes: upload the current latest frame immediately
-    
+    - Rate limited to 100ms intervals (10 FPS max) to avoid overwhelming server
+
     This achieves UDP-like behavior where slow uploads don't pile up - old frames
     are dropped and only the latest frame is uploaded.
-    
+
+    Always sends RAW frames (no overlays) to streaming server.
+
     Background uploads have higher priority than regular frame uploads.
     """
-    
-    def __init__(self, streaming_url, camera_id):
+
+    def __init__(self, streaming_url, camera_id, profiler_enabled=False):
         super().__init__(daemon=True)
         self.streaming_url = streaming_url
         self.camera_id = camera_id
         self.running = True
         self.uploading = False
-        
+
         # Shared frame reference - main thread writes, worker reads
         # Using a lock for thread-safe access
         self._frame_lock = threading.Lock()
         self._current_frame = None
         self._frame_timestamp = 0
-        
+
         # Shared background reference - main thread writes, worker reads
         # Using a separate lock for background-specific operations
         self._background_lock = threading.Lock()
         self._current_background = None
         self._background_timestamp = 0
-        
+
         # Upload statistics for debugging
         self.upload_count = 0
         self.skip_count = 0
         self.background_upload_count = 0
-        
+
+        # Rate limiting: max 10 FPS (100ms intervals)
+        self._min_upload_interval_ms = 100  # 100ms = 10 FPS max
+        self._last_upload_time = 0
+
         # Profiler for upload FPS calculation
-        self.upload_profiler = TaskProfiler(task_name="Frame Upload", print_interval=30, enabled=False)
+        self._profiler_enabled = profiler_enabled
+        self.upload_profiler = TaskProfiler(task_name="Frame Upload", print_interval=30, enabled=self._profiler_enabled)
         self.upload_profiler.register_subtasks(["frame_upload"])
         self.upload_profiler.start_frame()
         self.upload_profiler.start_task("frame_upload")
@@ -285,55 +293,65 @@ class FrameUploadWorker(threading.Thread):
                     time.sleep(0.01)  # Brief pause after background upload
                     continue
                 
-                # PRIORITY 2: Regular frame upload (only if show_raw is true in main)
+                # PRIORITY 2: Regular frame upload (ALWAYS send raw frames)
                 # Get the current frame
                 current_frame = self.get_frame()
-                
+
                 if current_frame is None:
                     # No frame available yet, sleep briefly
                     time.sleep(0.01)  # 10ms
                     continue
-                
+
+                # Check rate limiting: enforce 100ms min interval between uploads
+                current_time = time_ms()
+                time_since_last_upload = current_time - self._last_upload_time
+                if time_since_last_upload < self._min_upload_interval_ms:
+                    # Too soon to upload again, sleep and continue
+                    time.sleep(0.01)  # 10ms
+                    continue
+
                 # Check if we're already uploading
                 if self.uploading:
                     # UDP-like behavior: skip this frame, will upload latest on next iteration
                     self.skip_count += 1
-                    time.sleep(0.005)  # Brief sleep before checking again
+                    time.sleep(0.01)  # Brief sleep before checking again
                     continue
-                
+
                 # Start upload with profiling
                 self.uploading = True
                 self.upload_profiler.start_frame()
                 self.upload_profiler.start_task("frame_upload")
-                
+
                 # Upload the frame
                 upload_start = time_ms()
                 success = send_frame_to_server(current_frame, self.camera_id)
                 upload_duration = time_ms() - upload_start
-                
+                self._last_upload_time = time_ms()  # Update last upload time
+
                 # End profiling for this upload
                 self.upload_profiler.end_task("frame_upload")
                 self.upload_profiler.end_frame()
-                
+
                 if success:
                     self.upload_count += 1
                     # Clear frame after successful upload
                     self.clear_frame()
-                    
+
                     # Log periodically with upload FPS
                     if self.upload_count % 30 == 0:
                         avg_upload_time = upload_duration
                         upload_fps = 1000.0 / avg_upload_time if avg_upload_time > 0 else 0
-                        logger.print("FRAME_UPLOAD", "Uploaded %d frames, skipped %d, avg upload: %.2fms, FPS: %.2f", self.upload_count, self.skip_count, avg_upload_time, upload_fps)
+                        logger.print("FRAME_UPLOAD", "Uploaded %d frames, skipped %d, avg upload: %.2fms, FPS: %.2f (capped at 10 FPS)",
+                                    self.upload_count, self.skip_count, avg_upload_time, upload_fps)
                 else:
                     logger.print("FRAME_UPLOAD", "Failed to upload frame")
                     # Keep the frame for retry on next iteration
-                
+
                 # Upload complete, check for new frame
                 self.uploading = False
-                
-                # Small delay between uploads to avoid overwhelming server
-                time.sleep(0.005)  # 5ms
+
+                # Rate limit: sleep to maintain ~100ms intervals
+                time.sleep(0.05)  # 50ms to give some buffer
                 
             except Exception as e:
                 logger.print("FRAME_UPLOAD", "Error: %s", e)
@@ -746,7 +764,9 @@ class AnalyticsWorker(threading.Thread):
     def __init__(self, track_queue, camera_id, check_interval_ms=50):
         super().__init__(daemon=True)
         self.camera_id = camera_id
-        self.check_interval = check_interval_ms / 1000.0  # Convert to seconds
+        # Cap check interval to minimum 100ms (10 FPS max) to avoid overwhelming the server
+        actual_interval = max(check_interval_ms, 100)
+        self.check_interval = actual_interval / 1000.0  # Convert to seconds
         self.running = True
         self.track_queue = track_queue
         
@@ -1017,12 +1037,15 @@ def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=N
         return False
 
 
-def send_tracks_to_queue(processed_tracks):
+def update_latest_tracks(processed_tracks):
     """Update latest tracks for async sending to streaming and analytics servers.
 
     This function is called from the main thread to update the latest tracks
     for the TracksSenderWorker to send asynchronously. Always sends the latest
     tracks, dropping old ones (UDP-like behavior).
+
+    IMPORTANT: After calling this function, you must call mark_tracks_as_ready()
+    to signal the worker that tracks are ready to send.
 
     Args:
         processed_tracks: List of track dictionaries, each containing:
@@ -1049,55 +1072,101 @@ def send_tracks_to_queue(processed_tracks):
         return False
 
 
+def mark_tracks_as_ready():
+    """Mark tracks as ready to send (called from main thread after processing).
+
+    This signals the TracksSenderWorker that all tracks have been processed
+    and are ready to be sent to the servers.
+
+    The worker monitors this flag and will send the tracks when it's set to True,
+    then reset it to False after sending.
+
+    Returns:
+        bool: True if flag was set successfully, False otherwise
+    """
+    # Check if worker is available
+    if _tracks_worker is None:
+        return False
+
+    try:
+        _tracks_worker.mark_tracks_ready()
+        return True
+    except Exception as e:
+        logger.print("TRACKS_SENDER", "Failed to mark tracks as ready: %s", e)
+        return False
+
+
 class TracksSenderWorker(threading.Thread):
     """Background worker for sending all processed tracks to streaming and analytics servers.
-    
-    This worker receives processed_tracks from the main thread via a shared reference and sends them
+
+    This worker waits for the main thread to finish processing tracks, then sends them
     to the streaming server (omitting encrypted_features) and analytics server (only encrypted_features
     when use_hme=True) in the background, preventing blocking of the main loop.
-    
+
+    Uses a flag-based synchronization mechanism:
+    - Main thread processes tracks and sets _tracks_ready flag to True
+    - Worker monitors the flag and sends tracks when True
+    - Worker resets flag to False after sending
+
     UDP-like behavior: Always sends the latest tracks, dropping old ones if sending is in progress.
-    Fire-and-forget pattern: sends every 1ms.
     """
-    
-    def __init__(self, camera_id):
+
+    def __init__(self, camera_id, profiler_enabled=False):
         super().__init__(daemon=True)
         self.camera_id = camera_id
         self.running = True
-        
+
         # Shared tracks reference - main thread writes, worker reads
         # Using a lock for thread-safe access
         self._tracks_lock = threading.Lock()
         self._current_tracks = None
         self._tracks_timestamp = 0
         self._sending = False
-        
+
+        # Flag to track if tracks have been processed and ready to send
+        self._tracks_ready_lock = threading.Lock()
+        self._tracks_ready = False
+
         # Statistics for monitoring
         self.sent_count = 0
         self.error_count = 0
         self.skip_count = 0
-        
+
         # Track previous bboxes for analytics server (per track_id)
         self.previous_bboxes = {}
-        
+
+        # Rate limiting: max 10 FPS (100ms intervals)
+        self._min_send_interval_ms = 100  # 100ms = 10 FPS max
+        self._last_send_time = 0
+
         # Profiler for tracks sending
-        self.profiler = TaskProfiler(task_name="Tracks Sender", print_interval=30, enabled=False)
+        self._profiler_enabled = profiler_enabled
+        self.profiler = TaskProfiler(task_name="Tracks Sender", print_interval=30, enabled=self._profiler_enabled)
         self.profiler.register_subtasks(["tracks_send", "streaming_send", "analytics_send"])
         self.profiler.start_frame()
-        
+
     def update_tracks(self, processed_tracks):
         """Update the latest tracks to send (called from main thread).
-        
+
         Args:
             processed_tracks: List of track dictionaries
         """
         with self._tracks_lock:
             self._current_tracks = processed_tracks
             self._tracks_timestamp = time_ms()
-        
+
+    def mark_tracks_ready(self):
+        """Mark tracks as ready to send (called from main thread after processing).
+
+        This signals the worker that all tracks have been processed and are ready
+        to be sent to the servers.
+        """
+        with self._tracks_ready_lock:
+            self._tracks_ready = True
+
     def _get_current_tracks(self):
         """Get current tracks (thread-safe).
-        
+
         Returns:
             tuple: (tracks, timestamp) or (None, 0) if no tracks
         """
@@ -1105,62 +1174,101 @@ class TracksSenderWorker(threading.Thread):
             if self._current_tracks is not None:
                 return (self._current_tracks.copy(), self._tracks_timestamp)
             return (None, 0)
+
+    def _is_tracks_ready(self):
+        """Check if tracks are ready to send (thread-safe).
+
+        Returns:
+            bool: True if tracks are ready to send
+        """
+        with self._tracks_ready_lock:
+            return self._tracks_ready
+
+    def _reset_tracks_ready(self):
+        """Reset the tracks ready flag (thread-safe)."""
+        with self._tracks_ready_lock:
+            self._tracks_ready = False
         
     def run(self):
-        """Main worker loop - send latest tracks every 1ms.
+        """Main worker loop - wait for tracks to be processed, then send.
 
-        UDP-like behavior: If sending is in progress, skip and wait for next iteration.
+        Synchronization mechanism:
+        - Main thread processes all tracks and calls mark_tracks_ready()
+        - This worker monitors the _tracks_ready flag
+        - When flag is True, worker sends all tracks and resets flag to False
+        - UDP-like behavior: If sending is in progress, skip and wait for next frame
+
         Always sends the latest tracks, dropping old ones.
         """
         logger.print("TRACKS_SENDER", "Starting worker for camera: %s", self.camera_id)
 
         while self.running:
             try:
-                # Get current tracks
-                current_tracks, _ = self._get_current_tracks()
-                
-                if current_tracks is None:
-                    # No tracks available yet, sleep briefly
+                # Check if tracks are ready to send (flag set by main thread)
+                if not self._is_tracks_ready():
+                    # Tracks not ready yet, sleep briefly and check again
                     time.sleep(0.001)  # 1ms
                     continue
-                
+
+                # Get current tracks
+                current_tracks, _ = self._get_current_tracks()
+
+                if current_tracks is None:
+                    # No tracks available yet, reset flag and sleep
+                    self._reset_tracks_ready()
+                    time.sleep(0.001)  # 1ms
+                    continue
+
+                # Check rate limiting: enforce 100ms min interval between sends
+                current_time = time_ms()
+                time_since_last_send = current_time - self._last_send_time
+                if time_since_last_send < self._min_send_interval_ms:
+                    # Too soon to send again, reset flag and sleep
+                    self._reset_tracks_ready()
+                    time.sleep(0.01)  # 10ms
+                    continue
+
                 # Check if we're already sending
                 if self._sending:
                     # UDP-like behavior: skip this frame, will send latest on next iteration
                     self.skip_count += 1
-                    time.sleep(0.001)  # 1ms
+                    self._reset_tracks_ready()
+                    time.sleep(0.01)  # 10ms
                     continue
-                
+
                 # Start sending with profiling
                 self._sending = True
                 self.profiler.start_frame()
                 self.profiler.start_task("tracks_send")
-                
+
                 # Send the tracks
                 send_start = time_ms()
                 self._send_tracks(current_tracks)
                 send_duration = time_ms() - send_start
-                
+                self._last_send_time = time_ms()  # Update last send time
+
                 # End profiling for this send
                 self.profiler.end_task("tracks_send")
                 self.profiler.end_frame()
-                
+
                 self.sent_count += 1
-                
+
                 # Log periodically with send stats
                 if self.sent_count % 30 == 0:
                     avg_send_time = send_duration
                     send_fps = 1000.0 / avg_send_time if avg_send_time > 0 else 0
-                    logger.print("TRACKS_SENDER", "Sent %d batches, skipped %d, avg send: %.2fms, FPS: %.2f", 
+                    logger.print("TRACKS_SENDER", "Sent %d batches, skipped %d, avg send: %.2fms, FPS: %.2f (capped at 10 FPS)",
                                 self.sent_count, self.skip_count, avg_send_time, send_fps)
-                
-                # Send complete, check for new tracks
+
+                # Send complete, reset the ready flag for next frame
                 self._sending = False
+                self._reset_tracks_ready()
 
             except Exception as e:
                 logger.print("TRACKS_SENDER", "Error in main loop: %s", e)
                 self.error_count += 1
                 self._sending = False
+                self._reset_tracks_ready()  # Reset flag on error
                 time.sleep(0.1)  # Sleep on error
 
         logger.print("TRACKS_SENDER", "Stopped (sent=%d, errors=%d, skipped=%d)", self.sent_count, self.error_count, self.skip_count)
@@ -1178,7 +1286,6 @@ class TracksSenderWorker(threading.Thread):
                 - encrypted_features: dict (only sent to analytics server, not streaming)
         """
         try:
-            from streaming import send_all_tracks_to_streaming_server
             from control_manager import get_flag
             
             # Prepare tracks for streaming server (omit encrypted_features)

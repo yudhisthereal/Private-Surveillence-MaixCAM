@@ -27,7 +27,7 @@ from workers import (
     CommandReceiver, PingWorker, get_received_commands, handle_command,
     update_is_recording, AnalyticsWorker,
     send_track_to_analytics, is_analytics_server_available, set_analytics_queue, TracksSenderWorker,
-    set_tracks_worker, send_tracks_to_queue
+    set_tracks_worker, update_latest_tracks, mark_tracks_as_ready
 )
 from tracking import (
     update_tracks, process_track, set_fps
@@ -99,14 +99,14 @@ def main():
         flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID
     )
     state_reporter_worker = StateReporterWorker(STREAMING_HTTP_URL, CAMERA_ID)
-    frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID)
+    frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID, profiler_enabled=True)
     ping_worker = PingWorker(STREAMING_HTTP_URL, CAMERA_ID)
-    
+
     flag_sync_worker.start()
     state_reporter_worker.start()
     frame_upload_worker.start()
     ping_worker.start()
-    
+
     # Start Analytics Worker (only if analytics_mode is True)
     analytics_worker = None
     if get_flag("analytics_mode", False):
@@ -119,7 +119,7 @@ def main():
         logger.print("MAIN", "[Analytics] Worker NOT started (analytics_mode=False)")
     
     # Start Tracks Sender Worker (always runs to send all tracks to Streaming Server)
-    tracks_sender = TracksSenderWorker(CAMERA_ID)
+    tracks_sender = TracksSenderWorker(CAMERA_ID, profiler_enabled=False)
     set_tracks_worker(tracks_sender)
     tracks_sender.start()
     logger.print("MAIN", "[TracksSender] Worker started")
@@ -365,7 +365,6 @@ def main():
         current_fps = 1000.0 / frame_duration if frame_duration > 0 else 30.0
         set_fps(current_fps)
         frame_start_time = frame_end_time
-        elapsed_ms = frame_duration if frame_duration > 0 else 33.33
 
         # Collect all processed tracks in a single list - single source of truth
         processed_tracks = []
@@ -406,8 +405,10 @@ def main():
             processed_tracks.append(processed_track)
         
         # Send all processed tracks at once via queue (fire-and-forget)
-        send_tracks_to_queue(processed_tracks)
-        
+        update_latest_tracks(processed_tracks)
+        # Signal tracks ready for sending
+        mark_tracks_as_ready()
+
         frame_profiler.end_task("tracking")
         
         # 10. Recording (no display, no UI rendering)
@@ -421,14 +422,14 @@ def main():
         disp.show(img)
         frame_profiler.end_task("display")
         
-        # 12. Update FrameUploadWorker with latest rendered frame (only if show_raw is True)
+        # 12. Update FrameUploadWorker with latest RAW frame (no overlays)
+        # Always send raw frame regardless of show_raw flag
         frame_profiler.start_task("frame_upload")
-        if get_flag("show_raw", False):
-            try:
-                jpeg_bytes = img.to_jpeg(quality=60).to_bytes(copy=False)
-                frame_upload_worker.update_frame(jpeg_bytes)
-            except Exception:
-                pass
+        try:
+            jpeg_bytes = raw_img.to_jpeg(quality=60).to_bytes(copy=False)
+            frame_upload_worker.update_frame(jpeg_bytes)
+        except Exception:
+            pass
         frame_profiler.end_task("frame_upload")
         
         # End frame profiling

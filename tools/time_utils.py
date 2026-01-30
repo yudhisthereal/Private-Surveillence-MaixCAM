@@ -148,17 +148,23 @@ class TaskProfiler:
         """Print profiling summary to terminal."""
         if not self.enabled or len(self.cycle_times) == 0:
             return
-        
+
+        # Import LogManager here to avoid circular imports
+        from tools.log_manager import get_log_manager
+        log_manager = get_log_manager()
+
         # Calculate averages
         avg_cycle_time = sum(self.cycle_times) / len(self.cycle_times)
         avg_rate = 1000.0 / avg_cycle_time if avg_cycle_time > 0 else 0
-        
-        print("\n" + "=" * 60)
-        print(f"PROFILING SUMMARY: {self.task_name} (Cycles {self.cycle_count - self.print_interval + 1} to {self.cycle_count})")
-        print("=" * 60)
-        print(f"{'Subtask':<25} {'Avg (ms)':<12} {'Min (ms)':<12} {'Max (ms)':<12} {'% of Cycle':<12}")
-        print("-" * 60)
-        
+
+        # Build summary as a single message
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append(f"PROFILING SUMMARY: {self.task_name} (Cycles {self.cycle_count - self.print_interval + 1} to {self.cycle_count})")
+        lines.append("=" * 60)
+        lines.append(f"{'Subtask':<25} {'Avg (ms)':<12} {'Min (ms)':<12} {'Max (ms)':<12} {'% of Cycle':<12}")
+        lines.append("-" * 60)
+
         # Iterate over registered order
         for task in self.subtask_order:
             if task in self.task_history:
@@ -170,13 +176,17 @@ class TaskProfiler:
                 max_time = max(times)
                 percent = (avg_time / avg_cycle_time * 100) if avg_cycle_time > 0 else 0
                 name = self.subtask_display_names.get(task, task)
-                print(f"{name:<25} {avg_time:<12.2f} {min_time:<12.2f} {max_time:<12.2f} {percent:<12.1f}%")
-        
-        print("-" * 60)
-        print(f"{'TOTAL CYCLE TIME':<25} {avg_cycle_time:<12.2f} {min(self.cycle_times):<12.2f} {max(self.cycle_times):<12.2f}")
-        print(f"{'CALCULATED RATE':<25} {avg_rate:<12.2f} Hz")
-        print("=" * 60 + "\n")
-        
+                lines.append(f"{name:<25} {avg_time:<12.2f} {min_time:<12.2f} {max_time:<12.2f} {percent:<12.1f}%")
+
+        lines.append("-" * 60)
+        lines.append(f"{'TOTAL CYCLE TIME':<25} {avg_cycle_time:<12.2f} {min(self.cycle_times):<12.2f} {max(self.cycle_times):<12.2f}")
+        lines.append(f"{'CALCULATED RATE':<25} {avg_rate:<12.2f} Hz")
+        lines.append("=" * 60 + "\n")
+
+        # Log as a single message (though LogManager will handle line breaks)
+        summary = "\n".join(lines)
+        log_manager.log(f"PROFILER {self.task_name}", summary)
+
         # Clear history after printing
         self.task_history.clear()
         self.cycle_times.clear()

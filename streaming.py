@@ -221,6 +221,7 @@ def send_all_tracks_to_streaming_server(camera_id, tracks):
                 "timestamp": time.time()
             }
             logger.print("POST TRACKS", "%s | endpoint: /api/stream/tracks | payload: %s", "POST", data)
+            
             # Fire-and-forget: short timeout, don't wait for or check response
             requests.post(url, json=data, timeout=0.1)
         except Exception:

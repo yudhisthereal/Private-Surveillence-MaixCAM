@@ -5,7 +5,6 @@ import json
 import time
 import socket
 import requests
-from debug_config import debug_print
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -13,6 +12,14 @@ load_dotenv()
 
 # Import CameraStateManager from control_manager for proper state management
 from control_manager import camera_state_manager
+
+# ============================================
+# LOGGING HELPER
+# ============================================
+def _log(tag, message):
+    """Helper to log messages via LogManager (thread-safe)."""
+    from tools.log_manager import get_log_manager
+    get_log_manager().log(f"CONFIG {tag}", message)
 
 # ============================================
 # SERVER CONFIGURATION (loaded from .env)
@@ -82,7 +89,7 @@ def get_local_ip():
         s.close()
         return ip
     except Exception as e:
-        print(f"Error getting local IP: {e}")
+        _log("ERROR", f"Error getting local IP: {e}")
         return "unknown"
 
 def load_camera_info():
@@ -96,13 +103,13 @@ def load_camera_info():
                 registration_status = data.get("status", "unregistered")
                 ip_address = data.get("ip_address", "")
                 last_registration = data.get("last_registration", 0)
-                
+
                 if camera_id and camera_name:
-                    print(f"Loaded camera info: {camera_name} ({camera_id}) - Status: {registration_status}")
+                    _log("INFO", f"Loaded camera info: {camera_name} ({camera_id}) - Status: {registration_status}")
                     return camera_id, camera_name, registration_status, ip_address, last_registration
     except Exception as e:
-        print(f"Error loading camera info: {e}")
-    
+        _log("ERROR", f"Error loading camera info: {e}")
+
     return None, None, "unregistered", "", 0
 
 def save_camera_info(camera_id, camera_name, registration_status, ip_address=""):
@@ -117,13 +124,13 @@ def save_camera_info(camera_id, camera_name, registration_status, ip_address="")
             "saved_at": int(time.time() * 1000),
             "saved_locally": True
         }
-        
+
         with open(CAMERA_INFO_FILE, 'w') as f:
             json.dump(data, f, indent=2)
-        print(f"Camera info saved: {camera_name} ({camera_id}) - Status: {registration_status}")
+        _log("INFO", f"Camera info saved: {camera_name} ({camera_id}) - Status: {registration_status}")
         return True
     except Exception as e:
-        print(f"Error saving camera info: {e}")
+        _log("ERROR", f"Error saving camera info: {e}")
         return False
 
 def register_with_streaming_server(server_ip, existing_camera_id=None):
@@ -132,7 +139,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         # First get our local IP
         local_ip = get_local_ip()
         if local_ip == "unknown":
-            print("Cannot determine local IP address")
+            _log("INFO", "Cannot determine local IP address")
             return "camera_000", "Unnamed Camera", "unregistered", local_ip
         
         url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/register"
@@ -141,8 +148,8 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         if existing_camera_id:
             params["camera_id"] = existing_camera_id
 
-        print(f"Registering with streaming server: {url} params={params} from IP: {local_ip}")
-        debug_print("API_REQUEST", "%s | endpoint: /api/stream/register | params: %s", "POST", str(params))
+        _log("INFO", f"Registering with streaming server: {url} params={params} from IP: {local_ip}")
+        debug__log("INFO", "API_REQUEST", "%s | endpoint: /api/stream/register | params: %s", "POST", str(params))
 
         response = requests.post(
             url,
@@ -151,7 +158,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         )
 
         if response.status_code != 200:
-            print(f"Registration failed: HTTP {response.status_code}")
+            _log("INFO", f"Registration failed: HTTP {response.status_code}")
             return "camera_000", "Unnamed Camera", "unregistered", local_ip
 
         result = response.json()
@@ -161,19 +168,19 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         
         if status == "registered":
             camera_name = result.get("camera_name", f"Camera {camera_id.split('_')[-1]}")
-            print(f"Camera registered: {camera_name} ({camera_id})")
+            _log("INFO", f"Camera registered: {camera_name} ({camera_id})")
         elif status == "pending":
             camera_name = f"Camera {camera_id.split('_')[-1]}"
-            print(f"Camera pending approval: {camera_id}")
-            print(f"   Please approve registration on the web dashboard")
+            _log("INFO", f"Camera pending approval: {camera_id}")
+            _log("INFO", f"   Please approve registration on the web dashboard")
         else:
             camera_name = f"Camera {camera_id.split('_')[-1]}"
-            print(f"Unknown status: {status}")
+            _log("INFO", f"Unknown status: {status}")
 
         return camera_id, camera_name, status, local_ip
 
     except Exception as e:
-        print(f"Registration error: {e}")
+        _log("INFO", f"Registration error: {e}")
         local_ip = get_local_ip()
         return "camera_000", "Unnamed Camera", "unregistered", local_ip
 
@@ -181,13 +188,13 @@ def check_registration_status(server_ip, camera_id, local_ip):
     """Check if camera is already registered with server"""
     try:
         url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/registered"
-        print("Checking registration status on streaming server...")
-        debug_print("API_REQUEST", "%s | endpoint: /api/stream/registered", "GET")
+        _log("INFO", "Checking registration status on streaming server...")
+        debug__log("INFO", "API_REQUEST", "%s | endpoint: /api/stream/registered", "GET")
 
         response = requests.get(url, timeout=3.0)
 
         if response.status_code != 200:
-            print(f"Failed to check registration: HTTP {response.status_code}")
+            _log("INFO", f"Failed to check registration: HTTP {response.status_code}")
             return "unknown"
 
         result = response.json()
@@ -201,14 +208,14 @@ def check_registration_status(server_ip, camera_id, local_ip):
         }
 
         if camera_id in camera_map:
-            print(f"Camera {camera_id} found in server registry")
+            _log("INFO", f"Camera {camera_id} found in server registry")
             return "registered"
 
-        print(f"Camera {camera_id} not found in server registry")
+        _log("INFO", f"Camera {camera_id} not found in server registry")
         return "unregistered"
 
     except Exception as e:
-        print(f"Registration check error: {e}")
+        _log("INFO", f"Registration check error: {e}")
         return "unknown"
 
 
@@ -219,10 +226,10 @@ def initialize_camera():
     CAMERA_ID, CAMERA_NAME, registration_status, saved_ip, last_reg = load_camera_info()
     local_ip = get_local_ip()
 
-    print(f"=== Camera Initialization ===")
-    print(f"Loaded from storage: {CAMERA_NAME} ({CAMERA_ID}) - Status: {registration_status}")
-    print(f"Local IP: {local_ip}")
-    print(f"Streaming Server: {STREAMING_HTTP_URL}")
+    _log("INFO", f"=== Camera Initialization ===")
+    _log("INFO", f"Loaded from storage: {CAMERA_NAME} ({CAMERA_ID}) - Status: {registration_status}")
+    _log("INFO", f"Local IP: {local_ip}")
+    _log("INFO", f"Streaming Server: {STREAMING_HTTP_URL}")
 
     # Always check registration status with server on startup
     if CAMERA_ID and CAMERA_ID != "camera_000":
@@ -231,10 +238,10 @@ def initialize_camera():
         if server_status == "registered":
             # Camera is registered on server
             registration_status = "registered"
-            print(f"Confirmed: Camera is registered on server")
+            _log("INFO", f"Confirmed: Camera is registered on server")
         elif server_status == "unregistered":
             # Need to re-register
-            print(f"Camera not registered on server, attempting registration...")
+            _log("INFO", f"Camera not registered on server, attempting registration...")
             CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
                 STREAMING_SERVER_IP, 
                 existing_camera_id=CAMERA_ID
@@ -243,19 +250,19 @@ def initialize_camera():
             save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status, local_ip)
         else:
             # Server unavailable, use saved status
-            print(f"Cannot reach server, using saved status: {registration_status}")
+            _log("INFO", f"Cannot reach server, using saved status: {registration_status}")
     else:
         # First time registration
-        print(f"First time registration...")
+        _log("INFO", f"First time registration...")
         CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
             STREAMING_SERVER_IP
         )
         save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status, local_ip)
 
-    print(f"=== Final Camera Status ===")
-    print(f"Camera: {CAMERA_NAME} ({CAMERA_ID})")
-    print(f"Status: {registration_status}")
-    print(f"Local IP: {local_ip}")
+    _log("INFO", f"=== Final Camera Status ===")
+    _log("INFO", f"Camera: {CAMERA_NAME} ({CAMERA_ID})")
+    _log("INFO", f"Status: {registration_status}")
+    _log("INFO", f"Local IP: {local_ip}")
 
     # Update CameraStateManager with the final state
     camera_state_manager.set_camera_id(CAMERA_ID, notify=False)
