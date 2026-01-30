@@ -22,7 +22,7 @@ valid_class_id = [0]
 
 # Fall detection parameters
 fallParam = {
-    "v_bbox_y": 0.43,
+    "v_bbox_y": 0.12,
     "angle": 70
 }
 
@@ -313,36 +313,27 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
             
             # Evaluate pose using PoseEstimation
             try:
-                
-                # Check if HME mode is enabled
-                use_hme = False
+                # Check if HME mode is enabled (for analytics/encrypted features only)
+                use_hme_for_analytics = False
                 try:
                     from control_manager import get_flag
-                    use_hme = get_flag("hme", False)
+                    use_hme_for_analytics = get_flag("hme", False)
                 except ImportError:
                     pass
-                
-                # Evaluate pose with keypoints
-                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints), use_hme)
-                
+
+                # Evaluate pose with keypoints (always use plain mode for fall detection)
+                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints), use_hme=False)
+
                 # Extract label from pose_data
                 if pose_data is not None:
                     pose_label = pose_data.get('plain_label', 'unknown')
-                    # Get encrypted features when HME is enabled
-                    if use_hme:
+                    # Get encrypted features when HME is enabled for analytics
+                    if use_hme_for_analytics:
                         encrypted_features = pose_estimator.get_encrypted_features()
             except ImportError:
                 # Fallback if pose_estimation not available
                 pass
-    
-    # Get HME flag from control manager
-    use_hme = False
-    try:
-        from control_manager import get_flag
-        use_hme = get_flag("hme", False)
-    except ImportError:
-        pass
-    
+
     # Call fall detection with the tracker object and pose data
     fall_info = get_fall_info(
         tracker_obj,
@@ -351,8 +342,7 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
         fallParam,
         queue_size,
         effective_fps,
-        pose_data,
-        use_hme
+        pose_data
     )
     
     return fall_info, pose_label, encrypted_features

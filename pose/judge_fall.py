@@ -12,44 +12,20 @@ counter_bbox_only = 0        # Algorithm 1: BBox motion only
 counter_motion_pose_and = 0  # Algorithm 2: BBox motion AND strict pose
 # Algorithm 3 uses the other two counters
 
-def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_size, fps, pose_data=None, use_hme=False):
-    global counter_bbox_only, counter_motion_pose_and
+v_top_max = -1
+
+def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_size, fps, pose_data=None):
+    global counter_bbox_only, counter_motion_pose_and, v_top_max
 
     fall_detected_bbox_only = False      # Algorithm 1
     fall_detected_motion_pose_and = False # Algorithm 2
     fall_detected_flexible = False       # Algorithm 3
 
-    # Handle HME mode differently
-    if use_hme:
-        # In HME mode, we might have limited pose information
-        # We'll use the label if available, but angles might not be precise
-        if pose_data and isinstance(pose_data, dict):
-            label = pose_data.get('label')
-            # For fall detection in HME mode, we need approximate angle values
-            # We can use the raw integer values if available
-            raw_vals = pose_data.get('raw_int_values', {})
-            
-            if label == "lying_down":
-                # In HME mode, lying_down from pose classification is a strong indicator
-                # We'll use bbox motion as primary and pose label as secondary
-                torso_angle_approx = raw_vals.get('Tra', 0) / 100.0 if raw_vals else 85.0
-                thigh_uprightness_approx = raw_vals.get('Tha', 0) / 100.0 if raw_vals else 70.0
-            else:
-                # Not lying, use safe default values
-                torso_angle_approx = 30.0
-                thigh_uprightness_approx = 30.0
-        else:
-            # No pose data in HME mode
-            torso_angle_approx = 0.0
-            thigh_uprightness_approx = 0.0
-            label = None
-    else:
-        # Plain mode: original logic
-        if pose_data is None or (isinstance(pose_data, dict) and pose_data.get('label') == "None"):
-            # Reset all counters when pose data is invalid
-            counter_bbox_only = max(0, counter_bbox_only - 1)
-            counter_motion_pose_and = max(0, counter_motion_pose_and - 1)
-            return fall_detected_bbox_only, counter_bbox_only, fall_detected_motion_pose_and, counter_motion_pose_and, fall_detected_flexible, 0
+    # Reset all counters when pose data is invalid
+    if pose_data is None or (isinstance(pose_data, dict) and pose_data.get('label') == "None"):
+        counter_bbox_only = max(0, counter_bbox_only - 1)
+        counter_motion_pose_and = max(0, counter_motion_pose_and - 1)
+        return fall_detected_bbox_only, counter_bbox_only, fall_detected_motion_pose_and, counter_motion_pose_and, fall_detected_flexible, 0
 
     # Case: no detection available
     if online_targets["bbox"][index].empty():
@@ -69,27 +45,22 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     # 1. Vertical speed of top (y) coordinate — downward movement = positive
     dy_top = cur_bbox[1] - pre_bbox[1]
     v_top = dy_top / elapsed_ms
+    v_top_max = max(v_top, v_top_max)
 
     # 2. Vertical change of height (shrinking = falling)
     dh = pre_bbox[3] - cur_bbox[3]
     v_height = dh / elapsed_ms
 
-    logger.print("FALL_DETECT", "v_top=%.6f, v_height=%.6f, threshold=%s", v_top, v_height, fallParam['v_bbox_y'])
+    logger.print("FALL_DETECT", "v_top=%.6f, v_height=%.6f, threshold=%s, fps=%s, v_top_max=%s", v_top, v_height, fallParam['v_bbox_y'], fps, v_top_max)
 
-    if use_hme:
-        # HME mode: use approximate values
-        torso_angle = torso_angle_approx
-        thigh_uprightness = thigh_uprightness_approx
-        logger.print("FALL_DETECT", "HME mode: torso_angle=%s, thigh_uprightness=%s, label=%s", torso_angle, thigh_uprightness, label)
-    else:
-        # Plain mode: extract from pose_data
-        torso_angle = None
-        thigh_uprightness = None
-        
-        if pose_data and isinstance(pose_data, dict):
-            torso_angle = pose_data.get('torso_angle')
-            thigh_uprightness = pose_data.get('thigh_uprightness')
-            logger.print("FALL_DETECT", "Pose mode: torso_angle=%s, thigh_uprightness=%s", torso_angle, thigh_uprightness)
+    # Extract from pose_data
+    torso_angle = None
+    thigh_uprightness = None
+
+    if pose_data and isinstance(pose_data, dict):
+        torso_angle = pose_data.get('torso_angle')
+        thigh_uprightness = pose_data.get('thigh_uprightness')
+        logger.print("FALL_DETECT", "Pose mode: torso_angle=%s, thigh_uprightness=%s", torso_angle, thigh_uprightness)
 
     # Calculate bbox motion evidence
     bbox_motion_detected = (v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"])
@@ -97,27 +68,16 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     # Calculate pose conditions
     strict_pose_condition = False
     flexible_pose_condition = False
-    
-    if use_hme:
-        # In HME mode, we rely more on the pose classification label
-        # and approximate angle values
-        if label == "lying_down":
-            # If HME classified as lying_down, consider it for fall detection
+
+    if torso_angle is not None and thigh_uprightness is not None:
+        # Strict condition: clearly lying down
+        strict_pose_condition = (torso_angle > 80 and thigh_uprightness > 60)
+
+        # Flexible condition: various falling/lying positions
+        if torso_angle > 80:
             flexible_pose_condition = True
-            # For strict condition, also check approximate angles
-            if torso_angle > 80 and thigh_uprightness > 60:
-                strict_pose_condition = True
-    else:
-        # Plain mode: original angle-based logic
-        if torso_angle is not None and thigh_uprightness is not None:
-            # Strict condition: clearly lying down
-            strict_pose_condition = (torso_angle > 80 and thigh_uprightness > 60)
-            
-            # Flexible condition: various falling/lying positions
-            if torso_angle > 80:
-                flexible_pose_condition = True
-            elif 30 < torso_angle < 80 and thigh_uprightness > 60:
-                flexible_pose_condition = True
+        elif 30 < torso_angle < 80 and thigh_uprightness > 60:
+            flexible_pose_condition = True
     
     # Algorithm 1: BBox Only
     if bbox_motion_detected:

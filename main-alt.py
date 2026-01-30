@@ -525,7 +525,7 @@ def main():
             if track_result.get("bbox"):
                 nx, ny, nw, nh = track_result.get("bbox")
                 cv2.rectangle(img, (int(nx), int(ny)), (int(nx+nw), int(ny+nh)), (255, 0, 0), 2)
-                cv2.putText(img, f"ID: {track_result.get('track_id')} {track_result.get('pose_label')}", 
+                cv2.putText(img, f"ID: {track_result.get('track_id')} {track_result.get('pose_label')} [{track_result.get('status')}]", 
                            (int(nx), int(ny)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
             logger.print("MAIN", "pose_label <- track_result['pose_label']: %s", track_result.get('pose_label', 'unknown'))
