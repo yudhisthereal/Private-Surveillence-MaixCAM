@@ -105,19 +105,15 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, pose_extractor, img, is_recording=False, skeleton_saver=None, frame_id=0, safety_checker=None, check_method=None, fps=30, analytics_mode=False):
-    """Process a single track - draw tracking info and handle fall detection
-    
+def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False):
+    """Process a single track - handle fall detection and return track info
+
     Args:
         track: The track object from tracker
         objs: Detected objects from pose extractor
-        pose_extractor: Pose estimation instance
-        img: Image to draw on
         is_recording: Whether recording is active
         skeleton_saver: SkeletonSaver2D instance for recording
         frame_id: Current frame ID
-        safety_checker: BodySafetyChecker instance
-        check_method: Safety check method
         fps: Current FPS for fall detection
         analytics_mode: If True, use AnalyticsWorker results; if False, use local fall detection
     """
