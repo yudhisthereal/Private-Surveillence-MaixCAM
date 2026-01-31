@@ -16,6 +16,8 @@ logger = DebugLogger(tag="CTRL_MGR", instance_enable=False)
 # Local file paths for persistent storage
 LOCAL_FLAGS_FILE = "/root/control_flags.json"
 SAFE_AREA_FILE = "/root/safe_areas.json"
+BED_AREA_FILE = "/root/bed_areas.json"
+FLOOR_AREA_FILE = "/root/floor_areas.json"
 
 # ============================================
 # CAMERA STATE MANAGER
@@ -384,6 +386,183 @@ def body_in_safe_zone(body_keypoints, check_method=CheckMethod.TORSO_HEAD):
 
 
 # ============================================
+# BED AREAS MANAGEMENT
+# ============================================
+
+# Bed area checker instance (will be initialized in main)
+bed_area_checker = None
+
+def initialize_bed_area_checker(bed_area_checker_instance):
+    """Initialize bed area checker instance"""
+    global bed_area_checker
+    bed_area_checker = bed_area_checker_instance
+
+def get_bed_area_checker():
+    """Get bed area checker instance"""
+    return bed_area_checker
+
+def load_bed_areas():
+    """Load bed areas from JSON file"""
+    try:
+        if os.path.exists(BED_AREA_FILE):
+            with open(BED_AREA_FILE, 'r') as f:
+                bed_areas = json.load(f)
+            logger.print("BED_AREA", "Loaded %d bed area(s) from file", len(bed_areas))
+            return bed_areas
+        else:
+            logger.print("BED_AREA", "No bed areas file found, using default")
+            return []
+    except Exception as e:
+        logger.print("BED_AREA", "Error loading bed areas: %s", e)
+        return []
+
+def save_bed_areas(bed_areas):
+    """Save bed areas to JSON file"""
+    try:
+        with open(BED_AREA_FILE, 'w') as f:
+            json.dump(bed_areas, f, indent=2)
+        logger.print("BED_AREA", "Saved %d bed area(s) to file", len(bed_areas))
+        return True
+    except Exception as e:
+        logger.print("BED_AREA", "Error saving bed areas: %s", e)
+        return False
+
+def update_bed_area_polygons(bed_areas):
+    global bed_area_checker
+    """Update the bed area checker with bed areas"""
+    try:
+        bed_area_checker.clear_bed_polygons()
+        for polygon in bed_areas:
+            if isinstance(polygon, list) and len(polygon) >= 3:
+                bed_area_checker.add_bed_polygon(polygon)
+
+        logger.print("BED_AREA", "Updated bed area checker with %d polygon(s)", len(bed_areas))
+
+        # Save to local file
+        save_bed_areas(bed_areas)
+
+        return True
+
+    except Exception as e:
+        logger.print("BED_AREA", "Error updating bed area checker: %s", e)
+        return False
+
+def add_bed_area(polygon):
+    """Add a bed area polygon"""
+    global bed_area_checker
+
+    bed_area_checker.add_bed_polygon(polygon)
+    logger.print("BED_AREA", "Added bed area polygon with %d points", len(polygon))
+
+    # Save all bed areas
+    save_all_bed_areas()
+
+def clear_bed_areas():
+    global bed_area_checker
+    """Clear all bed areas"""
+    if bed_area_checker:
+        bed_area_checker.clear_bed_polygons()
+        logger.print("BED_AREA", "Cleared all bed areas")
+        save_bed_areas([])
+
+def save_all_bed_areas():
+    """Save all current bed areas from bed area checker"""
+    if bed_area_checker:
+        save_bed_areas(bed_area_checker.bed_polygons)
+
+
+# ============================================
+# FLOOR AREAS MANAGEMENT
+# ============================================
+
+# Floor area checker instance (will be initialized in main)
+floor_area_checker = None
+
+def initialize_floor_area_checker(floor_area_checker_instance):
+    """Initialize floor area checker instance"""
+    global floor_area_checker
+    floor_area_checker = floor_area_checker_instance
+
+def get_floor_area_checker():
+    """Get floor area checker instance"""
+    return floor_area_checker
+
+def load_floor_areas():
+    """Load floor areas from JSON file"""
+    try:
+        if os.path.exists(FLOOR_AREA_FILE):
+            with open(FLOOR_AREA_FILE, 'r') as f:
+                floor_areas = json.load(f)
+            logger.print("FLOOR_AREA", "Loaded %d floor area(s) from file", len(floor_areas))
+            return floor_areas
+        else:
+            logger.print("FLOOR_AREA", "No floor areas file found, using default")
+            return []
+    except Exception as e:
+        logger.print("FLOOR_AREA", "Error loading floor areas: %s", e)
+        return []
+
+def save_floor_areas(floor_areas):
+    """Save floor areas to JSON file"""
+    try:
+        with open(FLOOR_AREA_FILE, 'w') as f:
+            json.dump(floor_areas, f, indent=2)
+        logger.print("FLOOR_AREA", "Saved %d floor area(s) to file", len(floor_areas))
+        return True
+    except Exception as e:
+        logger.print("FLOOR_AREA", "Error saving floor areas: %s", e)
+        return False
+
+def update_floor_area_polygons(floor_areas):
+    global floor_area_checker
+    """Update the floor area checker with floor areas"""
+    try:
+        floor_area_checker.clear_floor_polygons()
+        for polygon in floor_areas:
+            if isinstance(polygon, list) and len(polygon) >= 3:
+                floor_area_checker.add_floor_polygon(polygon)
+
+        logger.print("FLOOR_AREA", "Updated floor area checker with %d polygon(s)", len(floor_areas))
+
+        # Save to local file
+        save_floor_areas(floor_areas)
+
+        return True
+
+    except Exception as e:
+        logger.print("FLOOR_AREA", "Error updating floor area checker: %s", e)
+        return False
+
+def add_floor_area(polygon):
+    """Add a floor area polygon"""
+    global floor_area_checker
+
+    floor_area_checker.add_floor_polygon(polygon)
+    logger.print("FLOOR_AREA", "Added floor area polygon with %d points", len(polygon))
+
+    # Save all floor areas
+    save_all_floor_areas()
+
+def clear_floor_areas():
+    global floor_area_checker
+    """Clear all floor areas"""
+    if floor_area_checker:
+        floor_area_checker.clear_floor_polygons()
+        logger.print("FLOOR_AREA", "Cleared all floor areas")
+        save_floor_areas([])
+
+def save_all_floor_areas():
+    """Save all current floor areas from floor area checker"""
+    if floor_area_checker:
+        save_floor_areas(floor_area_checker.floor_polygons)
+
+
+# ============================================
+# STREAMING SERVER COMMUNICATION (Camera State & Safe Areas)
+# ============================================
+
+
+# ============================================
 # STREAMING SERVER COMMUNICATION (Camera State & Safe Areas)
 # ============================================
 
@@ -451,6 +630,36 @@ def get_safe_areas_from_server():
         return []
     except Exception as e:
         logger.print("CTRL_MGR", "Get safe areas error: %s", e)
+        return []
+
+def get_bed_areas_from_server():
+    """Get bed areas from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/bed-areas?camera_id={camera_id}"
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/bed-areas | params: camera_id=%s", "GET", camera_id)
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        logger.print("CTRL_MGR", "Get bed areas error: %s", e)
+        return []
+
+def get_floor_areas_from_server():
+    """Get floor areas from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/floor-areas?camera_id={camera_id}"
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/floor-areas | params: camera_id=%s", "GET", camera_id)
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        logger.print("CTRL_MGR", "Get floor areas error: %s", e)
         return []
 
 def report_state(rtmp_connected=False, is_recording=False):

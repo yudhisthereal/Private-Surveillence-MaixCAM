@@ -19,6 +19,7 @@ from config import (
 
 from control_manager import (
     get_camera_state_from_server, get_safe_areas_from_server, report_state,
+    get_bed_areas_from_server, get_floor_areas_from_server,
     camera_state_manager
 )
 from streaming import send_frame_to_server, send_background_to_server
@@ -26,12 +27,14 @@ from tools.time_utils import time_ms, TaskProfiler
 
 class FlagAndSafeAreaSyncWorker(threading.Thread):
     """Background thread for syncing flags AND safe areas from streaming server"""
-    
-    def __init__(self, flags_queue, safe_areas_queue, streaming_url, camera_id, 
-                 sync_interval_ms=FLAG_SYNC_INTERVAL_MS):
+
+    def __init__(self, flags_queue, safe_areas_queue, streaming_url, camera_id,
+                 sync_interval_ms=FLAG_SYNC_INTERVAL_MS, bed_areas_queue=None, floor_areas_queue=None):
         super().__init__(daemon=True)
         self.flags_queue = flags_queue
         self.safe_areas_queue = safe_areas_queue
+        self.bed_areas_queue = bed_areas_queue
+        self.floor_areas_queue = floor_areas_queue
         self.streaming_url = streaming_url
         self.camera_id = camera_id
         self.sync_interval = sync_interval_ms / 1000.0  # Convert to seconds
@@ -40,7 +43,9 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
         self.max_errors = 10
         self.last_successful_sync = 0
         self.last_safe_area_sync = 0
-        
+        self.last_bed_area_sync = 0
+        self.last_floor_area_sync = 0
+
         # Use CameraStateManager to set the camera_id
         camera_state_manager.set_camera_id(camera_id)
         
@@ -74,7 +79,7 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                 current_time = time.time()
                 if current_time - self.last_safe_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
                     safe_areas = get_safe_areas_from_server()
-                    
+
                     if safe_areas is not None and isinstance(safe_areas, list):
                         try:
                             self.safe_areas_queue.put_nowait(("safe_areas_update", safe_areas))
@@ -84,6 +89,36 @@ class FlagAndSafeAreaSyncWorker(threading.Thread):
                             pass
                     else:
                         logger.print("FLAG_SYNC", "Failed to get safe areas from server")
+
+                # 3. Get bed areas from streaming server (less frequent)
+                if current_time - self.last_bed_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
+                    if self.bed_areas_queue is not None:
+                        bed_areas = get_bed_areas_from_server()
+
+                        if bed_areas is not None and isinstance(bed_areas, list):
+                            try:
+                                self.bed_areas_queue.put_nowait(("bed_areas_update", bed_areas))
+                                logger.print("FLAG_SYNC", "Bed areas synced (%d polygons)", len(bed_areas))
+                                self.last_bed_area_sync = current_time
+                            except queue.Full:
+                                pass
+                        else:
+                            logger.print("FLAG_SYNC", "Failed to get bed areas from server")
+
+                # 4. Get floor areas from streaming server (less frequent)
+                if current_time - self.last_floor_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
+                    if self.floor_areas_queue is not None:
+                        floor_areas = get_floor_areas_from_server()
+
+                        if floor_areas is not None and isinstance(floor_areas, list):
+                            try:
+                                self.floor_areas_queue.put_nowait(("floor_areas_update", floor_areas))
+                                logger.print("FLAG_SYNC", "Floor areas synced (%d polygons)", len(floor_areas))
+                                self.last_floor_area_sync = current_time
+                            except queue.Full:
+                                pass
+                        else:
+                            logger.print("FLAG_SYNC", "Failed to get floor areas from server")
                 
             except requests.exceptions.Timeout:
                 self.connection_errors += 1

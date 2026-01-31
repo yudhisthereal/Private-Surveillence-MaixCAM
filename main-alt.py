@@ -95,7 +95,10 @@ from pc_video_record import VideoRecorder
 from debug_config import DebugLogger
 # tools.wifi_connect skipped on PC
 from tools.skeleton_saver import SkeletonSaver2D
-from tools.safe_area import BodySafetyChecker, CheckMethod
+from tools.safe_area import SafeAreaChecker, CheckMethod
+from tools.bed_area_checker import BedAreaChecker
+from tools.floor_area_checker import FloorAreaChecker
+from tools.safety_judgment import SafetyJudgment
 
 from config import (
     initialize_camera, save_camera_info, STREAMING_HTTP_URL,
@@ -114,7 +117,9 @@ from pc_camera_manager import initialize_cameras, load_fonts
 from control_manager import (
     load_initial_flags, get_control_flags, send_background_updated, update_control_flags_from_server,
     update_control_flag, get_flag, initialize_safety_checker,
-    update_safety_checker_polygons, load_safe_areas, camera_state_manager, register_status_change_callback
+    update_safety_checker_polygons, load_safe_areas, camera_state_manager, register_status_change_callback,
+    initialize_bed_area_checker, update_bed_area_polygons, load_bed_areas,
+    initialize_floor_area_checker, update_floor_area_polygons, load_floor_areas
 )
 from workers import (
     FlagAndSafeAreaSyncWorker, StateReporterWorker, FrameUploadWorker,
@@ -152,15 +157,35 @@ def main():
     skeleton_saver_2d = SkeletonSaver2D()
     skeleton_saver_2d.log_dir = os.path.abspath("./extracted-skeleton-2d") # Patch path
     
-    # 5. Initialize safety checker
-    safety_checker = BodySafetyChecker()
-    initialize_safety_checker(safety_checker)
-    
+    # 5. Initialize area checkers
+    safe_area_checker = SafeAreaChecker()
+    initialize_safety_checker(safe_area_checker)
+
+    bed_area_checker = BedAreaChecker(too_long_threshold_sec=5.0)
+    initialize_bed_area_checker(bed_area_checker)
+
+    floor_area_checker = FloorAreaChecker()
+    initialize_floor_area_checker(floor_area_checker)
+
+    # Initialize SafetyJudgment with all three checkers
+    safety_judgment = SafetyJudgment(
+        bed_area_checker=bed_area_checker,
+        floor_area_checker=floor_area_checker,
+        safe_area_checker=safe_area_checker,
+        check_method=CheckMethod.TORSO_HEAD
+    )
+
     # 6. Load initial configuration
     logger.print("MAIN", "=== Loading Configuration ===")
     load_initial_flags()
     initial_safe_areas = load_safe_areas()
     update_safety_checker_polygons(initial_safe_areas)
+
+    initial_bed_areas = load_bed_areas()
+    update_bed_area_polygons(initial_bed_areas)
+
+    initial_floor_areas = load_floor_areas()
+    update_floor_area_polygons(initial_floor_areas)
     
     # 7. Load or create background image
     background_img = None
@@ -178,17 +203,20 @@ def main():
     # ============================================
     flags_queue = queue.Queue(maxsize=10)
     safe_areas_queue = queue.Queue(maxsize=5)
+    bed_areas_queue = queue.Queue(maxsize=5)
+    floor_areas_queue = queue.Queue(maxsize=5)
     analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
     tracks_queue = queue.Queue(maxsize=30)  # Queue for tracks sender
-    
+
     # Start command server (might conflict on port 8080 if running on PC, but we'll try)
     command_receiver = CommandReceiver()
     command_receiver.start()
-    
+
     # Start async workers
     logger.print("MAIN", "Starting async workers...")
     flag_sync_worker = FlagAndSafeAreaSyncWorker(
-        flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID
+        flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID,
+        bed_areas_queue=bed_areas_queue, floor_areas_queue=floor_areas_queue
     )
     state_reporter_worker = StateReporterWorker(STREAMING_HTTP_URL, CAMERA_ID)
     frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID, profiler_enabled=True)
@@ -307,13 +335,31 @@ def main():
                         streaming_server_available = True
         except queue.Empty:
             pass
-        
+
         try:
             while not safe_areas_queue.empty():
                 msg_type, data = safe_areas_queue.get_nowait()
                 if msg_type == "safe_areas_update":
                     if isinstance(data, list):
                         update_safety_checker_polygons(data)
+        except queue.Empty:
+            pass
+
+        try:
+            while not bed_areas_queue.empty():
+                msg_type, data = bed_areas_queue.get_nowait()
+                if msg_type == "bed_areas_update":
+                    if isinstance(data, list):
+                        update_bed_area_polygons(data)
+        except queue.Empty:
+            pass
+
+        try:
+            while not floor_areas_queue.empty():
+                msg_type, data = floor_areas_queue.get_nowait()
+                if msg_type == "floor_areas_update":
+                    if isinstance(data, list):
+                        update_floor_area_polygons(data)
         except queue.Empty:
             pass
         frame_profiler.end_task("async_updates")
@@ -484,8 +530,7 @@ def main():
                 frame_id=frame_id,
                 fps=current_fps,
                 analytics_mode=get_flag("analytics_mode", False),
-                safety_checker=safety_checker,
-                check_method=CheckMethod.TORSO_HEAD
+                safety_judgment=safety_judgment
             )
             
             if not track_result:

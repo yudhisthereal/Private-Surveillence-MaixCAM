@@ -105,7 +105,7 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False, safety_checker=None, check_method=None):
+def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False, safety_judgment=None):
     """Process a single track - handle fall detection and safety checking
 
     Args:
@@ -116,8 +116,7 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
         frame_id: Current frame ID
         fps: Current FPS for fall detection
         analytics_mode: If True, use AnalyticsWorker results; if False, use local fall detection
-        safety_checker: BodySafetyChecker instance for safe zone checking
-        check_method: CheckMethod enum for safety checking (e.g., CheckMethod.TORSO_HEAD)
+        safety_judgment: SafetyJudgment instance that combines all area checkers
     """
     global online_targets, fall_ids, unsafe_ids, current_fps
     
@@ -254,7 +253,7 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                             if track.id in fall_ids:
                                 fall_ids.discard(track.id)
 
-            # Safety zone checking (only if not already marked as fall)
+            # Safety checking using SafetyJudgment (only if not already marked as fall)
             if track.id not in fall_ids:
                 # Check if safety checking is enabled
                 use_safety_check = False
@@ -264,9 +263,9 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                 except ImportError:
                     pass
 
-                if use_safety_check and safety_checker is not None:
-                    # Convert keypoints to the format expected by BodySafetyChecker
-                    # BodySafetyChecker expects: List[Tuple[float, float, float]] (x, y, confidence)
+                if use_safety_check and safety_judgment is not None:
+                    # Convert keypoints to the format expected by SafetyJudgment
+                    # SafetyJudgment expects: List[Tuple[float, float, float]] (x, y, confidence)
                     body_keypoints = []
                     for i in range(0, len(obj.points), 2):
                         if i + 1 < len(obj.points):
@@ -275,19 +274,17 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                             # Use a default confidence of 1.0 since pose extractor doesn't provide it
                             body_keypoints.append((x, y, 1.0))
 
-                    # Use default check method if not provided
-                    if check_method is None:
-                        from tools.safe_area import CheckMethod
-                        check_method = CheckMethod.TORSO_HEAD
-
-                    # Check if body is in safe zone
-                    is_safe = safety_checker.body_in_safe_zone(body_keypoints, check_method)
+                    # Use SafetyJudgment to evaluate safety
+                    is_safe, reason, details = safety_judgment.evaluate_safety(
+                        track.id, body_keypoints, pose_label
+                    )
 
                     if not is_safe:
-                        # Person is outside safe zones - mark as unsafe
+                        # Person is unsafe - add to unsafe_ids
                         unsafe_ids.add(track.id)
+                        logger.print("TRACKING", "Track %d unsafe: %s | details: %s", track.id, reason, details)
                     else:
-                        # Person is in safe zone - remove from unsafe_ids
+                        # Person is safe - remove from unsafe_ids
                         if track.id in unsafe_ids:
                             unsafe_ids.discard(track.id)
                 else:
