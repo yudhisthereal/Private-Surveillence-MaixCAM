@@ -15,3 +15,4 @@ TODO*.md
 .env
 .env.local
 pose/pose_estimation_old.py
+*\n*
