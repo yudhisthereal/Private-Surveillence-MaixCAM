@@ -136,6 +136,124 @@ from tools.time_utils import time_ms, TaskProfiler, get_timestamp_str
 logger = DebugLogger("MAIN", instance_enable=False)
 
 # ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def merge_background_with_mask(old_background, new_frame, processed_tracks, padding=20):
+    """Merge old background with new frame, masking out areas where humans are present.
+
+    Uses NumPy for efficient array operations (OpenCV Mat is NumPy array).
+    Uses keypoints for precise masking: body bbox and head area (ear-nose-ear).
+
+    Args:
+        old_background: Existing background image (NumPy array, BGR format)
+        new_frame: New raw frame (NumPy array, BGR format)
+        processed_tracks: List of track dicts with 'bbox' and 'keypoints'
+        padding: Extra padding around body bboxes and head base
+
+    Returns:
+        Tuple of (merged_image, mask_visualization)
+        - merged_image: Result with old background in human areas, new frame elsewhere
+        - mask_visualization: Color-coded mask for display overlay (white=body, red=head)
+    """
+    import math
+
+    # Start with a copy of the new frame
+    merged = new_frame.copy()
+    height, width = merged.shape[:2]
+
+    # Create color mask for visualization:
+    # Black (0,0,0) = unmasked, White (255,255,255) = body, Red (255,0,0) = head
+    mask_vis = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Create binary mask for merging
+    mask_binary = np.zeros((height, width), dtype=np.uint8)
+
+    # For each track, mask body bbox and head area
+    for track in processed_tracks:
+        bbox = track.get("bbox")
+        keypoints = track.get("keypoints")
+
+        if not bbox:
+            continue
+
+        x, y, w, h = bbox
+
+        # 1. Mask body bbox with normal padding
+        x1 = max(0, int(x - padding))
+        y1 = max(0, int(y - padding))
+        x2 = min(width, int(x + w + padding))
+        y2 = min(height, int(y + h + padding))
+
+        mask_binary[y1:y2, x1:x2] = 255
+        # Mark in visualization (white = body)
+        mask_vis[y1:y2, x1:x2] = [255, 255, 255]
+
+        # 2. Mask head area (ear-nose-ear) with proportional padding
+        if keypoints and len(keypoints) >= 10:
+            # Extract nose and ear coordinates
+            nose_x, nose_y = keypoints[0], keypoints[1]
+            left_ear_x, left_ear_y = keypoints[6], keypoints[7]
+            right_ear_x, right_ear_y = keypoints[8], keypoints[9]
+
+            # Check if keypoints are valid (not 0,0 or near it)
+            if nose_x > 0 and nose_y > 0:
+                # Calculate distances from nose to ears
+                nose_to_left_ear_dist = 0
+                nose_to_right_ear_dist = 0
+
+                if left_ear_x > 0 and left_ear_y > 0:
+                    nose_to_left_ear_dist = math.sqrt((nose_x - left_ear_x)**2 + (nose_y - left_ear_y)**2)
+
+                if right_ear_x > 0 and right_ear_y > 0:
+                    nose_to_right_ear_dist = math.sqrt((nose_x - right_ear_x)**2 + (nose_y - right_ear_y)**2)
+
+                # Use the longer distance, proportionally scale padding
+                max_ear_nose_dist = max(nose_to_left_ear_dist, nose_to_right_ear_dist)
+
+                # Calculate proportional head padding: base (padding) + (1.5 * longest ear-nose distance)
+                if max_ear_nose_dist > 0:
+                    head_padding = int(padding + (max_ear_nose_dist * 1.5))
+                else:
+                    head_padding = padding
+
+                # Calculate head bounding box from ear-nose-ear
+                if left_ear_x > 0 and right_ear_x > 0:
+                    # Both ears visible, use them for width
+                    head_x1 = int(min(left_ear_x, right_ear_x) - head_padding)
+                    head_x2 = int(max(left_ear_x, right_ear_x) + head_padding)
+                else:
+                    # One or both ears not visible, use nose as center
+                    head_x1 = int(nose_x - head_padding)
+                    head_x2 = int(nose_x + head_padding)
+
+                head_y1 = int(min(nose_y, left_ear_y if left_ear_y > 0 else nose_y, right_ear_y if right_ear_y > 0 else nose_y) - head_padding)
+                head_y2 = int(max(nose_y, left_ear_y if left_ear_y > 0 else nose_y, right_ear_y if right_ear_y > 0 else nose_y) + head_padding)
+
+                # Clamp to image bounds
+                head_x1 = max(0, head_x1)
+                head_y1 = max(0, head_y1)
+                head_x2 = min(width, head_x2)
+                head_y2 = min(height, head_y2)
+
+                # Set head region in mask
+                mask_binary[head_y1:head_y2, head_x1:head_x2] = 255
+                # Mark in visualization (red = head)
+                mask_vis[head_y1:head_y2, head_x1:head_x2] = [255, 0, 0]
+
+    # Where mask is white (human areas), use old_background
+    # Where mask is black (no humans), use new_frame (already set as merged)
+    mask_3ch = cv2.cvtColor(mask_binary, cv2.COLOR_GRAY2BGR)
+    merged = np.where(mask_3ch == 255, old_background, merged)
+
+    return merged, mask_vis
+    # Where mask is black (no humans), use new_frame (already set as merged)
+    mask_3ch = cv2.cvtColor(mask_binary, cv2.COLOR_GRAY2BGR)
+    merged = np.where(mask_3ch == 255, old_background, merged)
+
+    return merged, mask_vis
+
+# ============================================
 # MAIN INITIALIZATION
 # ============================================
 
@@ -268,6 +386,8 @@ def main():
     recording_start_time = 0
     is_recording = False
     background_update_in_progress = False
+    background_update_needed = False  # Flag for deferred background update with masking
+    mask_vis = None  # Store mask visualization for display
     prev_human_present = False
     no_human_counter = 0
     last_update_ms = time_ms()
@@ -421,6 +541,7 @@ def main():
             if prev_human_present and not current_human_present:
                 no_human_counter += 1
                 if no_human_counter >= NO_HUMAN_CONFIRM_FRAMES:
+                    # No humans present, can update background immediately
                     background_img = raw_img.copy()
                     cv2.imwrite(BACKGROUND_PATH, background_img)
                     # Upload background image to server via FrameUploadWorker
@@ -429,7 +550,7 @@ def main():
                             success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                             if success:
                                 frame_upload_worker.update_background(jpeg_bytes.tobytes())
-                                logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
+                                logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload (no humans)")
                         except Exception as e:
                             logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
                     last_update_ms = time_ms()
@@ -437,18 +558,9 @@ def main():
             else:
                 no_human_counter = 0
                 if time_ms() - last_update_ms > UPDATE_INTERVAL_MS:
-                    background_img = raw_img.copy()
-                    cv2.imwrite(BACKGROUND_PATH, background_img)
-                    # Upload background image to server via FrameUploadWorker
-                    if streaming_server_available:
-                        try:
-                            success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-                            if success:
-                                frame_upload_worker.update_background(jpeg_bytes.tobytes())
-                                logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
-                        except Exception as e:
-                            logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
-                    last_update_ms = time_ms()
+                    # Periodic update - defer to after tracking so we can mask out humans
+                    background_update_needed = True
+                    logger.print("MAIN", "[BACKGROUND] Deferred background update scheduled (will mask human areas)")
             prev_human_present = current_human_present
         
         # 6. Prepare display image (no UI rendering)
@@ -597,6 +709,43 @@ def main():
         update_latest_tracks(processed_tracks)
         mark_tracks_as_ready()
 
+        # Deferred background update with masking (after we have track bboxes)
+        if background_update_needed and background_img is not None:
+            try:
+                # Extract bounding boxes from processed tracks
+                # Get valid tracks (have bbox and keypoints)
+                valid_tracks = [t for t in processed_tracks if t.get("bbox") and t.get("keypoints")]
+
+                if valid_tracks:
+                    # Merge background with new frame, masking out human areas
+                    logger.print("MAIN", "[BACKGROUND] Updating background with %d masked track(s)", len(valid_tracks))
+                    new_background, mask_vis = merge_background_with_mask(background_img, raw_img, valid_tracks, padding=20)
+                else:
+                    # No tracks, just use the raw frame
+                    logger.print("MAIN", "[BACKGROUND] No tracks to mask, using raw frame")
+                    new_background = raw_img.copy()
+                    mask_vis = None
+
+                # Save and upload the new background
+                background_img = new_background
+                cv2.imwrite(BACKGROUND_PATH, background_img)
+
+                if streaming_server_available:
+                    try:
+                        success, jpeg_bytes = cv2.imencode('.jpg', background_img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                        if success:
+                            frame_upload_worker.update_background(jpeg_bytes.tobytes())
+                            logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
+                    except Exception as e:
+                        logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
+
+                last_update_ms = time_ms()
+            except Exception as e:
+                logger.print("MAIN", "[BACKGROUND] Error during masked background update: %s", e)
+                mask_vis = None
+            finally:
+                background_update_needed = False
+
         frame_profiler.end_task("tracking")
         
         # 10. Recording
@@ -607,7 +756,17 @@ def main():
         
         # 11. Display
         frame_profiler.start_task("display")
-        disp.show(img)
+
+        # Overlay mask visualization if available (blend with 30% opacity)
+        display_img = img.copy()
+        if mask_vis is not None:
+            # Resize mask to match display size if needed
+            if mask_vis.shape[:2] != display_img.shape[:2]:
+                mask_vis = cv2.resize(mask_vis, (display_img.shape[1], display_img.shape[0]))
+            # Blend mask with 30% opacity
+            display_img = cv2.addWeighted(display_img, 0.7, mask_vis, 0.3, 0)
+
+        disp.show(display_img)
         
         # Check for user exit - Ensure waitKey is called here if disp.show didn't do it enough
         # Increase wait time to 10ms to process UI events better and cap FPS reasonably
