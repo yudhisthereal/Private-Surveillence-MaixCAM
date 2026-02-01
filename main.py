@@ -28,7 +28,7 @@ from control_manager import (
     initialize_floor_area_checker, update_floor_area_polygons, load_floor_areas
 )
 from workers import (
-    FlagAndSafeAreaSyncWorker, StateReporterWorker, FrameUploadWorker,
+    CameraStateSyncWorker, StateReporterWorker, FrameUploadWorker,
     CommandReceiver, PingWorker, get_received_commands, handle_command,
     update_is_recording, AnalyticsWorker,
     send_track_to_analytics, is_analytics_server_available, set_analytics_queue, TracksSenderWorker,
@@ -122,7 +122,7 @@ def main():
 
     # Start async workers
     logger.print("MAIN", "Starting async workers...")
-    flag_sync_worker = FlagAndSafeAreaSyncWorker(
+    flag_sync_worker = CameraStateSyncWorker(
         flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID,
         bed_areas_queue=bed_areas_queue, floor_areas_queue=floor_areas_queue
     )

@@ -279,9 +279,11 @@ FALL_COUNT_THRES = 2               # Consecutive falls to confirm
 | `set_background` | False | Capture current frame as background |
 | `analytics_mode` | True | Enable analytics server integration |
 | `hme` | False | Enable Homomorphic Encryption |
-| `fall_algorithm` | 3 | Fall detection algorithm (1, 2, or 3) |
+| `fall_algorithm` | 1 | Fall detection algorithm (1, 2, or 3) |
 | `use_safety_check` | True | Enable safe area checking |
-| `show_safe_area` | False | Overlay safe areas on display |
+| `show_safe_areas` | False | Overlay safe areas on display |
+| `show_bed_areas` | False | Overlay bed areas on display |
+| `show_floor_areas` | False | Overlay floor areas on display |
 
 ## 📊 Output Files
 
@@ -719,9 +721,11 @@ Get camera state including control flags from the streaming server.
     "set_background": false,
     "analytics_mode": true,
     "hme": false,
-    "fall_algorithm": 3,
+    "fall_algorithm": 1,
     "use_safety_check": true,
-    "show_safe_area": false
+    "show_safe_areas": false,
+    "show_bed_areas": false,
+    "show_floor_areas": false
 }
 ```
 

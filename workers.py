@@ -25,8 +25,8 @@ from control_manager import (
 from streaming import send_frame_to_server, send_background_to_server
 from tools.time_utils import time_ms, TaskProfiler
 
-class FlagAndSafeAreaSyncWorker(threading.Thread):
-    """Background thread for syncing flags AND safe areas from streaming server"""
+class CameraStateSyncWorker(threading.Thread):
+    """Background thread for syncing flags and editable areas from streaming server"""
 
     def __init__(self, flags_queue, safe_areas_queue, streaming_url, camera_id,
                  sync_interval_ms=FLAG_SYNC_INTERVAL_MS, bed_areas_queue=None, floor_areas_queue=None):
@@ -601,10 +601,12 @@ def get_default_control_flags():
         "show_raw": False,
         "set_background": False,
         "auto_update_bg": False,
-        "show_safe_area": False,
+        "show_safe_areas": False,
+        "show_bed_areas": False,
+        "show_floor_areas": False,
         "use_safety_check": True,
         "analytics_mode": True,
-        "fall_algorithm": 3,
+        "fall_algorithm": 1,
         "hme": False
     }
 

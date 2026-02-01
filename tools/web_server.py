@@ -20,8 +20,13 @@ class WebServer:
             "show_raw": False,
             "set_background": False,
             "auto_update_bg": False,
-            "show_safe_area": False,
-            "use_safety_check": True
+            "show_safe_areas": False,
+            "show_bed_areas": False,
+            "show_floor_areas": False,
+            "use_safety_check": True,
+            "analytics_mode": True,
+            "fall_algorithm": 1,
+            "hme": False
         }
         
         # === Config ===
@@ -193,7 +198,11 @@ class WebServer:
         elif cmd == "set_background":
             self.control_flags["set_background"] = True
         elif cmd == "toggle_safe_area_display":
-            self.control_flags["show_safe_area"] = bool(val)
+            self.control_flags["show_safe_areas"] = bool(val)
+        elif cmd == "toggle_bed_area_display":
+            self.control_flags["show_bed_areas"] = bool(val)
+        elif cmd == "toggle_floor_area_display":
+            self.control_flags["show_floor_areas"] = bool(val)
         elif cmd == "toggle_safety_check":
             self.control_flags["use_safety_check"] = bool(val)
 
