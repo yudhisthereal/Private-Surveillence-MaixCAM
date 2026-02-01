@@ -106,13 +106,13 @@ The system uses a unified safety judgment system that combines three area checke
 graph TB
     subgraph Camera [MaixCAM Device]
         subgraph Input [Input Layer]
-            Cam[Camera<br/>320x224@60fps]
+            Cam["Camera<br/>320x224@60fps"]
         end
 
         subgraph AI [AI Processing]
-            Det[YOLO11 Detection<br/>Person Detection]
-            Pose[YOLO11 Pose<br/>17 COCO Keypoints]
-            Track{ByteTracker<br/>Multi-Person Tracking}
+            Det["YOLO11 Detection<br/>Person Detection"]
+            Pose["YOLO11 Pose<br/>17 COCO Keypoints"]
+            Track{"ByteTracker<br/>Multi-Person Tracking"}
             Cam --> Det
             Cam --> Pose
             Det --> Track
@@ -120,11 +120,11 @@ graph TB
         end
 
         subgraph Safety [Safety System]
-            Fall{Fall Detection<br/>2 Algorithms}
-            SafeArea[Safe Area Checker<br/>5 Check Methods]
-            BedArea[Bed Area Checker<br/>Time Tracking]
-            FloorArea[Floor Area Checker<br/>Critical Detection]
-            SafetyJudge{Safety Judgment<br/>3-Tier System}
+            Fall{"Fall Detection<br/>2 Algorithms"}
+            SafeArea["Safe Area Checker<br/>5 Check Methods"]
+            BedArea["Bed Area Checker<br/>Time Tracking"]
+            FloorArea["Floor Area Checker<br/>Critical Detection"]
+            SafetyJudge{"Safety Judgment<br/>3-Tier System"}
 
             Track --> Fall
             Fall --> SafetyJudge
@@ -138,8 +138,8 @@ graph TB
 
         subgraph Privacy [Privacy Protection]
             BG[Background Manager]
-            Mask[Mask Generator<br/>Body+Head Mask]
-            Merge[Merge Background<br/>with Mask]
+            Mask["Mask Generator<br/>Body+Head Mask"]
+            Merge["Merge Background<br/>with Mask"]
 
             Track --> Mask
             Cam --> Merge
@@ -148,11 +148,11 @@ graph TB
         end
 
         subgraph Workers [Async Workers]
-            StateSync[CameraStateSyncWorker<br/>Sync Flags & Areas]
-            StateReporter[StateReporterWorker<br/>Heartbeat 30s]
-            FrameUpload[FrameUploadWorker<br/>Upload Frames]
-            TrackSender[TracksSenderWorker<br/>Upload Keypoints]
-            PingWorker[PingWorker<br/>Keep-Alive 250ms]
+            StateSync["CameraStateSyncWorker<br/>Sync Flags & Areas"]
+            StateReporter["StateReporterWorker<br/>Heartbeat 30s"]
+            FrameUpload["FrameUploadWorker<br/>Upload Frames"]
+            TrackSender["TracksSenderWorker<br/>Upload Keypoints"]
+            PingWorker["PingWorker<br/>Keep-Alive 250ms"]
 
             SafetyJudge -.->|Queue| TrackSender
             SafetyJudge -.->|Queue| StateReporter
@@ -163,8 +163,8 @@ graph TB
         end
 
         subgraph Output [Output Layer]
-            Record[Video Recorder<br/>MP4+CSV]
-            Display[Display<br/>MaixVision/Web]
+            Record["Video Recorder<br/>MP4+CSV"]
+            Display["Display<br/>MaixVision/Web"]
         end
 
         SafetyJudge --> Record
@@ -181,31 +181,31 @@ graph TB
     end
 
     subgraph Analytics [Analytics Server]
-        HME[HME Inference<br/>Optional/Disabled]
+        HME["HME Inference<br/>Optional/Disabled"]
     end
 
-    FrameUpload -->|HTTP POST<br/>JPEG| API
-    TrackSender -->|HTTP POST<br/>Keypoints| API
-    StateReporter -->|HTTP POST<br/>State| API
-    PingWorker -->|HTTP POST<br/>Ping| API
+    FrameUpload -->|"HTTP POST<br/>JPEG"| API
+    TrackSender -->|"HTTP POST<br/>Keypoints"| API
+    StateReporter -->|"HTTP POST<br/>State"| API
+    PingWorker -->|"HTTP POST<br/>Ping"| API
 
-    StateSync -->|HTTP GET<br/>Flags| API
-    StateSync -->|HTTP GET<br/>Safe Areas| API
-    StateSync -->|HTTP GET<br/>Bed Areas| API
-    StateSync -->|HTTP GET<br/>Floor Areas| API
+    StateSync -->|"HTTP GET<br/>Flags"| API
+    StateSync -->|"HTTP GET<br/>Safe Areas"| API
+    StateSync -->|"HTTP GET<br/>Bed Areas"| API
+    StateSync -->|"HTTP GET<br/>Floor Areas"| API
 
     API -.->|Commands| StateSync
     Dashboard -->|MJPEG Stream| Display
 
     TrackSender -.->|HME Features| HME
 
-    classDef camera fill:#e1f5fe,stroke:#01579b,stroke-width:3px
-    classDef ai fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef safety fill:#ffebee,stroke:#c62828,stroke-width:2px
-    classDef privacy fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    classDef workers fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
-    classDef output fill:#fff9c4,stroke:#f57f17,stroke-width:2px
-    classDef server fill:#eceff1,stroke:#37474f,stroke-width:2px
+    classDef camera fill:#e1f5fe,stroke:#01579b,stroke-width:3px,color:#000000
+    classDef ai fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000000
+    classDef safety fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000000
+    classDef privacy fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000000
+    classDef workers fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px,color:#000000
+    classDef output fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000000
+    classDef server fill:#eceff1,stroke:#37474f,stroke-width:2px,color:#000000
 
     class Cam camera
     class Det,Pose,Track ai
@@ -346,11 +346,11 @@ graph LR
         R --> T[Local Recording<br/>MP4 + CSV]
     end
 
-    classDef input fill:#e3f2fd,stroke:#1976d2
-    classDef bg fill:#f3e5f5,stroke:#7b1fa2
-    classDef track fill:#fff3e0,stroke:#f57c00
-    classDef safety fill:#ffebee,stroke:#c62828
-    classDef output fill:#e8f5e9,stroke:#388e3c
+    classDef input fill:#e3f2fd,stroke:#1976d2,color:#000000
+    classDef bg fill:#f3e5f5,stroke:#7b1fa2,color:#000000
+    classDef track fill:#fff3e0,stroke:#f57c00,color:#000000
+    classDef safety fill:#ffebee,stroke:#c62828,color:#000000
+    classDef output fill:#e8f5e9,stroke:#388e3c,color:#000000
 
     class A,B,C input
     class D,E,F,G,H,I bg
@@ -719,49 +719,10 @@ flowchart TD
     CheckSafeInBed -->|Yes| SafeStatus
     CheckSafeInBed -->|No| SafeStatus
 
-    classDef fall fill:#ffebee,stroke:#c62828,stroke-width:3px
-    classDef unsafe fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef safe fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    classDef decision fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-
-    class FallStatus fall
-    class FloorStatus,BedStatus,SafeFloorStatus unsafe
-    class SafeStatus safe
-    class Start,CheckFall,CheckLying,CheckFloor,CheckBed,CheckBedTime,CheckSafeInBed,CheckSafeFloor decision
-```
-
-```
-
-### Safety Decision Flow Diagram
-
-```mermaid
-flowchart TD
-    Start{Track Detected} --> CheckFall{Fall Detected?}
-    CheckFall -->|Yes| FallStatus[Status: FALL]
-    CheckFall -->|No| CheckLying{Lying Down?}
-
-    CheckLying -->|No| CheckSafeInBed{In Safe Zone?}
-    CheckLying -->|Yes| CheckFloor{In Floor Area?}
-
-    CheckFloor -->|Yes| FloorStatus[Status: UNSAFE<br/>Reason: Lying on Floor]
-    CheckFloor -->|No| CheckBed{In Bed Area?}
-
-    CheckBed -->|Yes| CheckBedTime{Time > 5s?}
-    CheckBed -->|No| CheckSafeFloor{In Safe Zone?}
-
-    CheckBedTime -->|Yes| BedStatus[Status: UNSAFE<br/>Reason: In Bed Too Long]
-    CheckBedTime -->|No| CheckSafeFloor
-
-    CheckSafeFloor -->|No| SafeFloorStatus[Status: UNSAFE<br/>Reason: Outside Safe Zone]
-    CheckSafeFloor -->|Yes| SafeStatus[Status: NORMAL]
-
-    CheckSafeInBed -->|Yes| SafeStatus
-    CheckSafeInBed -->|No| SafeStatus
-
-    classDef fall fill:#ffebee,stroke:#c62828,stroke-width:3px
-    classDef unsafe fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef safe fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    classDef decision fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef fall fill:#ffebee,stroke:#c62828,stroke-width:3px,color:#000000
+    classDef unsafe fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000000
+    classDef safe fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000000
+    classDef decision fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000000
 
     class FallStatus fall
     class FloorStatus,BedStatus,SafeFloorStatus unsafe
