@@ -607,6 +607,7 @@ def get_default_control_flags():
         "use_safety_check": True,
         "analytics_mode": True,
         "fall_algorithm": 1,
+        "check_method": 3,  # CheckMethod.TORSO_HEAD
         "hme": False
     }
 

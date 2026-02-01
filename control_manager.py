@@ -40,6 +40,7 @@ class CameraStateManager:
             cls._instance._registration_status = "unregistered"
             cls._instance._camera_name = "Unnamed Camera"
             cls._instance._local_ip = ""
+            cls._instance._check_method = 3  # Default: TORSO_HEAD
             cls._instance._status_change_callbacks = []
         return cls._instance
     
@@ -82,7 +83,18 @@ class CameraStateManager:
     def set_local_ip(self, local_ip):
         """Set local IP address"""
         self._local_ip = local_ip
-    
+
+    def get_check_method(self):
+        """Get current safety check method"""
+        return self._check_method
+
+    def set_check_method(self, check_method, notify=True):
+        """Set safety check method and optionally notify callbacks"""
+        old_method = self._check_method
+        self._check_method = check_method
+        if old_method != check_method:
+            logger.print("CAM_STATE", "Check method updated: %s -> %s", old_method, check_method)
+
     def register_status_change_callback(self, callback):
         """Register a callback to be called when registration status changes
         
@@ -112,9 +124,10 @@ class CameraStateManager:
             "camera_id": self._camera_id,
             "camera_name": self._camera_name,
             "registration_status": self._registration_status,
-            "local_ip": self._local_ip
+            "local_ip": self._local_ip,
+            "check_method": self._check_method
         }
-    
+
     def set_state(self, state_dict, notify=True):
         """Set complete camera state from dictionary"""
         if "camera_id" in state_dict:
@@ -125,6 +138,8 @@ class CameraStateManager:
             self.set_registration_status(state_dict["registration_status"], notify=notify)
         if "local_ip" in state_dict:
             self._local_ip = state_dict.get("local_ip", "")
+        if "check_method" in state_dict:
+            self._check_method = state_dict.get("check_method", 3)
 
 
 # Global camera state manager instance
@@ -147,6 +162,7 @@ control_flags = {
     "use_safety_check": True,
     "analytics_mode": True,
     "fall_algorithm": 1,
+    "check_method": 3,  # CheckMethod.TORSO_HEAD
     "hme": False
 }
 

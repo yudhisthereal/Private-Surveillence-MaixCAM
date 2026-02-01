@@ -187,17 +187,33 @@ def main():
     floor_area_checker = FloorAreaChecker()
     initialize_floor_area_checker(floor_area_checker)
 
+    # 6. Load initial configuration
+    logger.print("MAIN", "=== Loading Configuration ===")
+    load_initial_flags()
+    control_flags = get_control_flags()  # Get loaded flags including check_method
+
     # Initialize SafetyJudgment with all three checkers
+    # Get check_method from control_flags (default: 3 = TORSO_HEAD)
+    check_method_value = control_flags.get("check_method", 3)
+    from tools.safe_area import CheckMethod
+
+    # Map integer value to CheckMethod enum
+    check_method_map = {
+        1: CheckMethod.HIP,
+        2: CheckMethod.TORSO,
+        3: CheckMethod.TORSO_HEAD,
+        4: CheckMethod.TORSO_HEAD_KNEES,
+        5: CheckMethod.FULL_BODY
+    }
+    check_method = check_method_map.get(check_method_value, CheckMethod.TORSO_HEAD)
+
     safety_judgment = SafetyJudgment(
         bed_area_checker=bed_area_checker,
         floor_area_checker=floor_area_checker,
         safe_area_checker=safe_area_checker,
-        check_method=CheckMethod.TORSO_HEAD
+        check_method=check_method
     )
-
-    # 6. Load initial configuration
-    logger.print("MAIN", "=== Loading Configuration ===")
-    load_initial_flags()
+    
     initial_safe_areas = load_safe_areas()
     update_safety_checker_polygons(initial_safe_areas)
 

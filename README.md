@@ -281,6 +281,7 @@ FALL_COUNT_THRES = 2               # Consecutive falls to confirm
 | `hme` | False | Enable Homomorphic Encryption |
 | `fall_algorithm` | 1 | Fall detection algorithm (1, 2, or 3) |
 | `use_safety_check` | True | Enable safe area checking |
+| `check_method` | 3 | Safety check method (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `show_safe_areas` | False | Overlay safe areas on display |
 | `show_bed_areas` | False | Overlay bed areas on display |
 | `show_floor_areas` | False | Overlay floor areas on display |
@@ -918,6 +919,7 @@ Receive commands from the streaming server.
 | `auto_update_bg` | boolean | Enable/disable automatic background updates |
 | `update_safe_areas` | array | Update safe area polygons |
 | `fall_algorithm` | integer | Set fall detection algorithm (1, 2, or 3) |
+| `check_method` | integer | Set safety check method (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `approve_camera` | boolean | Approve camera registration |
 | `forget_camera` | boolean | Remove camera from registry |
 
