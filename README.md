@@ -47,7 +47,7 @@ This project is one component of a three-part distributed system:
 - **Fall Detection**: Intelligent fall detection with two algorithms:
   - **Algorithm 1**: Bounding box motion analysis only
   - **Algorithm 2**: Motion + strict pose verification (torso_angle > 80° AND thigh_uprightness > 60°)
-- **Privacy Protection**: Automatic background updating with intelligent human masking
+- **Selective Background Update**: Automatic background updating with intelligent human masking
 - **Remote Monitoring**: Web interface for remote viewing and control
 
 ### 🔐 Privacy-Preserving Features
@@ -136,10 +136,10 @@ graph TB
             FloorArea --> SafetyJudge
         end
 
-        subgraph Privacy [Privacy Protection]
+        subgraph Privacy [Selective Background Update]
             BG[Background Manager]
             Mask["Mask Generator<br/>Body+Head Mask"]
-            Merge["Merge Background<br/>with Mask"]
+            Merge["Update Background<br/>(Exclude Masked Areas)"]
 
             Track --> Mask
             Cam --> Merge
@@ -173,11 +173,9 @@ graph TB
 
     subgraph Streaming [Streaming Server]
         API[HTTP API]
-        WS[WebSocket]
         Dashboard[Web Dashboard]
 
-        API <--> WS
-        WS <--> Dashboard
+        API <--> Dashboard
     end
 
     subgraph Analytics [Analytics Server]
@@ -213,7 +211,7 @@ graph TB
     class BG,Mask,Merge privacy
     class StateSync,StateReporter,FrameUpload,TrackSender,PingWorker workers
     class Record,Display output
-    class API,WS,Dashboard,HME server
+    class API,Dashboard,HME server
 ```
 
 ### Main Components
@@ -529,14 +527,15 @@ FALL_COUNT_THRES = 2               # Consecutive falls to confirm
 | `hme` | False | Enable Homomorphic Encryption |
 | `fall_algorithm` | 1 | Fall detection algorithm (1 or 2) |
 | `use_safety_check` | True | Enable safety checking system |
-| `check_method` | 3 | Safety check method (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
+| `check_method` | 3 | Safety check method for ALL checkers (Safe/Bed/Floor Areas) (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `show_safe_areas` | False | Overlay safe areas on display |
 | `show_bed_areas` | False | Overlay bed areas on display |
 | `show_floor_areas` | False | Overlay floor areas on display |
 
 ### Safety Check Methods
 
-The system supports 5 different check methods for validating if a person is in a safe zone:
+The system supports 5 different check methods for validating if a person is in a specified zone.
+**Note**: The same `check_method` is used for **ALL** area checkers (Safe Area, Bed Area, and Floor Area).
 
 | Method | Value | Keypoints Used | Description |
 |--------|-------|---------------|-------------|
@@ -790,7 +789,7 @@ The system uses multiple background workers for non-blocking operation:
 3. **Smart Background Privacy**: Background updates exclude human regions using intelligent masking
 4. **No Raw Video Upload**: Only processed data and selective frames are sent
 
-### Background Privacy Protection
+### Selective Background Update
 
 The auto-update background mechanism ensures patient privacy by:
 - **Masking human areas**: Preserves human silhouettes in old background
