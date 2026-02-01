@@ -53,6 +53,9 @@ class SafetyJudgment:
         """
         Evaluate safety status based on all area checkers.
 
+        Reads check_method from control_flags dynamically every call to allow
+        runtime changes via web interface.
+
         Args:
             track_id: The track ID to evaluate
             body_keypoints: List of (x, y, confidence) coordinates for COCO keypoints
@@ -64,6 +67,23 @@ class SafetyJudgment:
             - reason: SafetyReason code or None if safe
             - details: Dictionary with detailed check results for debugging
         """
+        # Read check_method from control_flags dynamically
+        try:
+            from control_manager import get_flag
+            check_method_value = get_flag("check_method", 3)
+            # Map integer value to CheckMethod enum
+            check_method_map = {
+                1: CheckMethod.HIP,
+                2: CheckMethod.TORSO,
+                3: CheckMethod.TORSO_HEAD,
+                4: CheckMethod.TORSO_HEAD_KNEES,
+                5: CheckMethod.FULL_BODY
+            }
+            check_method = check_method_map.get(check_method_value, CheckMethod.TORSO_HEAD)
+        except ImportError:
+            # Fallback to instance check_method if control_manager not available
+            check_method = self.check_method
+
         is_lying_down = pose_label == "lying_down"
 
         # Initialize details dictionary
@@ -75,11 +95,12 @@ class SafetyJudgment:
             "in_bed_too_long": False,
             "in_floor_area": False,
             "in_safe_area": False,
+            "check_method": check_method,
         }
 
         # Rule 2: If lying_down AND in_floor_area → UNSAFE (lying on floor)
         if self.floor_area_checker is not None and is_lying_down:
-            in_floor = self.floor_area_checker.check_floor_area(body_keypoints, self.check_method)
+            in_floor = self.floor_area_checker.check_floor_area(body_keypoints, check_method)
             details["in_floor_area"] = in_floor
 
             if in_floor:
@@ -89,7 +110,7 @@ class SafetyJudgment:
         # Rule 3: If in_bed_area AND time > threshold → UNSAFE (in bed too long)
         if self.bed_area_checker is not None:
             is_in_bed, time_in_bed, is_too_long = self.bed_area_checker.check_bed_area(
-                track_id, body_keypoints, self.check_method
+                track_id, body_keypoints, check_method
             )
             details["in_bed_area"] = is_in_bed
             details["time_in_bed"] = time_in_bed
@@ -101,7 +122,7 @@ class SafetyJudgment:
 
         # Rule 4: If lying_down AND not_in_safe_area → UNSAFE (lying down outside safe zone)
         if self.safe_area_checker is not None and is_lying_down:
-            in_safe = self.safe_area_checker.body_in_safe_zone(body_keypoints, self.check_method)
+            in_safe = self.safe_area_checker.body_in_safe_zone(body_keypoints, check_method)
             details["in_safe_area"] = in_safe
 
             if not in_safe:
@@ -111,7 +132,7 @@ class SafetyJudgment:
         # Update in_safe_area in details even if not lying down
         if self.safe_area_checker is not None and not is_lying_down:
             details["in_safe_area"] = self.safe_area_checker.body_in_safe_zone(
-                body_keypoints, self.check_method
+                body_keypoints, check_method
             )
 
         # Rule 5: Otherwise → SAFE

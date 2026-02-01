@@ -184,19 +184,27 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
             online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
             online_targets["points"][idx].put(obj.points)
                 
+            # Get fall_algorithm flag to determine which algorithm to use
+            fall_algorithm = 1  # Default: Algorithm 1 (BBox motion only)
+            try:
+                from control_manager import get_flag
+                fall_algorithm = get_flag("fall_algorithm", 1)
+            except ImportError:
+                pass
+
             # Determine status based on analytics_mode and use_analytics result
             if analytics_mode:
                 # In analytics mode, use AnalyticsWorker results
                 use_analytics = False
-                
+
                 # Get analytics data from shared state
                 analytics_pose = get_analytics_pose_data(track.id)
                 analytics_fall = get_analytics_fall_data(track.id)
-                
+
                 if analytics_pose and analytics_fall:
                     # Analytics server has results for this track
                     pose_label = analytics_pose.get("label", "unknown")
-                    
+
                     # Check fall detection results from analytics server
                     fall_detected_method1 = analytics_fall.get("fall_detected_method1", False)
                     fall_detected_method2 = analytics_fall.get("fall_detected_method2", False)
@@ -204,9 +212,15 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                     counter_method1 = analytics_fall.get("counter_method1", 0)
                     counter_method2 = analytics_fall.get("counter_method2", 0)
                     counter_method3 = analytics_fall.get("counter_method3", 0)
-                    
-                    # Update fall_ids and unsafe_ids based on analytics results
-                    if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
+
+                    # Update fall_ids based on selected fall algorithm
+                    fall_detected = False
+                    if fall_algorithm == 1:
+                        fall_detected = fall_detected_method1
+                    elif fall_algorithm == 2:
+                        fall_detected = fall_detected_method2
+
+                    if fall_detected:
                         fall_ids.add(track.id)
                         unsafe_ids.discard(track.id)
                         use_analytics = True
@@ -215,7 +229,7 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                         if track.id in fall_ids:
                             fall_ids.discard(track.id)
                         use_analytics = True
-                
+
                 if not use_analytics:
                     # Analytics server not available or no data yet, fall back to local processing
                     if online_targets["bbox"][idx].qsize() >= 2:
@@ -223,11 +237,16 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                         if fall_result:
                             fall_info, pose_label, encrypted_features = fall_result
                             (fall_detected_method1, counter_method1,
-                             fall_detected_method2, counter_method2,
-                             fall_detected_method3, counter_method3) = fall_info
-                            
-                            # Update fall_ids based on detection results
-                            if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
+                             fall_detected_method2, counter_method2) = fall_info
+
+                            # Update fall_ids based on selected fall algorithm
+                            fall_detected = False
+                            if fall_algorithm == 1:
+                                fall_detected = fall_detected_method1
+                            elif fall_algorithm == 2:
+                                fall_detected = fall_detected_method2
+
+                            if fall_detected:
                                 fall_ids.add(track.id)
                                 unsafe_ids.discard(track.id)
                             else:
@@ -241,11 +260,16 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                     if fall_result:
                         fall_info, pose_label, encrypted_features = fall_result
                         (fall_detected_method1, counter_method1,
-                         fall_detected_method2, counter_method2,
-                         fall_detected_method3, counter_method3) = fall_info
-                        
-                        # Update fall_ids based on detection results
-                        if fall_detected_method3 or fall_detected_method2 or fall_detected_method1:
+                         fall_detected_method2, counter_method2) = fall_info
+
+                        # Update fall_ids based on selected fall algorithm
+                        fall_detected = False
+                        if fall_algorithm == 1:
+                            fall_detected = fall_detected_method1
+                        elif fall_algorithm == 2:
+                            fall_detected = fall_detected_method2
+
+                        if fall_detected:
                             fall_ids.add(track.id)
                             unsafe_ids.discard(track.id)
                         else:

@@ -25,6 +25,7 @@ This project is one component of a three-part distributed system:
 │  • Fall Detect  │  • Web Dashboard    │  • HME Inference        │
 │  • Tracking     │  • Camera Mgmt      │  • Advanced Analytics   │
 │  • HME Encrypt  │  • Alert System     │                         │
+│  • Safety Chk   │                     │                         │
 │                 │                     │                         │
 └─────────────────┴─────────────────────┴─────────────────────────┘
 ```
@@ -41,19 +42,22 @@ This project is one component of a three-part distributed system:
 
 ### 🎯 Core Functionality
 
-- **Real-time Pose Estimation**: Accurate human pose detection using YOLO11 pose model (17 keypoints)
+- **Real-time Pose Estimation**: Accurate human pose detection using YOLO11 pose model (17 COCO keypoints)
 - **Multi-person Tracking**: Track multiple individuals with unique IDs using ByteTracker algorithm
-- **Fall Detection**: Intelligent fall detection with three algorithms:
-  - Algorithm 1: Bounding box motion analysis
-  - Algorithm 2: Motion + strict pose verification
-  - Algorithm 3: Flexible verification (combines all methods)
-- **Privacy Protection**: Automatic background updating that excludes human subjects
+- **Fall Detection**: Intelligent fall detection with two algorithms:
+  - **Algorithm 1**: Bounding box motion analysis only
+  - **Algorithm 2**: Motion + strict pose verification (torso_angle > 80° AND thigh_uprightness > 60°)
+- **Privacy Protection**: Automatic background updating with intelligent human masking
 - **Remote Monitoring**: Web interface for remote viewing and control
 
 ### 🔐 Privacy-Preserving Features
 
 - **Homomorphic Encryption (HME)**: Optional encryption of pose features for privacy-preserving analytics
-- **Background Management**: Privacy-focused background updates that only process non-human areas
+- **Smart Background Management**: Auto-update background that masks out human regions:
+  - Preserves body bounding box areas in old background
+  - Preserves head area (ear-nose-ear keypoints) with proportional padding
+  - Updates non-human areas with new frame content
+- **Mask Visualization** (PC version): Color-coded overlay showing masked regions (white=body, red=head)
 - **Local Fallback**: All pose classification and fall detection runs locally when analytics server is unavailable
 
 ### 🎥 Recording System
@@ -73,9 +77,26 @@ This project is one component of a three-part distributed system:
 
 ### 🛡️ Safety Features
 
-- **Safe Area Monitoring**: Define custom safe zones for patient monitoring
-- **Multiple Check Methods**: Hip, torso, torso+head, torso+head+knees, full body
-- **Safety Status Reporting**: Normal, unsafe, and fall alerts
+The system uses a unified safety judgment system that combines three area checkers:
+
+1. **Safe Area Checker**: Monitors if patients are in designated safe zones
+   - Multiple check methods: HIP, TORSO, TORSO_HEAD (default), TORSO_HEAD_KNEES, FULL_BODY
+   - Configurable safe zone polygons
+
+2. **Bed Area Checker**: Tracks time spent in bed areas
+   - 5-second threshold for "too long in bed" detection
+   - Helps detect patients staying in bed longer than expected
+
+3. **Floor Area Checker**: Detects when patients are lying on the floor
+   - Critical safety alert for fall situations
+   - Distinguishes between safe lying (in bed) and unsafe lying (on floor)
+
+**Safety Judgment Rules (in priority order):**
+1. Fall detection always takes precedence
+2. If lying down AND in floor area → UNSAFE (lying on floor)
+3. If in bed area AND time > threshold → UNSAFE (in bed too long)
+4. If lying down AND not in safe area → UNSAFE (lying outside safe zone)
+5. Otherwise → SAFE (tracking)
 
 ## 🏗️ Architecture
 
@@ -83,21 +104,27 @@ This project is one component of a three-part distributed system:
 
 ```
 private-cctv/
-├── main.py                    # Main entry point with processing loop
+├── main.py                    # Main entry point with processing loop (MaixCAM)
+├── main-alt.py                # PC-compatible version for development
 ├── config.py                  # Configuration and server settings
 ├── camera_manager.py          # Camera and model initialization
 ├── control_manager.py         # Control flags and state management
 ├── streaming.py               # Streaming server communication
-├── tracking.py                # Multi-object tracking and fall detection
+├── tracking.py                # Multi-object tracking
 ├── workers.py                 # Async worker threads
 ├── pose/
 │   ├── pose_estimation.py    # YOLO11 pose estimation with HME support
-│   └── judge_fall.py         # Fall detection algorithms
+│   └── judge_fall.py         # Fall detection algorithms (2 algorithms)
 ├── tools/
+│   ├── safe_area.py          # Safe zone polygon checking
+│   ├── bed_area_checker.py   # Bed area monitoring
+│   ├── floor_area_checker.py # Floor area detection
+│   ├── safety_judgment.py    # Unified safety judgment
 │   ├── skeleton_saver.py     # CSV skeleton data recording
 │   ├── video_record.py       # Video recording with MJPEG codec
-│   ├── safe_area.py          # Safe zone polygon checking
 │   ├── wifi_connect.py       # Wi-Fi connectivity
+│   ├── web_server.py         # Local HTTP server
+│   ├── log_manager.py        # Centralized logging
 │   └── time_utils.py         # Time utilities and profiling
 ├── hme_from_sona/            # HME encryption research (legacy)
 ├── model/                     # YOLO model files (.mud format)
@@ -109,7 +136,8 @@ private-cctv/
 ```
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
 │   Camera    │───▶│  Detection  │───▶│   Pose      │───▶│  Tracking   │
-│   Read      │    │  (YOLO11)   │    │  Extraction │    │  (ByteTrack)│
+│   Read      │    │  (YOLO11/   │    │  Extraction │    │             │
+│             │    │  MediaPipe) │    │             │    │             │
 └─────────────┘    └─────────────┘    └─────────────┘    └──────┬──────┘
                                                                 │
                         ┌───────────────────────────────────────┼───────────────┐
@@ -117,15 +145,16 @@ private-cctv/
                         ▼                                       ▼               ▼
               ┌─────────────────┐                    ┌──────────────┐  ┌──────────────┐
               │  Fall Detection │                    │  Streaming   │  │  Recording   │
-              │  (3 Algorithms) │                    │  Server      │  │  (Video/CSV) │
+              │  (2 Algorithms) │                    │  Server      │  │  (Video/CSV) │
               └────────┬────────┘                    └──────────────┘  └──────────────┘
                        │                                        ▲
                        │                                        │
                        ▼                                        │
               ┌─────────────────┐                               │
-              │    Safety       │◀──────────────────────────────┘
-              │    Status       │     Pose + Fall + Safety Data
+              │  Safety Status   │◀──────────────────────────────┘
+              │                  │     Pose + Fall + Safety Data
               └─────────────────┘
+              
 ```
 
 ## 🚀 Installation & Setup
@@ -191,10 +220,11 @@ python main-alt.py
 ```
 
 **Key Differences:**
-- Uses **MediaPipe Pose** (default) or YOLO11 for pose estimation.
-- Simulates MaixCAM hardware APIs using mocks.
-- Displays output in a standard OpenCV window ("Private CCTV").
-- Resolution is adapted to **320x224** to match MaixCAM constraints.
+- Uses **MediaPipe Pose** (default) or YOLO11 for pose estimation
+- Simulates MaixCAM hardware APIs using mocks
+- Displays output in a standard OpenCV window ("Private CCTV")
+- Resolution is adapted to **320x224** to match MaixCAM constraints
+- **Includes mask visualization** (30% opacity overlay, white=body, red=head)
 
 ### Model Files Required
 
@@ -259,6 +289,11 @@ UPDATE_INTERVAL_MS = 10000         # Update background every 10 seconds
 NO_HUMAN_CONFIRM_FRAMES = 10       # Confirm human absence with 10 frames
 ```
 
+**Background Masking Parameters:**
+- **Body Padding**: 20 pixels around track bounding box
+- **Head Padding**: Proportional to ear-nose distance (max_ear_nose_distance * head_mask_factor)
+- **Pixel Stepping**: 4 (optimization for performance)
+
 ### Fall Detection Parameters
 
 ```python
@@ -269,22 +304,46 @@ fallParam = {
 FALL_COUNT_THRES = 2               # Consecutive falls to confirm
 ```
 
+**Available Algorithms:**
+- **Algorithm 1**: BBox motion only
+  - Counts consecutive frames with bbox motion detected
+  - Faster response, more prone to false positives
+
+- **Algorithm 2**: BBox motion AND strict pose
+  - Requires both bbox motion AND strict pose condition (torso_angle > 80° AND thigh_uprightness > 60°)
+  - Higher accuracy, fewer false positives
+  - Uses weighted counters (+2 for strong evidence, +1 for moderate)
+
 ### Control Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `record` | False | Enable video recording |
 | `show_raw` | False | Show raw feed instead of privacy-protected |
-| `auto_update_bg` | False | Enable automatic background updates |
-| `set_background` | False | Capture current frame as background |
+| `auto_update_bg` | False | Enable automatic background updates with masking |
+| `set_background` | False | Capture current frame as background (manual trigger) |
 | `analytics_mode` | True | Enable analytics server integration |
 | `hme` | False | Enable Homomorphic Encryption |
-| `fall_algorithm` | 1 | Fall detection algorithm (1, 2, or 3) |
-| `use_safety_check` | True | Enable safe area checking |
+| `fall_algorithm` | 1 | Fall detection algorithm (1 or 2) |
+| `use_safety_check` | True | Enable safety checking system |
 | `check_method` | 3 | Safety check method (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `show_safe_areas` | False | Overlay safe areas on display |
 | `show_bed_areas` | False | Overlay bed areas on display |
 | `show_floor_areas` | False | Overlay floor areas on display |
+
+### Safety Check Methods
+
+The system supports 5 different check methods for validating if a person is in a safe zone:
+
+| Method | Value | Keypoints Used | Description |
+|--------|-------|---------------|-------------|
+| HIP | 1 | Left Hip, Right Hip | Checks if hips are in safe zone |
+| TORSO | 2 | Shoulders, Hips | Checks if torso (shoulders+hips) are in safe zone |
+| TORSO_HEAD | 3 | Nose, Shoulders, Hips | Checks if torso+head are in safe zone (default) |
+| TORSO_HEAD_KNEES | 4 | Nose, Shoulders, Hips, Knees | Checks if upper body+knees are in safe zone |
+| FULL_BODY | 5 | All 17 keypoints | Checks if entire body is in safe zone |
+
+**More keypoints = stricter checking.** The default (TORSO_HEAD) provides a good balance between accuracy and practicality.
 
 ## 📊 Output Files
 
@@ -319,17 +378,19 @@ The following data is sent to the Streaming Server in real-time:
 ### Camera Info
 
 - **Location**: `/root/camera_info.json`
-- **Contents**: camera_id, camera_name, registration_status, ip_address
+- **Contents**: camera_id, camera_name, registration_status, local_ip, check_method
 
 ### Control Flags
 
 - **Location**: `/root/control_flags.json`
 - **Contents**: Persisted control flag values
+- **Sync**: Automatically synced from streaming server every 1 second
 
-### Safe Areas
+### Area Definitions
 
-- **Location**: `/root/safe_areas.json`
-- **Contents**: List of polygon definitions for safe zones
+- **Safe Areas**: `/root/safe_areas.json` - List of polygon definitions for safe zones
+- **Bed Areas**: `/root/bed_areas.json` - List of polygon definitions for bed areas
+- **Floor Areas**: `/root/floor_areas.json` - List of polygon definitions for floor areas
 
 ## 🔧 Technical Details
 
@@ -343,6 +404,22 @@ The following data is sent to the Streaming Server in real-time:
 2. **YOLO11 Detection** (`yolo11n.mud`)
    - Person class detection only
    - Used for human presence detection
+
+### COCO Keypoint Format
+
+The system uses 17 COCO keypoints:
+
+```
+0: Nose, 1: Left Eye, 2: Right Eye, 3: Left Ear, 4: Right Ear,
+5: Left Shoulder, 6: Right Shoulder, 7: Left Elbow, 8: Right Elbow,
+9: Left Wrist, 10: Right Wrist, 11: Left Hip, 12: Right Hip,
+13: Left Knee, 14: Right Knee, 15: Left Ankle, 16: Right Ankle
+```
+
+**Special keypoint usage:**
+- **Nose (0), Ears (3,4)**: Used for head area masking in background updates
+- **Shoulders (5,6), Hips (11,12)**: Used for torso angle calculation
+- **Hips (11,12), Knees (13,14), Ankles (15,16)**: Used for leg measurements
 
 ### Tracking System
 
@@ -366,9 +443,9 @@ Four pose classes are detected:
 | `lying_down` | Horizontal posture | 3 |
 
 Classification is based on:
-- Torso angle (deviation from vertical)
-- Thigh uprightness
-- Limb length ratios (thigh:calf, torso:leg)
+- **Torso angle**: Deviation from vertical (0° = upright, 90° = horizontal)
+- **Thigh uprightness**: Angle of thigh relative to vertical
+- **Limb length ratios**: thigh:calf ratio, torso:leg ratio
 
 ### Fall Detection Output
 
@@ -376,13 +453,62 @@ Fall detection results include:
 
 | Field | Description |
 |-------|-------------|
-| `fall_detected_method1` | Fall detected via bounding box motion |
-| `fall_detected_method2` | Fall detected via motion + strict pose |
-| `fall_detected_method3` | Fall detected via flexible verification |
-| `counter_method1` | Consecutive frames for method 1 |
-| `counter_method2` | Consecutive frames for method 2 |
-| `counter_method3` | Consecutive frames for method 3 |
-| `primary_alert` | True if any method confirms fall |
+| `fall_detected_bbox_only` | Fall detected via bounding box motion (Algorithm 1) |
+| `counter_bbox_only` | Consecutive frames for Algorithm 1 |
+| `fall_detected_motion_pose_and` | Fall detected via motion + strict pose (Algorithm 2) |
+| `counter_motion_pose_and` | Consecutive frames for Algorithm 2 |
+
+### Safety Judgment System
+
+The unified safety judgment combines three area checkers:
+
+**1. Safe Area Checker (`tools/safe_area.py`)**
+- Validates if specific keypoints are within safe zone polygons
+- Uses configurable check method (HIP to FULL_BODY)
+- Returns boolean: in_safe_zone
+
+**2. Bed Area Checker (`tools/bed_area_checker.py`)**
+- Tracks how long a person stays in bed area polygons
+- Threshold: 5 seconds (configurable)
+- Returns: too_long_in_bed (boolean)
+
+**3. Floor Area Checker (`tools/floor_area_checker.py`)**
+- Detects if person is in floor area polygons
+- Used to distinguish safe lying (in bed) from unsafe lying (on floor)
+- Returns: in_floor_area (boolean)
+
+**Safety Decision Logic:**
+```python
+if fall_detected:
+    return "fall"
+elif lying_down and in_floor_area:
+    return "unsafe"  # Lying on floor
+elif in_bed_area and too_long_in_bed:
+    return "unsafe"  # In bed too long
+elif lying_down and not in_safe_zone:
+    return "unsafe"  # Lying outside safe zone
+else:
+    return "normal"
+```
+
+### Background Masking Algorithm
+
+When auto-update is enabled, the system intelligently updates the background while preserving human areas:
+
+**Process:**
+1. Defer background update until after tracking (to have track bounding boxes)
+2. For each track with keypoints:
+   - Create binary mask with body bounding box (20px padding)
+   - Add head area mask using ear-nose-ear keypoints with proportional padding
+   - Head padding = base_padding + (1.5 × max_ear_nose_distance)
+3. Apply mask to old background (preserve human areas)
+4. Update non-masked areas with new frame content
+5. Use pixel stepping (step=4) for performance optimization
+
+**Visualization (PC version only):**
+- White areas: Body bounding box mask
+- Red areas: Head area mask
+- 30% opacity overlay for visibility
 
 ### Homomorphic Encryption (HME)
 
@@ -408,22 +534,30 @@ The system uses multiple background workers for non-blocking operation:
 
 | Worker | Purpose | Interval |
 |--------|---------|----------|
-| `FlagAndSafeAreaSyncWorker` | Sync flags and safe areas from server | 1s / 5s |
+| `CameraStateSyncWorker` | Sync control flags and areas from server | 1s (flags) / 5s (areas) |
 | `StateReporterWorker` | Report camera state to server | 30s |
-| `FrameUploadWorker` | Upload frames to streaming server | Continuous |
+| `FrameUploadWorker` | Upload frames to streaming server | Continuous (fire-and-forget) |
 | `PingWorker` | Heartbeat to streaming server | 250ms |
-| `CommandReceiver` | Receive commands from server | Event-driven |
+| `CommandReceiverWorker` | Receive commands from server | Event-driven |
 | `AnalyticsWorker` | Process with analytics server (optional) | Event-driven |
-| `KeypointsSenderWorker` | Send keypoints to streaming server | Continuous |
+| `TracksSenderWorker` | Send keypoints/pose to streaming server | Continuous |
 
 ## 🔒 Privacy Design
 
 ### Data Minimization
 
 1. **Local Processing**: All pose estimation and fall detection runs locally
-2. **Encrypted Transmission**: HME encrypts features before sending
-3. **Background Privacy**: Background updates exclude human regions
+2. **Encrypted Transmission**: HME encrypts features before sending (when enabled)
+3. **Smart Background Privacy**: Background updates exclude human regions using intelligent masking
 4. **No Raw Video Upload**: Only processed data and selective frames are sent
+
+### Background Privacy Protection
+
+The auto-update background mechanism ensures patient privacy by:
+- **Masking human areas**: Preserves human silhouettes in old background
+- **Proportional head padding**: Uses ear-nose-ear distance for adaptive head masking
+- **Body bbox padding**: 20px padding around detected bodies
+- **Pixel stepping optimization**: Efficient processing with step=4
 
 ### Fallback Mechanisms
 
@@ -480,8 +614,18 @@ Solutions:
 Solutions:
 - Adjust fallParam["v_bbox_y"] (vertical speed threshold)
 - Adjust fallParam["angle"] (pose angle threshold)
-- Try different fall_algorithm (1, 2, or 3)
+- Try different fall_algorithm (1 or 2)
 - Adjust FALL_COUNT_THRES for consecutive frame count
+```
+
+#### Background Shows Human Ghosts
+```
+Symptoms: Background updates still show faint human shapes
+Solutions:
+- Increase body_padding parameter (default: 20)
+- Increase head_padding_factor (default: 1.5)
+- Reduce UPDATE_INTERVAL_MS to update more frequently
+- Ensure keypoints are properly detected (check debug output)
 ```
 
 ### MaixCAM Specific Issues
@@ -509,7 +653,8 @@ Solutions:
 1. **Frame Rate**: Target 30-60 FPS depending on scene complexity
 2. **Memory Management**: Periodic garbage collection every 30s
 3. **Queue Management**: Non-blocking queues prevent backpressure
-4. **UDP-like Frame Upload**: Latest frame always uploaded, old frames dropped
+4. **Fire-and-Forget Upload**: Latest frame always uploaded, old frames dropped
+5. **Pixel Stepping**: Background masking uses step=4 for 16x performance improvement
 
 ### Debug Logging
 
@@ -520,8 +665,13 @@ Enable detailed logging by checking console output for these prefixes:
 | `[DEBUG]` | Detailed debugging information |
 | `[DEBUG POSE]` | Pose estimation details |
 | `[DEBUG HME]` | HME encryption details |
-| `[FLEXIBLE VERIFICATION]` | Fall detection verification |
-| `[ALGORITHM X]` | Fall detection algorithm output |
+| `[ALGORITHM 1]` | Fall detection Algorithm 1 output |
+| `[ALGORITHM 2]` | Fall detection Algorithm 2 output |
+| `[FALL_DETECT]` | Fall detection system |
+| `[SAFE_AREA]` | Safe area management |
+| `[BED_AREA]` | Bed area monitoring |
+| `[FLOOR_AREA]` | Floor area detection |
+| `[SAFETY_JUDGMENT]` | Unified safety decision output |
 | `[SYNC]` | Flag/state synchronization |
 | `[BACKGROUND]` | Background management |
 
@@ -716,17 +866,24 @@ Get camera state including control flags from the streaming server.
 **Response (200 OK):**
 ```json
 {
-    "record": true,
-    "show_raw": false,
-    "auto_update_bg": true,
-    "set_background": false,
-    "analytics_mode": true,
-    "hme": false,
-    "fall_algorithm": 1,
-    "use_safety_check": true,
-    "show_safe_areas": false,
-    "show_bed_areas": false,
-    "show_floor_areas": false
+    "camera_id": "camera_001",
+    "camera_name": "Room 101 Camera",
+    "registration_status": "registered",
+    "local_ip": "192.168.1.100",
+    "check_method": 3,
+    "control_flags": {
+        "record": true,
+        "show_raw": false,
+        "auto_update_bg": true,
+        "set_background": false,
+        "analytics_mode": true,
+        "hme": false,
+        "fall_algorithm": 1,
+        "use_safety_check": true,
+        "show_safe_areas": false,
+        "show_bed_areas": false,
+        "show_floor_areas": false
+    }
 }
 ```
 
@@ -743,6 +900,36 @@ Get safe area definitions from the streaming server.
 [
     [[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]],
     [[0.6, 0.6], [0.9, 0.6], [0.9, 0.9], [0.6, 0.9]]
+]
+```
+
+---
+
+#### GET /api/stream/bed-areas
+Get bed area definitions from the streaming server.
+
+**Query Parameters:**
+- `camera_id`: Unique camera identifier
+
+**Response (200 OK):**
+```json
+[
+    [[0.2, 0.3], [0.7, 0.3], [0.7, 0.6], [0.2, 0.6]]
+]
+```
+
+---
+
+#### GET /api/stream/floor-areas
+Get floor area definitions from the streaming server.
+
+**Query Parameters:**
+- `camera_id`: Unique camera identifier
+
+**Response (200 OK):**
+```json
+[
+    [[0.0, 0.8], [1.0, 0.8], [1.0, 1.0], [0.0, 1.0]]
 ]
 ```
 
@@ -862,11 +1049,8 @@ Request privacy-preserving fall detection using encrypted features.
     "fall_detection": {
         "fall_detected_method1": false,
         "fall_detected_method2": false,
-        "fall_detected_method3": false,
         "counter_method1": 0,
-        "counter_method2": 0,
-        "counter_method3": 0,
-        "primary_alert": false
+        "counter_method2": 0
     }
 }
 ```
@@ -887,7 +1071,7 @@ Health check endpoint for the Analytics Server.
 
 ### Local Command Server (Camera Side)
 
-The Camera runs a local HTTP server on port 8080 to receive commands from the Streaming Server.
+The Camera runs a local HTTP server on port 80 to receive commands from the Streaming Server.
 
 #### POST /command
 Receive commands from the streaming server.
@@ -916,9 +1100,9 @@ Receive commands from the streaming server.
 | `record` | boolean | Enable/disable recording |
 | `show_raw` | boolean | Show raw or privacy-protected feed |
 | `set_background` | boolean | Capture current frame as background |
-| `auto_update_bg` | boolean | Enable/disable automatic background updates |
+| `auto_update_bg` | boolean | Enable/disable automatic background updates with masking |
 | `update_safe_areas` | array | Update safe area polygons |
-| `fall_algorithm` | integer | Set fall detection algorithm (1, 2, or 3) |
+| `fall_algorithm` | integer | Set fall detection algorithm (1 or 2) |
 | `check_method` | integer | Set safety check method (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `approve_camera` | boolean | Approve camera registration |
 | `forget_camera` | boolean | Remove camera from registry |
@@ -937,4 +1121,3 @@ Receive commands from the streaming server.
 **⚠️ Disclaimer**: This software is designed exclusively for MaixCAM devices and leverages hardware-specific optimizations not available on other platforms. A MaixCAM device is **REQUIRED** to run this application.
 
 **🎓 Research Use**: This software is developed for academic research purposes in privacy-preserving healthcare monitoring.
-
