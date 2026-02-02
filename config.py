@@ -10,6 +10,8 @@ import requests
 from dotenv import load_dotenv
 load_dotenv()
 
+from debug_config import debug_print
+
 # Import CameraStateManager from control_manager for proper state management
 from control_manager import camera_state_manager
 
@@ -149,7 +151,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
             params["camera_id"] = existing_camera_id
 
         _log("INFO", f"Registering with streaming server: {url} params={params} from IP: {local_ip}")
-        debug__log("INFO", "API_REQUEST", "%s | endpoint: /api/stream/register | params: %s", "POST", str(params))
+        # debug_print("INFO", "API_REQUEST", "%s | endpoint: /api/stream/register | params: %s", "POST", str(params))
 
         response = requests.post(
             url,
@@ -189,7 +191,7 @@ def check_registration_status(server_ip, camera_id, local_ip):
     try:
         url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/registered"
         _log("INFO", "Checking registration status on streaming server...")
-        debug__log("INFO", "API_REQUEST", "%s | endpoint: /api/stream/registered", "GET")
+        # debug_print("INFO", "API_REQUEST", "%s | endpoint: /api/stream/registered", "GET")
 
         response = requests.get(url, timeout=3.0)
 
