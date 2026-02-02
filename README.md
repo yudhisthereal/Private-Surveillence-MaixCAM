@@ -854,8 +854,18 @@ flowchart TD
     CheckTimer -- Yes --> SetFlag[Set Update Pending Flag]
     SetFlag --> Defer[Defer to Tracking Phase]
 
-    Defer --> GetTracks[Get Valid Tracks]
-    GetTracks --> TrackLoop[For Each Track]
+    Defer --> GetTracks{"Valid Tracks Found?"}
+    
+    GetTracks -- Yes --> UpdateCache[Update Cache]
+    UpdateCache --> TrackLoop[For Each Track]
+    
+    GetTracks -- No --> CheckCache{"Cached Tracks<br/>Available?"}
+    CheckCache -- Yes --> UseCache[Use Cached Tracks]
+    UseCache --> TrackLoop
+    
+    CheckCache -- No --> NoMask["Use Raw Frame<br/>(No Masking)"]
+    NoMask --> Upload2
+
     TrackLoop --> MaskBody["Create Body Mask<br/>(BBox + Padding)"]
     MaskBody --> MaskHead["Create Head Mask<br/>(Ear-Nose + Proportional)"]
     MaskHead --> Merge["Merge Background<br/>Keep Old Pixels in Mask"]
@@ -867,8 +877,8 @@ flowchart TD
     classDef endnode fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#000000
 
     class Start,End,End2 endnode
-    class CheckFlag,Detect,CheckCount,CheckTimer decision
-    class IncCounter,UpdateImmediate,Upload1,ResetCounter,SetFlag,Defer,GetTracks,TrackLoop,MaskBody,MaskHead,Merge,Upload2,End process
+    class CheckFlag,Detect,CheckCount,CheckTimer,GetTracks,CheckCache decision
+    class IncCounter,UpdateImmediate,Upload1,ResetCounter,SetFlag,Defer,UpdateCache,UseCache,NoMask,TrackLoop,MaskBody,MaskHead,Merge,Upload2,End process
 ```
 
 **Visualization (PC version only):**
