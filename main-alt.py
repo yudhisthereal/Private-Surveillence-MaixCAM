@@ -247,11 +247,6 @@ def merge_background_with_mask(old_background, new_frame, processed_tracks, padd
     merged = np.where(mask_3ch == 255, old_background, merged)
 
     return merged, mask_vis
-    # Where mask is black (no humans), use new_frame (already set as merged)
-    mask_3ch = cv2.cvtColor(mask_binary, cv2.COLOR_GRAY2BGR)
-    merged = np.where(mask_3ch == 255, old_background, merged)
-
-    return merged, mask_vis
 
 # ============================================
 # MAIN INITIALIZATION
