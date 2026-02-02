@@ -418,6 +418,12 @@ def main():
     ])
     frame_start_time = time_ms()
     
+    # caches last known track, will only be cleared after `cached_tracks_timeout` of no tracks detected.
+    # is used for selective background updates
+    cached_tracks = None
+    cached_tracks_timeout = 3000 # 3s
+    cached_tracks_last_updated = 0
+    
     # ============================================
     # MAIN LOOP
     # ============================================
@@ -718,18 +724,32 @@ def main():
         # Send tracks to queue and mark them as ready for sending
         update_latest_tracks(processed_tracks)
         mark_tracks_as_ready()
+        
+        # Cleanup cached_tracks if timeout is hit after the last cache update
+        if cached_tracks:
+            if time_ms() - cached_tracks_last_updated > cached_tracks_timeout:
+                cached_tracks = None    
 
-        # Deferred background update with masking (after we have track bboxes)
+        # Deferred selective background update with masking (after we have track bboxes)
         if background_update_needed and background_img is not None:
             try:
                 # Extract bounding boxes from processed tracks
                 # Get valid tracks (have bbox and keypoints)
                 valid_tracks = [t for t in processed_tracks if t.get("bbox") and t.get("keypoints")]
-
+                
                 if valid_tracks:
                     # Merge background with new frame, masking out human areas
                     logger.print("MAIN", "[BACKGROUND] Updating background with %d masked track(s)", len(valid_tracks))
                     new_background, mask_vis = merge_background_with_mask(background_img, raw_img, valid_tracks, padding=20)
+                    
+                    # Update cached_tracks (and reset `timer`) if valid_track exist
+                    cached_tracks_last_updated = time_ms()
+                    cached_tracks = valid_tracks
+                elif cached_tracks:
+                    # No valid tracks for the current frame, but the tracks cache is still available
+                    # Workaround for "person(/people) exist in the frame but isn't being detected by the pose extractor"
+                    logger.print("MAIN", "[BACKGROUND] Updating background with %d cached track(s)", len(cached_tracks))
+                    new_background, mask_vis = merge_background_with_mask(background_img, raw_img, cached_tracks, padding=20)
                 else:
                     # No tracks, just use the raw frame
                     logger.print("MAIN", "[BACKGROUND] No tracks to mask, using raw frame")
