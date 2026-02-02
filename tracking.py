@@ -123,6 +123,8 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
     # Initialize encrypted_features for all code paths
     encrypted_features = None
     pose_label = "unknown"
+    safety_reason = "normal"
+    safety_details = {}
     
     # Update global FPS
     current_fps = fps
@@ -306,6 +308,8 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                     if not is_safe:
                         # Person is unsafe - add to unsafe_ids
                         unsafe_ids.add(track.id)
+                        safety_reason = reason
+                        safety_details = details
                         logger.print("TRACKING", "Track %d unsafe: %s | details: %s", track.id, reason, details)
                     else:
                         # Person is safe - remove from unsafe_ids
@@ -333,7 +337,9 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                 "pose_label": pose_label,  # Return pose label for analytics/local processing
                 "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking"),
                 "encrypted_features": encrypted_features,  # Encrypted features for analytics server (when use_hme=True)
-                "use_hme": use_hme  # Whether HME is enabled (True only when analytics server is available)
+                "use_hme": use_hme,  # Whether HME is enabled (True only when analytics server is available)
+                "safety_reason": safety_reason,
+                "safety_details": safety_details
             }
             # print(f"process_track() -> {track_result}")
             

@@ -649,6 +649,37 @@ Classification is based on:
 - **Thigh uprightness**: Angle of thigh relative to vertical
 - **Limb length ratios**: thigh:calf ratio, torso:leg ratio
 
+### Pose Classification Logic
+
+```mermaid
+flowchart TD
+    Start([Keypoints]) --> Angles[Calculate Angles:<br/>Torso Angle, Thigh Uprightness]
+    Angles --> Ratios[Calculate Ratios:<br/>Thigh/Calf, Torso/Leg]
+    Ratios --> Check1{Torso < 30° AND<br/>Thigh < 40°?}
+
+    Check1 -- Yes --> SubCheck1{Thigh/Calf < 0.7?}
+    SubCheck1 -- Yes --> Sitting([Sitting])
+    SubCheck1 -- No --> SubCheck2{Torso/Leg < 0.5?}
+    SubCheck2 -- Yes --> Bending([Bending Down])
+    SubCheck2 -- No --> Standing([Standing])
+
+    Check1 -- No --> Check2{Torso < 30° AND<br/>Thigh >= 40°?}
+    Check2 -- Yes --> Sitting
+
+    Check2 -- No --> Check3{30° <= Torso < 80° AND<br/>Thigh < 60°?}
+    Check3 -- Yes --> Bending([Bending Down])
+    Check3 -- No --> Lying([Lying Down])
+
+    classDef process fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#000000
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000000
+    classDef result fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000000
+
+    class Start,Angles,Ratios process
+    class Check1,SubCheck1,SubCheck2,Check2,Check3 decision
+    class Sitting,Bending,Standing,Lying result
+```
+
+
 ### Fall Detection Output
 
 Fall detection results include:
@@ -659,6 +690,50 @@ Fall detection results include:
 | `counter_bbox_only` | Consecutive frames for Algorithm 1 |
 | `fall_detected_motion_pose_and` | Fall detected via motion + strict pose (Algorithm 2) |
 | `counter_motion_pose_and` | Consecutive frames for Algorithm 2 |
+
+### Fall Judgment Logic
+
+```mermaid
+flowchart TD
+    Start([Track History]) --> Calc[Calculate BBox Speed:<br/>v_top, v_height]
+    Calc --> Motion{v_top > Thres OR<br/>v_height > Thres?}
+    
+    Motion --> AlgoSelection{Fall Algorithm?}
+    
+    AlgoSelection -- Algo 1<br/>(BBox Only) --> CheckMotion1{Motion Detected?}
+    CheckMotion1 -- Yes --> Count1[Counter + 1]
+    CheckMotion1 -- No --> Dec1[Counter - 1]
+    Count1 --> Thres1{Counter >= 2?}
+    Dec1 --> Thres1
+    Thres1 -- Yes --> Fall([FALL DETECTED])
+    Thres1 -- No --> NoFall([Normal])
+
+    AlgoSelection -- Algo 2<br/>(Motion + Pose) --> CheckMotion2{Motion Detected?}
+    CheckMotion2 -- Yes --> StrictPose{Strict Pose?<br/>(Torso>80°, Thigh>60°)}
+    StrictPose -- Yes --> Strong[Strong Evidence<br/>Counter + 2]
+    StrictPose -- No --> Moderate[Moderate Evidence<br/>Counter + 1]
+    
+    CheckMotion2 -- No --> CheckStrictOnly{Strict Pose Only?}
+    CheckStrictOnly -- Yes --> Moderate
+    CheckStrictOnly -- No --> Dec2[Counter - 1]
+
+    Strong --> Thres2{Counter >= 2?}
+    Moderate --> Thres2
+    Dec2 --> Thres2
+    Thres2 -- Yes --> Fall
+    Thres2 -- No --> NoFall
+
+    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000000
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000000
+    classDef result fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000000
+    classDef fall fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000000
+
+    class Start,Calc,Count1,Dec1,Strong,Moderate,Dec2 process
+    class Motion,AlgoSelection,CheckMotion1,Thres1,CheckMotion2,StrictPose,CheckStrictOnly,Thres2 decision
+    class Fall fall
+    class NoFall result
+```
+
 
 ### Safety Judgment System
 
@@ -696,38 +771,35 @@ else:
 
 ```mermaid
 flowchart TD
-    Start{Track Detected} --> CheckFall{Fall Detected?}
-    CheckFall -->|Yes| FallStatus[Status: FALL]
-    CheckFall -->|No| CheckLying{Lying Down?}
+    Start([Start]) --> Fall{Fall Detected?}
+    Fall -- Yes --> UnsafeFall[Status: FALL]
+    Fall -- No --> Lying{Lying Down?}
 
-    CheckLying -->|No| CheckSafeInBed{In Safe Zone?}
-    CheckLying -->|Yes| CheckFloor{In Floor Area?}
+    Lying -- Yes --> Floor{In Floor Area?}
+    Floor -- Yes --> UnsafeFloor[Status: UNSAFE<br/>(Lying on Floor)]
+    Floor -- No --> SafeZone{In Safe Area?}
+    SafeZone -- No --> UnsafeSafe[Status: UNSAFE<br/>(Lying Outside Safe)]
+    SafeZone -- Yes --> Safe[Status: SAFE]
 
-    CheckFloor -->|Yes| FloorStatus[Status: UNSAFE<br/>Reason: Lying on Floor]
-    CheckFloor -->|No| CheckBed{In Bed Area?}
+    Lying -- No --> Bed{In Bed Area?}
+    Bed -- Yes --> Time{Time > Threshold?}
+    Time -- Yes --> UnsafeBed[Status: UNSAFE<br/>(In Bed Too Long)]
+    Time -- No --> Safe
+    Bed -- No --> Safe
 
-    CheckBed -->|Yes| CheckBedTime{Time > 5s?}
-    CheckBed -->|No| CheckSafeFloor{In Safe Zone?}
-
-    CheckBedTime -->|Yes| BedStatus[Status: UNSAFE<br/>Reason: In Bed Too Long]
-    CheckBedTime -->|No| CheckSafeFloor
-
-    CheckSafeFloor -->|No| SafeFloorStatus[Status: UNSAFE<br/>Reason: Outside Safe Zone]
-    CheckSafeFloor -->|Yes| SafeStatus[Status: NORMAL]
-
-    CheckSafeInBed -->|Yes| SafeStatus
-    CheckSafeInBed -->|No| SafeStatus
-
-    classDef fall fill:#ffebee,stroke:#c62828,stroke-width:3px,color:#000000
+    classDef fall fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000000
     classDef unsafe fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000000
     classDef safe fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000000
-    classDef decision fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000000
+    classDef neutral fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#000000
 
-    class FallStatus fall
-    class FloorStatus,BedStatus,SafeFloorStatus unsafe
-    class SafeStatus safe
-    class Start,CheckFall,CheckLying,CheckFloor,CheckBed,CheckBedTime,CheckSafeInBed,CheckSafeFloor decision
+    class UnsafeFall fall
+    class UnsafeFloor,UnsafeSafe,UnsafeBed unsafe
+    class Safe safe
+    class Start,Fall,Lying,Floor,SafeZone,Bed,Time neutral
 ```
+
+
+
 
 ### Background Masking Algorithm
 
@@ -743,10 +815,50 @@ When auto-update is enabled, the system intelligently updates the background whi
 4. Update non-masked areas with new frame content
 5. Use pixel stepping (step=4) for performance optimization
 
+**Selective Background Update Flow:**
+
+```mermaid
+flowchart TD
+    Start([Start Frame]) --> CheckFlag{Auto Update ON?}
+    CheckFlag -- No --> End([End])
+    CheckFlag -- Yes --> Detect{Human Present?}
+
+    Detect -- No --> IncCounter[Increment No-Human Counter]
+    IncCounter --> CheckCount{Counter >= Threshold?}
+    CheckCount -- Yes --> UpdateImmediate[Update Background<br/>(Full Frame)]
+    UpdateImmediate --> Upload1[Upload Background]
+    CheckCount -- No --> End
+
+    Detect -- Yes --> ResetCounter[Reset No-Human Counter]
+    ResetCounter --> CheckTimer{Time > Interval?}
+    CheckTimer -- No --> End
+    CheckTimer -- Yes --> SetFlag[Set Update Pending Flag]
+    SetFlag --> Defer[Defer to Tracking Phase]
+
+    Defer --> GetTracks[Get Valid Tracks]
+    GetTracks --> TrackLoop[For Each Track]
+    TrackLoop --> MaskBody[Create Body Mask<br/>(BBox + Padding)]
+    MaskBody --> MaskHead[Create Head Mask<br/>(Ear-Nose + Proportional)]
+    MaskHead --> Merge[Merge Background<br/>Keep Old Pixels in Mask]
+    Merge --> Upload2[Upload Background]
+    Upload2 --> End
+
+    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000000
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000000
+    classDef endnode fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#000000
+
+    class Start,End,End2 endnode
+    class CheckFlag,Detect,CheckCount,CheckTimer decision
+    class IncCounter,UpdateImmediate,Upload1,ResetCounter,SetFlag,Defer,GetTracks,TrackLoop,MaskBody,MaskHead,Merge,Upload2,End process
+```
+
 **Visualization (PC version only):**
 - White areas: Body bounding box mask
 - Red areas: Head area mask
 - 30% opacity overlay for visibility
+
+
+
 
 ### Homomorphic Encryption (HME)
 

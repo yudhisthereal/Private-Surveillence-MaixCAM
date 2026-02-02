@@ -563,6 +563,8 @@ def main():
             # Map "tracking" status to "normal" for safety_status
             status = track_result.get("status", "tracking")
             safety_status = "normal" if status == "tracking" else status
+            safety_reason = track_result.get("safety_reason", "normal")
+            safety_details = track_result.get("safety_details", {})
             encrypted_features = track_result.get("encrypted_features")
 
             # Create processed track entry with all required data
@@ -572,6 +574,8 @@ def main():
                 "bbox": bbox,
                 "pose_label": pose_label,
                 "safety_status": safety_status,
+                "safety_reason": safety_reason,
+                "safety_details": safety_details,
                 "encrypted_features": encrypted_features  # Include for analytics server, omit when sending to streaming
             }
             processed_tracks.append(processed_track)

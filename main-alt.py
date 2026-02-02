@@ -12,9 +12,6 @@ import cv2
 # ============================================
 # MOCK MAIX MODULE (To prevent hardware access)
 # ============================================
-# ============================================
-# MOCK MAIX MODULE (To prevent hardware access)
-# ============================================
 from unittest.mock import MagicMock
 import types
 
@@ -547,8 +544,6 @@ def main():
         objs = pose_extractor.detect(raw_img, conf_th=0.5, iou_th=0.45, keypoint_th=0.5)
         pose_human_present = len(objs) > 0
         
-        # Use pose objects as detection objects (Optimization: Skip separate YOLO detection)
-        objs_det = objs # MediaPipe 'objs' are compatible with PCTrackerObject logic if they have x,y,w,h
         current_human_present = pose_human_present
         frame_profiler.end_task("pose_extraction")
 
@@ -698,9 +693,14 @@ def main():
             # Draw bounding box and label
             if track_result.get("bbox"):
                 nx, ny, nw, nh = track_result.get("bbox")
-                cv2.rectangle(img, (int(nx), int(ny)), (int(nx+nw), int(ny+nh)), (255, 0, 0), 2)
                 cv2.putText(img, f"ID: {track_result.get('track_id')} {track_result.get('pose_label')} [{track_result.get('status')}]", 
                            (int(nx), int(ny)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                
+                # Render safety reason if unsafe
+                safety_reason = track_result.get("safety_reason", "normal")
+                if safety_reason != "normal":
+                     cv2.putText(img, f"Reason: {safety_reason}", 
+                           (int(nx), int(ny)-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             
             logger.print("MAIN", "pose_label <- track_result['pose_label']: %s", track_result.get('pose_label', 'unknown'))
             track_id = track_result.get("track_id")
@@ -709,6 +709,7 @@ def main():
             pose_label = track_result.get("pose_label", "unknown")
             status = track_result.get("status", "tracking")
             safety_status = "normal" if status == "tracking" else status
+            # safety_reason already extracted above
             encrypted_features = track_result.get("encrypted_features")
 
             processed_track = {
@@ -717,6 +718,7 @@ def main():
                 "bbox": bbox,
                 "pose_label": pose_label,
                 "safety_status": safety_status,
+                "safety_reason": safety_reason,
                 "encrypted_features": encrypted_features
             }
             processed_tracks.append(processed_track)
