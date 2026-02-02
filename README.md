@@ -8,7 +8,7 @@ A privacy-preserving patient monitoring system built for the **MaixCAM** platfor
 
 > **⚠️ Important Requirement**: This software is optimized for the **MaixCAM hardware platform**. However, a **PC-compatible version** (`main-alt.py`) is provided for development and testing on standard computers with webcams.
 
-## � Table of Contents
+## Table of Contents
 
 - [System Architecture](#-system-architecture)
 - [Features](#-features)
@@ -23,7 +23,7 @@ A privacy-preserving patient monitoring system built for the **MaixCAM** platfor
 - [API Endpoints](#-api-endpoints)
 - [Support](#-support)
 
-## �📋 System Architecture
+## 📋 System Architecture
 
 This project is one component of a three-part distributed system:
 
