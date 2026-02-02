@@ -8,7 +8,22 @@ A privacy-preserving patient monitoring system built for the **MaixCAM** platfor
 
 > **⚠️ Important Requirement**: This software is optimized for the **MaixCAM hardware platform**. However, a **PC-compatible version** (`main-alt.py`) is provided for development and testing on standard computers with webcams.
 
-## 📋 System Architecture
+## � Table of Contents
+
+- [System Architecture](#-system-architecture)
+- [Features](#-features)
+- [Architecture](#️-architecture)
+- [Installation & Setup](#-installation--setup)
+- [Configuration](#️-configuration)
+- [Output Files](#-output-files)
+- [Technical Details](#-technical-details)
+- [Privacy Design](#-privacy-design)
+- [Troubleshooting](#-troubleshooting)
+- [License & Acknowledgments](#-license--acknowledgments)
+- [API Endpoints](#-api-endpoints)
+- [Support](#-support)
+
+## �📋 System Architecture
 
 This project is one component of a three-part distributed system:
 
@@ -80,14 +95,16 @@ This project is one component of a three-part distributed system:
 The system uses a unified safety judgment system that combines three area checkers:
 
 1. **Safe Area Checker**: Monitors if patients are in designated safe zones
-   - Multiple check methods: HIP, TORSO, TORSO_HEAD (default), TORSO_HEAD_KNEES, FULL_BODY
+   - Validates presence using the global check method (e.g., TORSO_HEAD)
    - Configurable safe zone polygons
 
 2. **Bed Area Checker**: Tracks time spent in bed areas
+   - Uses the global check method to measure dwell time in bed
    - 5-second threshold for "too long in bed" detection
    - Helps detect patients staying in bed longer than expected
 
 3. **Floor Area Checker**: Detects when patients are lying on the floor
+   - Uses the global check method to detect floor contact
    - Critical safety alert for fall situations
    - Distinguishes between safe lying (in bed) and unsafe lying (on floor)
 
@@ -539,11 +556,11 @@ The system supports 5 different check methods for validating if a person is in a
 
 | Method | Value | Keypoints Used | Description |
 |--------|-------|---------------|-------------|
-| HIP | 1 | Left Hip, Right Hip | Checks if hips are in safe zone |
-| TORSO | 2 | Shoulders, Hips | Checks if torso (shoulders+hips) are in safe zone |
-| TORSO_HEAD | 3 | Nose, Shoulders, Hips | Checks if torso+head are in safe zone (default) |
-| TORSO_HEAD_KNEES | 4 | Nose, Shoulders, Hips, Knees | Checks if upper body+knees are in safe zone |
-| FULL_BODY | 5 | All 17 keypoints | Checks if entire body is in safe zone |
+| HIP | 1 | Left Hip, Right Hip | Checks if hips are in area polygon |
+| TORSO | 2 | Shoulders, Hips | Checks if torso (shoulders+hips) are in area polygon |
+| TORSO_HEAD | 3 | Nose, Shoulders, Hips | Checks if torso+head are in area polygon (default) |
+| TORSO_HEAD_KNEES | 4 | Nose, Shoulders, Hips, Knees | Checks if upper body+knees are in area polygon |
+| FULL_BODY | 5 | All 17 keypoints | Checks if entire body is in area polygon |
 
 **More keypoints = stricter checking.** The default (TORSO_HEAD) provides a good balance between accuracy and practicality.
 
@@ -653,20 +670,20 @@ Classification is based on:
 
 ```mermaid
 flowchart TD
-    Start([Keypoints]) --> Angles[Calculate Angles:<br/>Torso Angle, Thigh Uprightness]
-    Angles --> Ratios[Calculate Ratios:<br/>Thigh/Calf, Torso/Leg]
-    Ratios --> Check1{Torso < 30° AND<br/>Thigh < 40°?}
+    Start([Keypoints]) --> Angles["Calculate Angles:<br/>Torso Angle, Thigh Uprightness"]
+    Angles --> Ratios["Calculate Ratios:<br/>Thigh/Calf, Torso/Leg"]
+    Ratios --> Check1{"Torso < 30° AND<br/>Thigh < 40°?"}
 
-    Check1 -- Yes --> SubCheck1{Thigh/Calf < 0.7?}
+    Check1 -- Yes --> SubCheck1{"Thigh/Calf < 0.7?"}
     SubCheck1 -- Yes --> Sitting([Sitting])
-    SubCheck1 -- No --> SubCheck2{Torso/Leg < 0.5?}
+    SubCheck1 -- No --> SubCheck2{"Torso/Leg < 0.5?"}
     SubCheck2 -- Yes --> Bending([Bending Down])
     SubCheck2 -- No --> Standing([Standing])
 
-    Check1 -- No --> Check2{Torso < 30° AND<br/>Thigh >= 40°?}
+    Check1 -- No --> Check2{"Torso < 30° AND<br/>Thigh >= 40°?"}
     Check2 -- Yes --> Sitting
 
-    Check2 -- No --> Check3{30° <= Torso < 80° AND<br/>Thigh < 60°?}
+    Check2 -- No --> Check3{"30° <= Torso < 80° AND<br/>Thigh < 60°?"}
     Check3 -- Yes --> Bending([Bending Down])
     Check3 -- No --> Lying([Lying Down])
 
@@ -695,29 +712,29 @@ Fall detection results include:
 
 ```mermaid
 flowchart TD
-    Start([Track History]) --> Calc[Calculate BBox Speed:<br/>v_top, v_height]
-    Calc --> Motion{v_top > Thres OR<br/>v_height > Thres?}
+    Start([Track History]) --> Calc["Calculate BBox Speed:<br/>v_top, v_height"]
+    Calc --> Motion{"v_top > Thres OR<br/>v_height > Thres?"}
     
-    Motion --> AlgoSelection{Fall Algorithm?}
+    Motion --> AlgoSelection{"Fall Algorithm?"}
     
-    AlgoSelection -- Algo 1<br/>(BBox Only) --> CheckMotion1{Motion Detected?}
-    CheckMotion1 -- Yes --> Count1[Counter + 1]
-    CheckMotion1 -- No --> Dec1[Counter - 1]
-    Count1 --> Thres1{Counter >= 2?}
+    AlgoSelection -- Algo 1<br/>(BBox Only) --> CheckMotion1{"Motion Detected?"}
+    CheckMotion1 -- Yes --> Count1["Counter + 1"]
+    CheckMotion1 -- No --> Dec1["Counter - 1"]
+    Count1 --> Thres1{"Counter >= 2?"}
     Dec1 --> Thres1
     Thres1 -- Yes --> Fall([FALL DETECTED])
     Thres1 -- No --> NoFall([Normal])
 
-    AlgoSelection -- Algo 2<br/>(Motion + Pose) --> CheckMotion2{Motion Detected?}
-    CheckMotion2 -- Yes --> StrictPose{Strict Pose?<br/>(Torso>80°, Thigh>60°)}
-    StrictPose -- Yes --> Strong[Strong Evidence<br/>Counter + 2]
-    StrictPose -- No --> Moderate[Moderate Evidence<br/>Counter + 1]
+    AlgoSelection -- Algo 2<br/>(Motion + Pose) --> CheckMotion2{"Motion Detected?"}
+    CheckMotion2 -- Yes --> StrictPose{"Strict Pose?<br/>(Torso>80°, Thigh>60°)"}
+    StrictPose -- Yes --> Strong["Strong Evidence<br/>Counter + 2"]
+    StrictPose -- No --> Moderate["Moderate Evidence<br/>Counter + 1"]
     
-    CheckMotion2 -- No --> CheckStrictOnly{Strict Pose Only?}
+    CheckMotion2 -- No --> CheckStrictOnly{"Strict Pose Only?"}
     CheckStrictOnly -- Yes --> Moderate
-    CheckStrictOnly -- No --> Dec2[Counter - 1]
+    CheckStrictOnly -- No --> Dec2["Counter - 1"]
 
-    Strong --> Thres2{Counter >= 2?}
+    Strong --> Thres2{"Counter >= 2?"}
     Moderate --> Thres2
     Dec2 --> Thres2
     Thres2 -- Yes --> Fall
@@ -746,11 +763,13 @@ The unified safety judgment combines three area checkers:
 
 **2. Bed Area Checker (`tools/bed_area_checker.py`)**
 - Tracks how long a person stays in bed area polygons
+- Uses the same check method to determine presence in bed
 - Threshold: 5 seconds (configurable)
 - Returns: too_long_in_bed (boolean)
 
 **3. Floor Area Checker (`tools/floor_area_checker.py`)**
 - Detects if person is in floor area polygons
+- Uses the same check method to validate floor contact
 - Used to distinguish safe lying (in bed) from unsafe lying (on floor)
 - Returns: in_floor_area (boolean)
 
@@ -819,27 +838,27 @@ When auto-update is enabled, the system intelligently updates the background whi
 
 ```mermaid
 flowchart TD
-    Start([Start Frame]) --> CheckFlag{Auto Update ON?}
+    Start([Start Frame]) --> CheckFlag{"Auto Update ON?"}
     CheckFlag -- No --> End([End])
-    CheckFlag -- Yes --> Detect{Human Present?}
+    CheckFlag -- Yes --> Detect{"Human Present?"}
 
     Detect -- No --> IncCounter[Increment No-Human Counter]
-    IncCounter --> CheckCount{Counter >= Threshold?}
-    CheckCount -- Yes --> UpdateImmediate[Update Background<br/>(Full Frame)]
+    IncCounter --> CheckCount{"Counter >= Threshold?"}
+    CheckCount -- Yes --> UpdateImmediate["Update Background<br/>(Full Frame)"]
     UpdateImmediate --> Upload1[Upload Background]
     CheckCount -- No --> End
 
     Detect -- Yes --> ResetCounter[Reset No-Human Counter]
-    ResetCounter --> CheckTimer{Time > Interval?}
+    ResetCounter --> CheckTimer{"Time > Interval?"}
     CheckTimer -- No --> End
     CheckTimer -- Yes --> SetFlag[Set Update Pending Flag]
     SetFlag --> Defer[Defer to Tracking Phase]
 
     Defer --> GetTracks[Get Valid Tracks]
     GetTracks --> TrackLoop[For Each Track]
-    TrackLoop --> MaskBody[Create Body Mask<br/>(BBox + Padding)]
-    MaskBody --> MaskHead[Create Head Mask<br/>(Ear-Nose + Proportional)]
-    MaskHead --> Merge[Merge Background<br/>Keep Old Pixels in Mask]
+    TrackLoop --> MaskBody["Create Body Mask<br/>(BBox + Padding)"]
+    MaskBody --> MaskHead["Create Head Mask<br/>(Ear-Nose + Proportional)"]
+    MaskHead --> Merge["Merge Background<br/>Keep Old Pixels in Mask"]
     Merge --> Upload2[Upload Background]
     Upload2 --> End
 
@@ -1032,7 +1051,6 @@ This research software is developed for privacy-preserving patient monitoring. Y
 ### Built With
 
 - **MaixPy** - MaixCAM development framework
-- **MaixVision IDE** - Official development environment
 - **YOLO11** - State-of-the-art pose estimation
 - **ByteTracker** - Multi-object tracking algorithm
 - **Homomorphic Encryption** - Privacy-preserving computation
@@ -1043,7 +1061,6 @@ This research software is developed for privacy-preserving patient monitoring. Y
 - **Analytics Server**: [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/)
 - **Streaming Server (Caregiver UI)**: [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/)
 - MaixCAM: [Sipeed MaixCAM](https://wiki.sipeed.com/maixcam)
-- MaixVision: [MaixVision GitHub](https://github.com/sipeed/MaixVision)
 - YOLO11: [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
 - ByteTracker: [ByteTrack](https://github.com/Zhongdao/Towards-Realtime-MOT)
 - COCO Keypoints: [COCO Dataset](https://cocodataset.org/)
