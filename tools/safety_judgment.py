@@ -12,6 +12,7 @@ class SafetyReason:
     LYING_OUTSIDE_SAFE = "lying_outside_safe"
     SAFE_IN_SAFE_AREA = "safe_in_safe_area"
     SAFE_TRACKING = "safe_tracking"
+    SAFE_IN_BED = "safe_in_bed"
 
 
 class SafetyJudgment:
@@ -101,14 +102,14 @@ class SafetyJudgment:
         # Rule 1: If lying_down AND in_floor_area → UNSAFE (lying on floor)
         if self.floor_area_checker is not None and is_lying_down:
             in_floor = self.floor_area_checker.check_floor_area(body_keypoints, check_method)
-            details["in_floor_area"] = in_floorRule 
+            details["in_floor_area"] = in_floor
 
             if in_floor:
                 # Person is lying on the floor - UNSAFE
                 return False, SafetyReason.LYING_ON_FLOOR, details
 
         # Rule 2: If in_bed_area AND time > threshold → UNSAFE (in bed too long)
-        if self.bed_area_checker is not None:
+        if self.bed_area_checker is not None and is_lying_down:
             is_in_bed, time_in_bed, is_too_long = self.bed_area_checker.check_bed_area(
                 track_id, body_keypoints, check_method
             )
@@ -119,6 +120,8 @@ class SafetyJudgment:
             if is_too_long:
                 # Person has been in bed for too long - UNSAFE
                 return False, SafetyReason.IN_BED_TOO_LONG, details
+            elif is_in_bed:
+                return True, SafetyReason.SAFE_IN_BED, details
 
         # Rule 3: If lying_down AND not_in_safe_area → UNSAFE (lying down outside safe zone)
         if self.safe_area_checker is not None and is_lying_down:
@@ -128,12 +131,6 @@ class SafetyJudgment:
             if not in_safe:
                 # Person is lying down outside safe zone - UNSAFE
                 return False, SafetyReason.LYING_OUTSIDE_SAFE, details
-
-        # Update in_safe_area in details even if not lying down
-        if self.safe_area_checker is not None and not is_lying_down:
-            details["in_safe_area"] = self.safe_area_checker.body_in_safe_zone(
-                body_keypoints, check_method
-            )
 
         # Rule 4: Otherwise → SAFE
         if details.get("in_safe_area", False):

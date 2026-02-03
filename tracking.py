@@ -300,17 +300,20 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                             # Use a default confidence of 1.0 since pose extractor doesn't provide it
                             body_keypoints.append((x, y, 1.0))
 
+                    # Normalize keypoints for safety check (expects 0-1 range)
+                    # Assuming typical MaixCAM resolution 320x224
+                    normalized_keypoints = normalize_keypoints(obj.points, 320, 224)
+
                     # Use SafetyJudgment to evaluate safety
-                    is_safe, reason, details = safety_judgment.evaluate_safety(
-                        track.id, body_keypoints, pose_label
+                    is_safe, safety_reason, details = safety_judgment.evaluate_safety(
+                        track.id, normalized_keypoints, pose_label
                     )
 
                     if not is_safe:
                         # Person is unsafe - add to unsafe_ids
                         unsafe_ids.add(track.id)
-                        safety_reason = reason
                         safety_details = details
-                        logger.print("TRACKING", "Track %d unsafe: %s | details: %s", track.id, reason, details)
+                        logger.print("TRACKING", "Track %d unsafe: %s | details: %s", track.id, safety_reason, details)
                     else:
                         # Person is safe - remove from unsafe_ids
                         if track.id in unsafe_ids:

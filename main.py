@@ -181,7 +181,7 @@ def main():
     safe_area_checker = SafeAreaChecker()
     initialize_safety_checker(safe_area_checker)
 
-    bed_area_checker = BedAreaChecker(too_long_threshold_sec=5.0)
+    bed_area_checker = BedAreaChecker(too_long_threshold_ms=5000)
     initialize_bed_area_checker(bed_area_checker)
 
     floor_area_checker = FloorAreaChecker()

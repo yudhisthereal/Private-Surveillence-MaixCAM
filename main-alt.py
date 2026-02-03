@@ -75,6 +75,8 @@ config.BACKGROUND_PATH = os.path.abspath("./static/background.jpg")
 
 control_manager.LOCAL_FLAGS_FILE = os.path.abspath("./control_flags.json")
 control_manager.SAFE_AREA_FILE = os.path.abspath("./safe_areas.json")
+control_manager.BED_AREA_FILE = os.path.abspath("./bed_areas.json")
+control_manager.FLOOR_AREA_FILE = os.path.abspath("./floor_areas.json")
 
 # Create necessary directories
 os.makedirs("./static", exist_ok=True)
@@ -271,7 +273,7 @@ def main():
     safe_area_checker = SafeAreaChecker()
     initialize_safety_checker(safe_area_checker)
 
-    bed_area_checker = BedAreaChecker(too_long_threshold_sec=5.0)
+    bed_area_checker = BedAreaChecker(too_long_threshold_ms=10000)
     initialize_bed_area_checker(bed_area_checker)
 
     floor_area_checker = FloorAreaChecker()
@@ -685,10 +687,60 @@ def main():
                         if pt1 != (0,0) and pt2 != (0,0):
                             cv2.line(img, pt1, pt2, (0, 255, 0), 2)
                 
-                # Draw points
+                # Prepare polygon contours for point testing
+                h, w = img.shape[:2]
+                
+                def to_contours(polygons):
+                    contours = []
+                    if polygons:
+                        for poly in polygons:
+                            if len(poly) >= 3:
+                                cnt = np.array([[int(p[0] * w), int(p[1] * h)] for p in poly], np.int32)
+                                contours.append(cnt)
+                    return contours
+
+                safe_contours = to_contours(safe_area_checker.safe_polygons)
+                bed_contours = to_contours(bed_area_checker.bed_polygons)
+                floor_contours = to_contours(floor_area_checker.floor_polygons)
+
+                # Draw points with color coding
                 for pt in pts:
                     if pt != (0,0):
-                        cv2.circle(img, pt, 4, (0, 0, 255), -1)
+                        color = (0, 0, 255) # Default Red
+                        
+                        # Priority: Floor > Bed > Safe
+                        
+                        # Check Floor
+                        in_floor = False
+                        for cnt in floor_contours:
+                            if cv2.pointPolygonTest(cnt, pt, False) >= 0:
+                                in_floor = True
+                                break
+                        
+                        if in_floor:
+                            color = (0, 0, 139) # Dark Red
+                        else:
+                            # Check Bed
+                            in_bed = False
+                            for cnt in bed_contours:
+                                if cv2.pointPolygonTest(cnt, pt, False) >= 0:
+                                    in_bed = True
+                                    break
+                            
+                            if in_bed:
+                                color = (139, 0, 0) # Dark Blue (BGR)
+                            else:
+                                # Check Safe
+                                in_safe = False
+                                for cnt in safe_contours:
+                                    if cv2.pointPolygonTest(cnt, pt, False) >= 0:
+                                        in_safe = True
+                                        break
+                                
+                                if in_safe:
+                                    color = (0, 100, 0) # Dark Green
+                        
+                        cv2.circle(img, pt, 4, color, -1)
 
             # Draw bounding box and label
             if track_result.get("bbox"):
@@ -716,7 +768,8 @@ def main():
                 "track_id": track_id,
                 "keypoints": keypoints,
                 "bbox": bbox,
-                "pose_label": pose_label,
+                # "pose_label": pose_label,
+                "pose_label": safety_reason,
                 "safety_status": safety_status,
                 "safety_reason": safety_reason,
                 "encrypted_features": encrypted_features
@@ -798,7 +851,39 @@ def main():
             # Blend mask with 30% opacity
             display_img = cv2.addWeighted(display_img, 0.7, mask_vis, 0.3, 0)
 
-        disp.show(display_img)
+        # Draw Areas (Safe, Bed, Floor) overlay
+        h_disp, w_disp = display_img.shape[:2]
+        overlay_areas = display_img.copy()
+        
+        areas_to_draw = [
+            (safe_area_checker.safe_polygons, (0, 255, 0), "Safe"),
+            (bed_area_checker.bed_polygons, (255, 0, 0), "Bed"),
+            (floor_area_checker.floor_polygons, (0, 0, 255), "Floor")
+        ]
+        
+        for polygons, color, label in areas_to_draw:
+            if polygons:
+                for poly in polygons:
+                    if len(poly) >= 3:
+                        pts = np.array([[int(p[0] * w_disp), int(p[1] * h_disp)] for p in poly], np.int32)
+                        pts = pts.reshape((-1, 1, 2))
+                        cv2.fillPoly(overlay_areas, [pts], color)
+                        cv2.polylines(display_img, [pts], True, color, 2)
+                        # Label
+                        M = cv2.moments(pts)
+                        if M["m00"] != 0:
+                            cX = int(M["m10"] / M["m00"])
+                            cY = int(M["m01"] / M["m00"])
+                            cv2.putText(display_img, label, (cX - 20, cY), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # Blend overlays (20% opacity)
+        cv2.addWeighted(overlay_areas, 0.2, display_img, 0.8, 0, display_img)
+
+        # Upscale for display (make it bigger for the user)
+        # Original is 320x224, scale by 3x -> 960x672
+        display_scale = 3
+        display_img_large = cv2.resize(display_img, (0, 0), fx=display_scale, fy=display_scale, interpolation=cv2.INTER_NEAREST)
+        disp.show(display_img_large)
         
         # Check for user exit - Ensure waitKey is called here if disp.show didn't do it enough
         # Increase wait time to 10ms to process UI events better and cap FPS reasonably

@@ -104,7 +104,7 @@ class BodyInPolygonChecker:
             return False
 
         if not self._polygons:
-            return True  # No polygons defined = everywhere is "in" polygons
+            return False  # No polygons defined, no guaranteed safe area.
 
         # Filter valid keypoints (confidence > 0.1)
         valid_keypoints = [(x, y) for x, y, conf in body_keypoints if conf > 0.1 and x > 0 and y > 0]

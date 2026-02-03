@@ -1,6 +1,7 @@
 import time
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict
 from tools.safe_area import BodyInPolygonChecker, CheckMethod
+from tools.time_utils import time_ms
 
 
 class BedAreaChecker:
@@ -11,7 +12,7 @@ class BedAreaChecker:
     if they remain in bed for too long (configurable threshold).
     """
 
-    def __init__(self, too_long_threshold_sec: float = 5.0):
+    def __init__(self, too_long_threshold_ms: float = 5000):
         """
         Initialize BedAreaChecker.
 
@@ -19,7 +20,7 @@ class BedAreaChecker:
             too_long_threshold_sec: Time in seconds before being in bed is considered too long (default: 5.0)
         """
         self._polygon_checker = BodyInPolygonChecker()
-        self._too_long_threshold_sec = too_long_threshold_sec
+        self._too_long_threshold_ms = too_long_threshold_ms
 
         # Track entry times for each track_id
         # Format: {track_id: entry_timestamp}
@@ -39,11 +40,11 @@ class BedAreaChecker:
 
     @property
     def too_long_threshold_sec(self) -> float:
-        return self._too_long_threshold_sec
+        return self._too_long_threshold_ms
 
     @too_long_threshold_sec.setter
     def too_long_threshold_sec(self, value: float):
-        self._too_long_threshold_sec = value
+        self._too_long_threshold_ms = value
 
     def update_bed_areas(self, polygons: List[List[Tuple[float, float]]]):
         """Update bed area polygons"""
@@ -70,10 +71,10 @@ class BedAreaChecker:
             check_method: Which keypoints to check
 
         Returns:
-            Tuple of (is_in_bed, time_in_bed_sec, is_too_long)
+            Tuple of (is_in_bed, time_in_bed_sec, is_too_long)_too_long_threshold_ms
         """
         is_in_bed = self._polygon_checker.body_in_polygons(body_keypoints, check_method)
-        current_time = time.time()
+        current_time = time_ms()
 
         # Update bed status and time tracking
         if is_in_bed:
@@ -84,7 +85,7 @@ class BedAreaChecker:
                 self._current_bed_status[track_id] = True
 
             time_in_bed = current_time - self._bed_entry_times[track_id]
-            is_too_long = time_in_bed > self._too_long_threshold_sec
+            is_too_long = time_in_bed > self._too_long_threshold_ms
 
             return True, time_in_bed, is_too_long
         else:
@@ -107,7 +108,7 @@ class BedAreaChecker:
             Time in seconds in bed area, or 0.0 if not in bed
         """
         if track_id in self._bed_entry_times:
-            return time.time() - self._bed_entry_times[track_id]
+            return time_ms() - self._bed_entry_times[track_id]
         return 0.0
 
     def is_in_bed(self, track_id: int) -> bool:
@@ -133,7 +134,7 @@ class BedAreaChecker:
             True if in bed for longer than threshold, False otherwise
         """
         time_in_bed = self.get_bed_time(track_id)
-        return time_in_bed > self._too_long_threshold_sec
+        return time_in_bed > self._too_long_threshold_ms
 
     def reset_track(self, track_id: int):
         """

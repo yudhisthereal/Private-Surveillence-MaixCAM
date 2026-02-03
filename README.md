@@ -616,7 +616,7 @@ The following data is sent to the Streaming Server in real-time:
 ### Models Used
 
 1. **YOLO11 Pose** (`yolo11n_pose.mud`)
-   - Input size: 320x320
+   - Input size: 320x224
    - Output: 17 keypoints (COCO format)
    - FPS: Up to 60 on MaixCAM
 
