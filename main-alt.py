@@ -95,6 +95,7 @@ from debug_config import DebugLogger
 from tools.skeleton_saver import SkeletonSaver2D
 from tools.bed_area_checker import BedAreaChecker
 from tools.floor_area_checker import FloorAreaChecker
+from tools.safe_area import CheckMethod
 from tools.chair_area_checker import ChairAreaChecker
 from tools.couch_area_checker import CouchAreaChecker
 from tools.bench_area_checker import BenchAreaChecker
@@ -116,7 +117,7 @@ from pc_camera_manager import initialize_cameras, load_fonts
 
 from control_manager import (
     load_initial_flags, get_control_flags, send_background_updated, update_control_flags_from_server,
-    update_control_flags,
+    update_control_flag, get_flag, register_status_change_callback,
     initialize_bed_area_checker, update_bed_area_polygons, load_bed_areas,
     initialize_floor_area_checker, update_floor_area_polygons, load_floor_areas,
     initialize_chair_area_checker, update_chair_area_polygons, load_chair_areas,
