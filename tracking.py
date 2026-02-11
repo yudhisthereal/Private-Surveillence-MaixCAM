@@ -22,7 +22,7 @@ valid_class_id = [0]
 
 # Fall detection parameters
 fallParam = {
-    "v_bbox_y": 0.17,
+    "v_bbox_y": 0.3,
     "angle": 70
 }
 

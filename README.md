@@ -516,7 +516,7 @@ NO_HUMAN_CONFIRM_FRAMES = 10       # Confirm human absence with 10 frames
 
 ```python
 fallParam = {
-    "v_bbox_y": 0.17,              # Vertical threshold for fall detection
+    "v_bbox_y": 0.3,              # Vertical threshold for fall detection
     "angle": 70                    # Angle threshold for fall detection
 }
 FALL_COUNT_THRES = 2               # Consecutive falls to confirm
