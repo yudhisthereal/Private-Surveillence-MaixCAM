@@ -74,7 +74,6 @@ config.CAMERA_INFO_FILE = os.path.abspath("./camera_info.json")
 config.BACKGROUND_PATH = os.path.abspath("./static/background.jpg")
 
 control_manager.LOCAL_FLAGS_FILE = os.path.abspath("./control_flags.json")
-control_manager.SAFE_AREA_FILE = os.path.abspath("./safe_areas.json")
 control_manager.BED_AREA_FILE = os.path.abspath("./bed_areas.json")
 control_manager.FLOOR_AREA_FILE = os.path.abspath("./floor_areas.json")
 
@@ -94,9 +93,11 @@ from pc_video_record import VideoRecorder
 from debug_config import DebugLogger
 # tools.wifi_connect skipped on PC
 from tools.skeleton_saver import SkeletonSaver2D
-from tools.safe_area import SafeAreaChecker, CheckMethod
 from tools.bed_area_checker import BedAreaChecker
 from tools.floor_area_checker import FloorAreaChecker
+from tools.chair_area_checker import ChairAreaChecker
+from tools.couch_area_checker import CouchAreaChecker
+from tools.bench_area_checker import BenchAreaChecker
 from tools.safety_judgment import SafetyJudgment
 
 from config import (
@@ -115,10 +116,12 @@ from pc_camera_manager import initialize_cameras, load_fonts
 
 from control_manager import (
     load_initial_flags, get_control_flags, send_background_updated, update_control_flags_from_server,
-    update_control_flag, get_flag, initialize_safety_checker,
-    update_safety_checker_polygons, load_safe_areas, camera_state_manager, register_status_change_callback,
+    update_control_flags,
     initialize_bed_area_checker, update_bed_area_polygons, load_bed_areas,
-    initialize_floor_area_checker, update_floor_area_polygons, load_floor_areas
+    initialize_floor_area_checker, update_floor_area_polygons, load_floor_areas,
+    initialize_chair_area_checker, update_chair_area_polygons, load_chair_areas,
+    initialize_couch_area_checker, update_couch_area_polygons, load_couch_areas,
+    initialize_bench_area_checker, update_bench_area_polygons, load_bench_areas
 )
 from workers import (
     CameraStateSyncWorker, StateReporterWorker, FrameUploadWorker,
@@ -255,6 +258,17 @@ def main():
     """Main entry point"""
     # 1. Initialize camera identity
     CAMERA_ID, CAMERA_NAME, registration_status, local_ip = initialize_camera()
+
+    # Debug rendering toggles
+    debug_render_flags = {
+        "show_bg_mask": False,
+        "show_skeleton": False,
+        "show_skeleton": False,
+        "show_bed_areas": False,
+        "show_floor_areas": False,
+        "show_labels": False,
+        "show_bbox": False
+    }
     
     # 2. Connect to WiFi (Skipped on PC)
     server_ip = local_ip
@@ -270,21 +284,28 @@ def main():
     skeleton_saver_2d.log_dir = os.path.abspath("./extracted-skeleton-2d") # Patch path
     
     # 5. Initialize area checkers
-    safe_area_checker = SafeAreaChecker()
-    initialize_safety_checker(safe_area_checker)
-
+    # 5. Initialize area checkers
     bed_area_checker = BedAreaChecker(too_long_threshold_ms=10000)
     initialize_bed_area_checker(bed_area_checker)
 
     floor_area_checker = FloorAreaChecker()
     initialize_floor_area_checker(floor_area_checker)
 
+    chair_area_checker = ChairAreaChecker()
+    initialize_chair_area_checker(chair_area_checker)
+
+    couch_area_checker = CouchAreaChecker()
+    initialize_couch_area_checker(couch_area_checker)
+
+    bench_area_checker = BenchAreaChecker()
+    initialize_bench_area_checker(bench_area_checker)
+
     # 6. Load initial configuration
     logger.print("MAIN", "=== Loading Configuration ===")
     load_initial_flags()
     control_flags = get_control_flags()  # Get loaded flags including check_method
     
-    # Initialize SafetyJudgment with all three checkers
+    # Initialize SafetyJudgment with all area checkers
     # Get check_method from control_flags (default: 3 = TORSO_HEAD)
     check_method_value = control_flags.get("check_method", 3)
 
@@ -301,18 +322,28 @@ def main():
     safety_judgment = SafetyJudgment(
         bed_area_checker=bed_area_checker,
         floor_area_checker=floor_area_checker,
-        safe_area_checker=safe_area_checker,
+        chair_area_checker=chair_area_checker,
+        couch_area_checker=couch_area_checker,
+        bench_area_checker=bench_area_checker,
         check_method=check_method
     )
 
-    initial_safe_areas = load_safe_areas()
-    update_safety_checker_polygons(initial_safe_areas)
+
 
     initial_bed_areas = load_bed_areas()
     update_bed_area_polygons(initial_bed_areas)
 
     initial_floor_areas = load_floor_areas()
     update_floor_area_polygons(initial_floor_areas)
+
+    initial_chair_areas = load_chair_areas()
+    update_chair_area_polygons(initial_chair_areas)
+
+    initial_couch_areas = load_couch_areas()
+    update_couch_area_polygons(initial_couch_areas)
+
+    initial_bench_areas = load_bench_areas()
+    update_bench_area_polygons(initial_bench_areas)
     
     # 7. Load or create background image
     background_img = None
@@ -329,9 +360,11 @@ def main():
     # ASYNC WORKERS SETUP
     # ============================================
     flags_queue = queue.Queue(maxsize=10)
-    safe_areas_queue = queue.Queue(maxsize=5)
     bed_areas_queue = queue.Queue(maxsize=5)
     floor_areas_queue = queue.Queue(maxsize=5)
+    chair_areas_queue = queue.Queue(maxsize=5)
+    couch_areas_queue = queue.Queue(maxsize=5)
+    bench_areas_queue = queue.Queue(maxsize=5)
     analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
     tracks_queue = queue.Queue(maxsize=30)  # Queue for tracks sender
 
@@ -342,8 +375,10 @@ def main():
     # Start async workers
     logger.print("MAIN", "Starting async workers...")
     flag_sync_worker = CameraStateSyncWorker(
-        flags_queue, safe_areas_queue, STREAMING_HTTP_URL, CAMERA_ID,
-        bed_areas_queue=bed_areas_queue, floor_areas_queue=floor_areas_queue
+        flags_queue, STREAMING_HTTP_URL, CAMERA_ID,
+        bed_areas_queue=bed_areas_queue, floor_areas_queue=floor_areas_queue,
+        chair_areas_queue=chair_areas_queue, couch_areas_queue=couch_areas_queue,
+        bench_areas_queue=bench_areas_queue
     )
     state_reporter_worker = StateReporterWorker(STREAMING_HTTP_URL, CAMERA_ID)
     frame_upload_worker = FrameUploadWorker(STREAMING_HTTP_URL, CAMERA_ID, profiler_enabled=True)
@@ -471,14 +506,7 @@ def main():
         except queue.Empty:
             pass
 
-        try:
-            while not safe_areas_queue.empty():
-                msg_type, data = safe_areas_queue.get_nowait()
-                if msg_type == "safe_areas_update":
-                    if isinstance(data, list):
-                        update_safety_checker_polygons(data)
-        except queue.Empty:
-            pass
+
 
         try:
             while not bed_areas_queue.empty():
@@ -495,6 +523,33 @@ def main():
                 if msg_type == "floor_areas_update":
                     if isinstance(data, list):
                         update_floor_area_polygons(data)
+        except queue.Empty:
+            pass
+
+        try:
+            while not chair_areas_queue.empty():
+                msg_type, data = chair_areas_queue.get_nowait()
+                if msg_type == "chair_areas_update":
+                    if isinstance(data, list):
+                        update_chair_area_polygons(data)
+        except queue.Empty:
+            pass
+
+        try:
+            while not couch_areas_queue.empty():
+                msg_type, data = couch_areas_queue.get_nowait()
+                if msg_type == "couch_areas_update":
+                    if isinstance(data, list):
+                        update_couch_area_polygons(data)
+        except queue.Empty:
+            pass
+
+        try:
+            while not bench_areas_queue.empty():
+                msg_type, data = bench_areas_queue.get_nowait()
+                if msg_type == "bench_areas_update":
+                    if isinstance(data, list):
+                        update_bench_area_polygons(data)
         except queue.Empty:
             pass
         frame_profiler.end_task("async_updates")
@@ -678,81 +733,78 @@ def main():
                 for i in range(0, len(kp_flat), 2):
                     pts.append((int(kp_flat[i]), int(kp_flat[i+1])))
                 
-                # Draw connections
-                for p1, p2 in connections:
-                    if p1 < len(pts) and p2 < len(pts):
-                        pt1 = pts[p1]
-                        pt2 = pts[p2]
-                        # Only draw if points are not (0,0) (assuming 0,0 is invalid/undetected, strictly speaking check confidence but we don't have it here easily)
-                        if pt1 != (0,0) and pt2 != (0,0):
-                            cv2.line(img, pt1, pt2, (0, 255, 0), 2)
-                
-                # Prepare polygon contours for point testing
-                h, w = img.shape[:2]
-                
-                def to_contours(polygons):
-                    contours = []
-                    if polygons:
-                        for poly in polygons:
-                            if len(poly) >= 3:
-                                cnt = np.array([[int(p[0] * w), int(p[1] * h)] for p in poly], np.int32)
-                                contours.append(cnt)
-                    return contours
+                # Draw connections and points if skeleton is enabled
+                if debug_render_flags["show_skeleton"]:
+                    # Draw connections
+                    for p1, p2 in connections:
+                        if p1 < len(pts) and p2 < len(pts):
+                            pt1 = pts[p1]
+                            pt2 = pts[p2]
+                            if pt1 != (0,0) and pt2 != (0,0):
+                                cv2.line(img, pt1, pt2, (0, 255, 0), 2)
+                    
+                    # Prepare polygon contours for point testing
+                    h, w = img.shape[:2]
+                    
+                    def to_contours(polygons):
+                        contours = []
+                        if polygons:
+                            for poly in polygons:
+                                if len(poly) >= 3:
+                                    cnt = np.array([[int(p[0] * w), int(p[1] * h)] for p in poly], np.int32)
+                                    contours.append(cnt)
+                        return contours
 
-                safe_contours = to_contours(safe_area_checker.safe_polygons)
-                bed_contours = to_contours(bed_area_checker.bed_polygons)
-                floor_contours = to_contours(floor_area_checker.floor_polygons)
+                    bed_contours = to_contours(bed_area_checker.bed_polygons)
+                    floor_contours = to_contours(floor_area_checker.floor_polygons)
 
-                # Draw points with color coding
-                for pt in pts:
-                    if pt != (0,0):
-                        color = (0, 0, 255) # Default Red
-                        
-                        # Priority: Floor > Bed > Safe
-                        
-                        # Check Floor
-                        in_floor = False
-                        for cnt in floor_contours:
-                            if cv2.pointPolygonTest(cnt, pt, False) >= 0:
-                                in_floor = True
-                                break
-                        
-                        if in_floor:
-                            color = (0, 0, 139) # Dark Red
-                        else:
-                            # Check Bed
-                            in_bed = False
-                            for cnt in bed_contours:
+                    # Draw points with color coding
+                    for pt in pts:
+                        if pt != (0,0):
+                            color = (0, 0, 255) # Default Red
+                            
+                            # Priority: Floor > Bed
+                            
+                            # Check Floor
+                            is_floor = False
+                            for cnt in floor_contours:
                                 if cv2.pointPolygonTest(cnt, pt, False) >= 0:
-                                    in_bed = True
+                                    is_floor = True
                                     break
                             
-                            if in_bed:
-                                color = (139, 0, 0) # Dark Blue (BGR)
+                            if is_floor:
+                                color = (0, 0, 139) # Dark Red for Floor
                             else:
-                                # Check Safe
-                                in_safe = False
-                                for cnt in safe_contours:
+                                # Check Bed
+                                is_bed = False
+                                for cnt in bed_contours:
                                     if cv2.pointPolygonTest(cnt, pt, False) >= 0:
-                                        in_safe = True
+                                        is_bed = True
                                         break
                                 
-                                if in_safe:
-                                    color = (0, 100, 0) # Dark Green
-                        
-                        cv2.circle(img, pt, 4, color, -1)
+                                if is_bed:
+                                    color = (139, 0, 0) # Dark Blue
+
+                            
+                            cv2.circle(img, pt, 4, color, -1)
 
             # Draw bounding box and label
-            if track_result.get("bbox"):
+            safety_reason = track_result.get("safety_reason", "normal")
+            if track_result.get("bbox") and debug_render_flags["show_bbox"]:
                 nx, ny, nw, nh = track_result.get("bbox")
-                cv2.putText(img, f"ID: {track_result.get('track_id')} {track_result.get('pose_label')} [{track_result.get('status')}]", 
-                           (int(nx), int(ny)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                 
-                # Render safety reason if unsafe
-                safety_reason = track_result.get("safety_reason", "normal")
-                if safety_reason != "normal":
-                     cv2.putText(img, f"Reason: {safety_reason}", 
-                           (int(nx), int(ny)-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                if debug_render_flags["show_labels"]:
+                    cv2.putText(img, f"ID: {track_result.get('track_id')} {track_result.get('pose_label')} [{track_result.get('status')}]", 
+                            (int(nx), int(ny)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                    
+                    # Render safety reason if unsafe
+                    if safety_reason != "normal":
+                        cv2.putText(img, f"Reason: {safety_reason}", 
+                            (int(nx), int(ny)-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    
+                    # Render bbox top y coord
+                    cv2.putText(img, f"y_top: {int(ny)}", 
+                        (int(nx), int(ny)-50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
             
             logger.print("MAIN", "pose_label <- track_result['pose_label']: %s", track_result.get('pose_label', 'unknown'))
             track_id = track_result.get("track_id")
@@ -768,8 +820,7 @@ def main():
                 "track_id": track_id,
                 "keypoints": keypoints,
                 "bbox": bbox,
-                # "pose_label": pose_label,
-                "pose_label": safety_reason,
+                "pose_label": pose_label,
                 "safety_status": safety_status,
                 "safety_reason": safety_reason,
                 "encrypted_features": encrypted_features
@@ -844,7 +895,7 @@ def main():
 
         # Overlay mask visualization if available (blend with 30% opacity)
         display_img = img.copy()
-        if mask_vis is not None:
+        if mask_vis is not None and debug_render_flags["show_bg_mask"]:
             # Resize mask to match display size if needed
             if mask_vis.shape[:2] != display_img.shape[:2]:
                 mask_vis = cv2.resize(mask_vis, (display_img.shape[1], display_img.shape[0]))
@@ -855,11 +906,11 @@ def main():
         h_disp, w_disp = display_img.shape[:2]
         overlay_areas = display_img.copy()
         
-        areas_to_draw = [
-            (safe_area_checker.safe_polygons, (0, 255, 0), "Safe"),
-            (bed_area_checker.bed_polygons, (255, 0, 0), "Bed"),
-            (floor_area_checker.floor_polygons, (0, 0, 255), "Floor")
-        ]
+        areas_to_draw = []
+        if debug_render_flags["show_bed_areas"]:
+            areas_to_draw.append((bed_area_checker.bed_polygons, (255, 0, 0), "Bed"))
+        if debug_render_flags["show_floor_areas"]:
+            areas_to_draw.append((floor_area_checker.floor_polygons, (0, 0, 255), "Floor"))
         
         for polygons, color, label in areas_to_draw:
             if polygons:

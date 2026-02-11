@@ -45,11 +45,13 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     v_top = dy_top / elapsed_ms
     v_top_max = max(v_top, v_top_max)
 
-    # 2. Vertical change of height (shrinking = falling)
-    dh = pre_bbox[3] - cur_bbox[3]
-    v_height = dh / elapsed_ms
+    # 2. Percentage of shrinkage of bbox height
+    # Logic: if previous is higher than current y (moved down), check shrinkage
+    shrinkage = 0.0
+    if dy_top > 0 and pre_bbox[3] > 0:
+        shrinkage = (pre_bbox[3] - cur_bbox[3]) / pre_bbox[3]
 
-    logger.print("FALL_DETECT", "v_top=%.6f, v_height=%.6f, threshold=%s, fps=%s, v_top_max=%s", v_top, v_height, fallParam['v_bbox_y'], fps, v_top_max)
+    logger.print("FALL_DETECT", "dy_top=%.2f, shrinkage=%.4f, threshold=%s, fps=%s", dy_top, shrinkage, fallParam['v_bbox_y'], fps)
 
     # Extract from pose_data
     torso_angle = None
@@ -61,7 +63,8 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
         logger.print("FALL_DETECT", "Pose mode: torso_angle=%s, thigh_uprightness=%s", torso_angle, thigh_uprightness)
 
     # Calculate bbox motion evidence
-    bbox_motion_detected = (v_top > fallParam["v_bbox_y"] or v_height > fallParam["v_bbox_y"])
+    # User Request: if moved down AND shrinkage > threshold -> Fall
+    bbox_motion_detected = (dy_top > 0 and abs(shrinkage) > fallParam["v_bbox_y"])
     
     # Calculate pose condition
     strict_pose_condition = False

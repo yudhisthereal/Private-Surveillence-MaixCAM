@@ -1,18 +1,20 @@
 from typing import List, Tuple, Optional, Dict
-from tools.safe_area import CheckMethod
+from tools.safe_area import CheckMethod, COCOKeypoints
 from tools.bed_area_checker import BedAreaChecker
 from tools.floor_area_checker import FloorAreaChecker
-from tools.safe_area import SafeAreaChecker
 
 
 class SafetyReason:
     """Reason codes for safety status changes"""
     LYING_ON_FLOOR = "lying_on_floor"
     IN_BED_TOO_LONG = "in_bed_too_long"
-    LYING_OUTSIDE_SAFE = "lying_outside_safe"
-    SAFE_IN_SAFE_AREA = "safe_in_safe_area"
     SAFE_TRACKING = "safe_tracking"
     SAFE_IN_BED = "safe_in_bed"
+    SAFE_IN_CHAIR = "safe_in_chair"
+    SAFE_IN_COUCH_SITTING = "safe_in_couch_sitting"
+    SAFE_IN_COUCH_LYING = "safe_in_couch_lying_down"
+    SAFE_IN_BENCH_SITTING = "safe_in_bench_sitting"
+    SAFE_IN_BENCH_LYING = "safe_in_bench_lying_down"
 
 
 class SafetyJudgment:
@@ -31,7 +33,9 @@ class SafetyJudgment:
     def __init__(self,
                  bed_area_checker: Optional[BedAreaChecker] = None,
                  floor_area_checker: Optional[FloorAreaChecker] = None,
-                 safe_area_checker: Optional[SafeAreaChecker] = None,
+                 chair_area_checker: Optional['ChairAreaChecker'] = None,
+                 couch_area_checker: Optional['CouchAreaChecker'] = None,
+                 bench_area_checker: Optional['BenchAreaChecker'] = None,
                  check_method: CheckMethod = CheckMethod.TORSO_HEAD):
         """
         Initialize SafetyJudgment.
@@ -39,12 +43,14 @@ class SafetyJudgment:
         Args:
             bed_area_checker: BedAreaChecker instance (optional, can be None)
             floor_area_checker: FloorAreaChecker instance (optional, can be None)
-            safe_area_checker: SafeAreaChecker instance (optional, can be None)
+            bench_area_checker: BenchAreaChecker instance (optional, can be None)
             check_method: CheckMethod to use for all area checkers
         """
         self.bed_area_checker = bed_area_checker
         self.floor_area_checker = floor_area_checker
-        self.safe_area_checker = safe_area_checker
+        self.chair_area_checker = chair_area_checker
+        self.couch_area_checker = couch_area_checker
+        self.bench_area_checker = bench_area_checker
         self.check_method = check_method
 
     def evaluate_safety(self,
@@ -89,14 +95,15 @@ class SafetyJudgment:
 
         # Initialize details dictionary
         details = {
-            "pose_label": pose_label,
-            "is_lying_down": is_lying_down,
             "in_bed_area": False,
-            "time_in_bed": 0.0,
-            "in_bed_too_long": False,
             "in_floor_area": False,
-            "in_safe_area": False,
-            "check_method": check_method,
+            "in_floor_area": False,
+            "in_chair_area": False,
+            "in_couch_area": False,
+            "in_bench_area": False,
+            "bed_time_ms": 0,
+            "bed_status": None,
+            "pose_label": pose_label
         }
 
         # Rule 1: If lying_down AND in_floor_area → UNSAFE (lying on floor)
@@ -114,8 +121,8 @@ class SafetyJudgment:
                 track_id, body_keypoints, check_method
             )
             details["in_bed_area"] = is_in_bed
-            details["time_in_bed"] = time_in_bed
-            details["in_bed_too_long"] = is_too_long
+            details["bed_time_ms"] = time_in_bed
+            details["bed_status"] = "too_long" if is_too_long else ("in_bed" if is_in_bed else None)
 
             if is_too_long:
                 # Person has been in bed for too long - UNSAFE
@@ -123,20 +130,59 @@ class SafetyJudgment:
             elif is_in_bed:
                 return True, SafetyReason.SAFE_IN_BED, details
 
-        # Rule 3: If lying_down AND not_in_safe_area → UNSAFE (lying down outside safe zone)
-        if self.safe_area_checker is not None and is_lying_down:
-            in_safe = self.safe_area_checker.body_in_safe_zone(body_keypoints, check_method)
-            details["in_safe_area"] = in_safe
+        # Rule 3: Chair area check (only for sitting pose, hips only)
+        if self.chair_area_checker is not None and pose_label == "sitting":
+            in_chair = self.chair_area_checker.check_chair_area(
+                body_keypoints, CheckMethod.HIP
+            )
+            details["in_chair_area"] = in_chair
+            if in_chair:
+                return True, SafetyReason.SAFE_IN_CHAIR, details
 
-            if not in_safe:
-                # Person is lying down outside safe zone - UNSAFE
-                return False, SafetyReason.LYING_OUTSIDE_SAFE, details
+        # Rule 4: Couch area check (conditional on pose)
+        if self.couch_area_checker is not None:
+            check_method_couch = None
+            reason_suffix = ""
+            
+            if pose_label == "lying_down":
+                check_method_couch = CheckMethod.TORSO
+                reason_suffix = "LYING"
+            elif pose_label == "sitting":
+                check_method_couch = CheckMethod.HIP
+                reason_suffix = "SITTING"
+            
+            if check_method_couch:
+                in_couch = self.couch_area_checker.check_couch_area(
+                    body_keypoints, check_method_couch
+                )
+                details["in_couch_area"] = in_couch
+                if in_couch:
+                    reason = SafetyReason.SAFE_IN_COUCH_LYING if reason_suffix == "LYING" else SafetyReason.SAFE_IN_COUCH_SITTING
+                    return True, reason, details
 
-        # Rule 4: Otherwise → SAFE
-        if details.get("in_safe_area", False):
-            return True, SafetyReason.SAFE_IN_SAFE_AREA, details
-        else:
-            return True, SafetyReason.SAFE_TRACKING, details
+        # Rule 5: Bench area check (conditional on pose)
+        if self.bench_area_checker is not None:
+            check_method_bench = None
+            reason_suffix = ""
+            
+            if pose_label == "lying_down":
+                check_method_bench = CheckMethod.TORSO
+                reason_suffix = "LYING"
+            elif pose_label == "sitting":
+                check_method_bench = CheckMethod.HIP
+                reason_suffix = "SITTING"
+            
+            if check_method_bench:
+                in_bench = self.bench_area_checker.check_bench_area(
+                    body_keypoints, check_method_bench
+                )
+                details["in_bench_area"] = in_bench
+                if in_bench:
+                    reason = SafetyReason.SAFE_IN_BENCH_LYING if reason_suffix == "LYING" else SafetyReason.SAFE_IN_BENCH_SITTING
+                    return True, reason, details
+
+        # Rule 6: Otherwise → SAFE
+        return True, SafetyReason.SAFE_TRACKING, details
 
     def reset_bed_tracking(self, track_id: int):
         """

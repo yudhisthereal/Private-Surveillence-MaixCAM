@@ -15,9 +15,11 @@ logger = DebugLogger(tag="CTRL_MGR", instance_enable=False)
 
 # Local file paths for persistent storage
 LOCAL_FLAGS_FILE = "/root/control_flags.json"
-SAFE_AREA_FILE = "/root/safe_areas.json"
 BED_AREA_FILE = "/root/bed_areas.json"
 FLOOR_AREA_FILE = "/root/floor_areas.json"
+CHAIR_AREA_FILE = "/root/chair_areas.json"
+COUCH_AREA_FILE = "/root/couch_areas.json"
+BENCH_AREA_FILE = "/root/bench_areas.json"
 
 # ============================================
 # CAMERA STATE MANAGER
@@ -296,105 +298,6 @@ def get_camera_state():
     return camera_state_manager.get_state()
 
 # ============================================
-# SAFE AREAS MANAGEMENT
-# ============================================
-
-# Safety checker instance (will be initialized in main)
-safety_checker = None
-
-class CheckMethod:
-    """Check methods for safety checking"""
-    HIP = 1
-    TORSO = 2
-    TORSO_HEAD = 3
-    TORSO_HEAD_KNEES = 4
-    FULL_BODY = 5
-
-def initialize_safety_checker(safety_checker_instance):
-    """Initialize safety checker instance"""
-    global safety_checker
-    safety_checker = safety_checker_instance
-
-def get_safety_checker():
-    """Get safety checker instance"""
-    return safety_checker
-
-def load_safe_areas():
-    """Load safe areas from JSON file"""
-    try:
-        if os.path.exists(SAFE_AREA_FILE):
-            with open(SAFE_AREA_FILE, 'r') as f:
-                safe_areas = json.load(f)
-            logger.print("SAFE_AREA", "Loaded %d safe area(s) from file", len(safe_areas))
-            return safe_areas
-        else:
-            logger.print("SAFE_AREA", "No safe areas file found, using default")
-            return []
-    except Exception as e:
-        logger.print("SAFE_AREA", "Error loading safe areas: %s", e)
-        return []
-
-def save_safe_areas(safe_areas):
-    """Save safe areas to JSON file"""
-    try:
-        with open(SAFE_AREA_FILE, 'w') as f:
-            json.dump(safe_areas, f, indent=2)
-        logger.print("SAFE_AREA", "Saved %d safe area(s) to file", len(safe_areas))
-        return True
-    except Exception as e:
-        logger.print("SAFE_AREA", "Error saving safe areas: %s", e)
-        return False
-
-def update_safety_checker_polygons(safe_areas):
-    global safety_checker
-    """Update the safety checker with safe areas"""
-    try:
-        safety_checker.clear_safe_polygons()
-        for polygon in safe_areas:
-            if isinstance(polygon, list) and len(polygon) >= 3:
-                safety_checker.add_safe_polygon(polygon)
-        
-        logger.print("SAFE_AREA", "Updated safety checker with %d polygon(s)", len(safe_areas))
-        
-        # Save to local file
-        save_safe_areas(safe_areas)
-        
-        return True
-        
-    except Exception as e:
-        logger.print("SAFE_AREA", "Error updating safety checker: %s", e)
-        return False
-
-def add_safe_area(polygon):
-    """Add a safe area polygon"""    
-    global safety_checker
-    
-    safety_checker.add_safe_polygon(polygon)
-    logger.print("SAFE_AREA", "Added safe area polygon with %d points", len(polygon))
-    
-    # Save all safe areas
-    save_all_safe_areas()
-
-def clear_safe_areas():
-    global safety_checker
-    """Clear all safe areas"""
-    if safety_checker:
-        safety_checker.clear_safe_polygons()
-        logger.print("SAFE_AREA", "Cleared all safe areas")
-        save_safe_areas([])
-
-def save_all_safe_areas():
-    """Save all current safe areas from safety checker"""
-    if safety_checker:
-        save_safe_areas(safety_checker.safe_polygons)
-
-def is_point_safe(x, y):
-    global safety_checker
-    """Check if a point is in a safe area"""
-    if safety_checker is None:
-        return True  # No safe areas = everywhere is safe
-    return safety_checker.is_point_safe((x, y))
-
 def body_in_safe_zone(body_keypoints, check_method=CheckMethod.TORSO_HEAD):
     global safety_checker
     """Check if body keypoints are in safe zone"""
@@ -576,8 +479,263 @@ def save_all_floor_areas():
 
 
 # ============================================
-# STREAMING SERVER COMMUNICATION (Camera State & Safe Areas)
+# CHAIR AREAS MANAGEMENT
 # ============================================
+
+# Chair area checker instance (will be initialized in main)
+chair_area_checker = None
+
+def initialize_chair_area_checker(chair_area_checker_instance):
+    """Initialize chair area checker instance"""
+    global chair_area_checker
+    chair_area_checker = chair_area_checker_instance
+
+def get_chair_area_checker():
+    """Get chair area checker instance"""
+    return chair_area_checker
+
+def load_chair_areas():
+    """Load chair areas from JSON file"""
+    try:
+        if os.path.exists(CHAIR_AREA_FILE):
+            with open(CHAIR_AREA_FILE, 'r') as f:
+                chair_areas = json.load(f)
+            logger.print("CHAIR_AREA", "Loaded %d chair area(s) from file", len(chair_areas))
+            return chair_areas
+        else:
+            logger.print("CHAIR_AREA", "No chair areas file found, using default")
+            return []
+    except Exception as e:
+        logger.print("CHAIR_AREA", "Error loading chair areas: %s", e)
+        return []
+
+def save_chair_areas(chair_areas):
+    """Save chair areas to JSON file"""
+    try:
+        with open(CHAIR_AREA_FILE, 'w') as f:
+            json.dump(chair_areas, f, indent=2)
+        logger.print("CHAIR_AREA", "Saved %d chair area(s) to file", len(chair_areas))
+        return True
+    except Exception as e:
+        logger.print("CHAIR_AREA", "Error saving chair areas: %s", e)
+        return False
+
+def update_chair_area_polygons(chair_areas):
+    global chair_area_checker
+    """Update the chair area checker with chair areas"""
+    try:
+        chair_area_checker.clear_chair_polygons()
+        for polygon in chair_areas:
+            if isinstance(polygon, list) and len(polygon) >= 3:
+                chair_area_checker.add_chair_polygon(polygon)
+
+        logger.print("CHAIR_AREA", "Updated chair area checker with %d polygon(s)", len(chair_areas))
+
+        # Save to local file
+        save_chair_areas(chair_areas)
+
+        return True
+
+    except Exception as e:
+        logger.print("CHAIR_AREA", "Error updating chair area checker: %s", e)
+        return False
+
+def add_chair_area(polygon):
+    """Add a chair area polygon"""
+    global chair_area_checker
+
+    chair_area_checker.add_chair_polygon(polygon)
+    logger.print("CHAIR_AREA", "Added chair area polygon with %d points", len(polygon))
+
+    # Save all chair areas
+    save_all_chair_areas()
+
+def clear_chair_areas():
+    global chair_area_checker
+    """Clear all chair areas"""
+    if chair_area_checker:
+        chair_area_checker.clear_chair_polygons()
+        logger.print("CHAIR_AREA", "Cleared all chair areas")
+        save_chair_areas([])
+
+def save_all_chair_areas():
+    """Save all current chair areas from chair area checker"""
+    if chair_area_checker:
+        save_chair_areas(chair_area_checker.chair_polygons)
+
+
+# ============================================
+# COUCH AREAS MANAGEMENT
+# ============================================
+
+# Couch area checker instance (will be initialized in main)
+couch_area_checker = None
+
+def initialize_couch_area_checker(couch_area_checker_instance):
+    """Initialize couch area checker instance"""
+    global couch_area_checker
+    couch_area_checker = couch_area_checker_instance
+
+def get_couch_area_checker():
+    """Get couch area checker instance"""
+    return couch_area_checker
+
+def load_couch_areas():
+    """Load couch areas from JSON file"""
+    try:
+        if os.path.exists(COUCH_AREA_FILE):
+            with open(COUCH_AREA_FILE, 'r') as f:
+                couch_areas = json.load(f)
+            logger.print("COUCH_AREA", "Loaded %d couch area(s) from file", len(couch_areas))
+            return couch_areas
+        else:
+            logger.print("COUCH_AREA", "No couch areas file found, using default")
+            return []
+    except Exception as e:
+        logger.print("COUCH_AREA", "Error loading couch areas: %s", e)
+        return []
+
+def save_couch_areas(couch_areas):
+    """Save couch areas to JSON file"""
+    try:
+        with open(COUCH_AREA_FILE, 'w') as f:
+            json.dump(couch_areas, f, indent=2)
+        logger.print("COUCH_AREA", "Saved %d couch area(s) to file", len(couch_areas))
+        return True
+    except Exception as e:
+        logger.print("COUCH_AREA", "Error saving couch areas: %s", e)
+        return False
+
+def update_couch_area_polygons(couch_areas):
+    global couch_area_checker
+    """Update the couch area checker with couch areas"""
+    try:
+        couch_area_checker.clear_couch_polygons()
+        for polygon in couch_areas:
+            if isinstance(polygon, list) and len(polygon) >= 3:
+                couch_area_checker.add_couch_polygon(polygon)
+
+        logger.print("COUCH_AREA", "Updated couch area checker with %d polygon(s)", len(couch_areas))
+
+        # Save to local file
+        save_couch_areas(couch_areas)
+
+        return True
+
+    except Exception as e:
+        logger.print("COUCH_AREA", "Error updating couch area checker: %s", e)
+        return False
+
+def add_couch_area(polygon):
+    """Add a couch area polygon"""
+    global couch_area_checker
+
+    couch_area_checker.add_couch_polygon(polygon)
+    logger.print("COUCH_AREA", "Added couch area polygon with %d points", len(polygon))
+
+    # Save all couch areas
+    save_all_couch_areas()
+
+def clear_couch_areas():
+    global couch_area_checker
+    """Clear all couch areas"""
+    if couch_area_checker:
+        couch_area_checker.clear_couch_polygons()
+        logger.print("COUCH_AREA", "Cleared all couch areas")
+        save_couch_areas([])
+
+def save_all_couch_areas():
+    """Save all current couch areas from couch area checker"""
+    if couch_area_checker:
+        save_couch_areas(couch_area_checker.couch_polygons)
+
+
+# ============================================
+# BENCH AREAS MANAGEMENT
+# ============================================
+
+# Bench area checker instance (will be initialized in main)
+bench_area_checker = None
+
+def initialize_bench_area_checker(bench_area_checker_instance):
+    """Initialize bench area checker instance"""
+    global bench_area_checker
+    bench_area_checker = bench_area_checker_instance
+
+def get_bench_area_checker():
+    """Get bench area checker instance"""
+    return bench_area_checker
+
+def load_bench_areas():
+    """Load bench areas from JSON file"""
+    try:
+        if os.path.exists(BENCH_AREA_FILE):
+            with open(BENCH_AREA_FILE, 'r') as f:
+                bench_areas = json.load(f)
+            logger.print("BENCH_AREA", "Loaded %d bench area(s) from file", len(bench_areas))
+            return bench_areas
+        else:
+            logger.print("BENCH_AREA", "No bench areas file found, using default")
+            return []
+    except Exception as e:
+        logger.print("BENCH_AREA", "Error loading bench areas: %s", e)
+        return []
+
+def save_bench_areas(bench_areas):
+    """Save bench areas to JSON file"""
+    try:
+        with open(BENCH_AREA_FILE, 'w') as f:
+            json.dump(bench_areas, f, indent=2)
+        logger.print("BENCH_AREA", "Saved %d bench area(s) to file", len(bench_areas))
+        return True
+    except Exception as e:
+        logger.print("BENCH_AREA", "Error saving bench areas: %s", e)
+        return False
+
+def update_bench_area_polygons(bench_areas):
+    global bench_area_checker
+    """Update the bench area checker with bench areas"""
+    try:
+        bench_area_checker.clear_bench_polygons()
+        for polygon in bench_areas:
+            if isinstance(polygon, list) and len(polygon) >= 3:
+                bench_area_checker.add_bench_polygon(polygon)
+
+        logger.print("BENCH_AREA", "Updated bench area checker with %d polygon(s)", len(bench_areas))
+
+        # Save to local file
+        save_bench_areas(bench_areas)
+
+        return True
+
+    except Exception as e:
+        logger.print("BENCH_AREA", "Error updating bench area checker: %s", e)
+        return False
+
+def add_bench_area(polygon):
+    """Add a bench area polygon"""
+    global bench_area_checker
+
+    bench_area_checker.add_bench_polygon(polygon)
+    logger.print("BENCH_AREA", "Added bench area polygon with %d points", len(polygon))
+
+    # Save all bench areas
+    save_all_bench_areas()
+
+def clear_bench_areas():
+    global bench_area_checker
+    """Clear all bench areas"""
+    if bench_area_checker:
+        bench_area_checker.clear_bench_polygons()
+        logger.print("BENCH_AREA", "Cleared all bench areas")
+        save_bench_areas([])
+
+def save_all_bench_areas():
+    """Save all current bench areas from bench area checker"""
+    if bench_area_checker:
+        save_bench_areas(bench_area_checker.bench_polygons)
+
+
 
 
 # ============================================
@@ -635,20 +793,6 @@ def get_camera_state_from_server():
         logger.print("CTRL_MGR", "Get camera state error: %s", e)
         return None
 
-def get_safe_areas_from_server():
-    """Get safe areas from streaming server"""
-    try:
-        camera_id = get_current_camera_id()
-        STREAMING_HTTP_URL = _get_streaming_http_url()
-        url = f"{STREAMING_HTTP_URL}/api/stream/safe-areas?camera_id={camera_id}"
-        logger.print("API_REQUEST", "%s | endpoint: /api/stream/safe-areas | params: camera_id=%s", "GET", camera_id)
-        response = requests.get(url, timeout=2.0)
-        if response.status_code == 200:
-            return response.json()
-        return []
-    except Exception as e:
-        logger.print("CTRL_MGR", "Get safe areas error: %s", e)
-        return []
 
 def get_bed_areas_from_server():
     """Get bed areas from streaming server"""
@@ -680,6 +824,51 @@ def get_floor_areas_from_server():
         logger.print("CTRL_MGR", "Get floor areas error: %s", e)
         return []
 
+def get_chair_areas_from_server():
+    """Get chair areas from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/chair-areas?camera_id={camera_id}"
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/chair-areas | params: camera_id=%s", "GET", camera_id)
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        logger.print("CTRL_MGR", "Get chair areas error: %s", e)
+        return []
+
+def get_couch_areas_from_server():
+    """Get couch areas from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/couch-areas?camera_id={camera_id}"
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/couch-areas | params: camera_id=%s", "GET", camera_id)
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        logger.print("CTRL_MGR", "Get couch areas error: %s", e)
+        return []
+
+def get_bench_areas_from_server():
+    """Get bench areas from streaming server"""
+    try:
+        camera_id = get_current_camera_id()
+        STREAMING_HTTP_URL = _get_streaming_http_url()
+        url = f"{STREAMING_HTTP_URL}/api/stream/bench-areas?camera_id={camera_id}"
+        logger.print("API_REQUEST", "%s | endpoint: /api/stream/bench-areas | params: camera_id=%s", "GET", camera_id)
+        response = requests.get(url, timeout=2.0)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        logger.print("CTRL_MGR", "Get bench areas error: %s", e)
+        return []
+
 def report_state(rtmp_connected=False, is_recording=False):
     """Report camera state to streaming server (async)
     
@@ -691,10 +880,10 @@ def report_state(rtmp_connected=False, is_recording=False):
             camera_id = get_current_camera_id()
             STREAMING_HTTP_URL = _get_streaming_http_url()
             state_report = {
-                "CameraId": camera_id,
-                "Status": "online",
-                "IsRecording": is_recording,
-                "RtmpConnected": rtmp_connected
+                "camera_id": camera_id,
+                "status": "online",
+                "timestamp": int(time.time() * 1000),
+                "is_recording": is_recording
             }
             url = f"{STREAMING_HTTP_URL}/api/stream/report-state"
             logger.print("API_REQUEST", "%s | endpoint: /api/stream/report-state | payload: %s", "POST", str(state_report)[:100])

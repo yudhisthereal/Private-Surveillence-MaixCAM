@@ -18,8 +18,9 @@ from config import (
 )
 
 from control_manager import (
-    get_camera_state_from_server, get_safe_areas_from_server, report_state,
+    get_camera_state_from_server, report_state,
     get_bed_areas_from_server, get_floor_areas_from_server,
+    get_chair_areas_from_server, get_couch_areas_from_server, get_bench_areas_from_server,
     camera_state_manager
 )
 from streaming import send_frame_to_server, send_background_to_server
@@ -28,13 +29,16 @@ from tools.time_utils import time_ms, TaskProfiler
 class CameraStateSyncWorker(threading.Thread):
     """Background thread for syncing flags and editable areas from streaming server"""
 
-    def __init__(self, flags_queue, safe_areas_queue, streaming_url, camera_id,
-                 sync_interval_ms=FLAG_SYNC_INTERVAL_MS, bed_areas_queue=None, floor_areas_queue=None):
+    def __init__(self, flags_queue, streaming_url, camera_id,
+                 sync_interval_ms=FLAG_SYNC_INTERVAL_MS, bed_areas_queue=None, floor_areas_queue=None,
+                 chair_areas_queue=None, couch_areas_queue=None, bench_areas_queue=None):
         super().__init__(daemon=True)
         self.flags_queue = flags_queue
-        self.safe_areas_queue = safe_areas_queue
         self.bed_areas_queue = bed_areas_queue
         self.floor_areas_queue = floor_areas_queue
+        self.chair_areas_queue = chair_areas_queue
+        self.couch_areas_queue = couch_areas_queue
+        self.bench_areas_queue = bench_areas_queue
         self.streaming_url = streaming_url
         self.camera_id = camera_id
         self.sync_interval = sync_interval_ms / 1000.0  # Convert to seconds
@@ -42,9 +46,11 @@ class CameraStateSyncWorker(threading.Thread):
         self.connection_errors = 0
         self.max_errors = 10
         self.last_successful_sync = 0
-        self.last_safe_area_sync = 0
         self.last_bed_area_sync = 0
         self.last_floor_area_sync = 0
+        self.last_chair_area_sync = 0
+        self.last_couch_area_sync = 0
+        self.last_bench_area_sync = 0
 
         # Use CameraStateManager to set the camera_id
         camera_state_manager.set_camera_id(camera_id)
@@ -75,22 +81,11 @@ class CameraStateSyncWorker(threading.Thread):
                     # print(f"[FlagSync] Failed to get camera state from server")
                     self.connection_errors += 1
                 
-                # 2. Get safe areas from streaming server (less frequent)
-                current_time = time.time()
-                if current_time - self.last_safe_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
-                    safe_areas = get_safe_areas_from_server()
-
-                    if safe_areas is not None and isinstance(safe_areas, list):
-                        try:
-                            self.safe_areas_queue.put_nowait(("safe_areas_update", safe_areas))
-                            # print(f"[SafeAreaSync] Safe areas synced ({len(safe_areas)} polygons)")
-                            self.last_safe_area_sync = current_time
-                        except queue.Full:
-                            pass
-                    else:
-                        logger.print("FLAG_SYNC", "Failed to get safe areas from server")
-
+                # 2. Get safe areas from streaming server (Removed)
+                # Safe areas functionality is now obsolete
+                
                 # 3. Get bed areas from streaming server (less frequent)
+                current_time = time.time()
                 if current_time - self.last_bed_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
                     if self.bed_areas_queue is not None:
                         bed_areas = get_bed_areas_from_server()
@@ -119,7 +114,53 @@ class CameraStateSyncWorker(threading.Thread):
                                 pass
                         else:
                             logger.print("FLAG_SYNC", "Failed to get floor areas from server")
+
+                # 5. Get chair areas from streaming server (less frequent)
+                if current_time - self.last_chair_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
+                    if self.chair_areas_queue is not None:
+                        chair_areas = get_chair_areas_from_server()
+
+                        if chair_areas is not None and isinstance(chair_areas, list):
+                            try:
+                                self.chair_areas_queue.put_nowait(("chair_areas_update", chair_areas))
+                                logger.print("FLAG_SYNC", "Chair areas synced (%d polygons)", len(chair_areas))
+                                self.last_chair_area_sync = current_time
+                            except queue.Full:
+                                pass
+                        else:
+                            logger.print("FLAG_SYNC", "Failed to get chair areas from server")
+
+                # 6. Get couch areas from streaming server (less frequent)
+                if current_time - self.last_couch_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
+                    if self.couch_areas_queue is not None:
+                        couch_areas = get_couch_areas_from_server()
+
+                        if couch_areas is not None and isinstance(couch_areas, list):
+                            try:
+                                self.couch_areas_queue.put_nowait(("couch_areas_update", couch_areas))
+                                logger.print("FLAG_SYNC", "Couch areas synced (%d polygons)", len(couch_areas))
+                                self.last_couch_area_sync = current_time
+                            except queue.Full:
+                                pass
+                        else:
+                            logger.print("FLAG_SYNC", "Failed to get couch areas from server")
+
+                # 7. Get bench areas from streaming server (less frequent)
+                if current_time - self.last_bench_area_sync > (SAFE_AREA_SYNC_INTERVAL_MS / 1000.0):
+                    if self.bench_areas_queue is not None:
+                        bench_areas = get_bench_areas_from_server()
+
+                        if bench_areas is not None and isinstance(bench_areas, list):
+                            try:
+                                self.bench_areas_queue.put_nowait(("bench_areas_update", bench_areas))
+                                logger.print("FLAG_SYNC", "Bench areas synced (%d polygons)", len(bench_areas))
+                                self.last_bench_area_sync = current_time
+                            except queue.Full:
+                                pass
+                        else:
+                            logger.print("FLAG_SYNC", "Failed to get bench areas from server")
                 
+
             except requests.exceptions.Timeout:
                 self.connection_errors += 1
                 if self.connection_errors % 5 == 0:
