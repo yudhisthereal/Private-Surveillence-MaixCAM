@@ -98,20 +98,24 @@ The system uses a unified safety judgment system that combines three area checke
    - Validates presence using the global check method (e.g., TORSO_HEAD)
    - Configurable safe zone polygons
 
-2. **Bed Area Checker**: Tracks time spent in bed areas
-   - Uses the global check method to measure dwell time in bed
-   - 5-second threshold for "too long in bed" detection
-   - Helps detect patients staying in bed longer than expected
+2. **Bed & Couch Area Checkers (Smart Monitoring)**: Tracks time spent in resting areas with time-of-day awareness
+   - Detects "unsafe sleep" based on `max_sleep_duration`
+   - Detects "oversleeping" based on `bedtime` and `wakeup_time` parameters
+   - Distinguishes between normal night sleep and problematic daytime napping
 
-3. **Floor Area Checker**: Detects when patients are lying on the floor
+3. **Bench & Chair Area Checkers**: Monitors semi-stationary areas
+   - **Chair**: Optimized for sitting poses (HIP check method)
+   - **Bench**: Supports both sitting and lying detection
+
+4. **Floor Area Checker**: Detects when patients are lying on the floor
    - Uses the global check method to detect floor contact
    - Critical safety alert for fall situations
-   - Distinguishes between safe lying (in bed) and unsafe lying (on floor)
+   - Distinguishes between safe lying (in bed/couch) and unsafe lying (on floor)
 
 **Safety Judgment Rules (in priority order):**
 1. Fall detection always takes precedence
 2. If lying down AND in floor area → UNSAFE (lying on floor)
-3. If in bed area AND time > threshold → UNSAFE (in bed too long)
+3. If in bed/couch area AND (too long OR past wakeup) → UNSAFE (sleep monitoring)
 4. If lying down AND not in safe area → UNSAFE (lying outside safe zone)
 5. Otherwise → SAFE (tracking)
 
@@ -137,19 +141,22 @@ graph TB
         end
 
         subgraph Safety [Safety System]
-            Fall{"Fall Detection<br/>2 Algorithms"}
-            SafeArea["Safe Area Checker<br/>5 Check Methods"]
-            BedArea["Bed Area Checker<br/>Time Tracking"]
+            Fall{"Fall Detection<br/>Individual Tracking"}
+            SafeArea{"Safe Area Checker<br/>5 Check Methods"}
+            BedArea["Bed & Couch<br/>Smart Sleep Monitoring"]
+            BenchArea["Bench & Chair<br/>Area Checkers"]
             FloorArea["Floor Area Checker<br/>Critical Detection"]
-            SafetyJudge{"Safety Judgment<br/>3-Tier System"}
+            SafetyJudge{"Safety Judgment<br/>6-Tier System"}
 
             Track --> Fall
             Fall --> SafetyJudge
             Track --> SafeArea
             Track --> BedArea
+            Track --> BenchArea
             Track --> FloorArea
             SafeArea --> SafetyJudge
             BedArea --> SafetyJudge
+            BenchArea --> SafetyJudge
             FloorArea --> SafetyJudge
         end
 
@@ -207,7 +214,10 @@ graph TB
     StateSync -->|"HTTP GET<br/>Flags"| API
     StateSync -->|"HTTP GET<br/>Safe Areas"| API
     StateSync -->|"HTTP GET<br/>Bed Areas"| API
+    StateSync -->|"HTTP GET<br/>Couch Areas"| API
     StateSync -->|"HTTP GET<br/>Floor Areas"| API
+    StateSync -->|"HTTP GET<br/>Chair Areas"| API
+    StateSync -->|"HTTP GET<br/>Bench Areas"| API
 
     API -.->|Commands| StateSync
     Dashboard -->|MJPEG Stream| Display
@@ -515,12 +525,17 @@ NO_HUMAN_CONFIRM_FRAMES = 10       # Confirm human absence with 10 frames
 ### Fall Detection Parameters
 
 ```python
-fallParam = {
-    "v_bbox_y": 0.3,              # Vertical threshold for fall detection
-    "angle": 70                    # Angle threshold for fall detection
+ fallParam = {
+    "v_bbox_y": 0.3,              # Height shrinkage threshold (0.0 - 1.0)
+    "angle": 70                    # Angle threshold (legacy)
 }
-FALL_COUNT_THRES = 2               # Consecutive falls to confirm
+FALL_COUNT_THRES = 2               # Consecutive frames to confirm
 ```
+
+**Refinement Features:**
+- **Incomplete Body Safeguard**: Automatically aborts detection if person is too close (Eye/Shoulder/Hip/Knee visibility check).
+- **Per-Track Counters**: Each person has their own fall detection state to prevent cross-interference.
+- **BBox Shrinkage Analysis**: Algorithm 1 now uses height shrinkage percentage rather than just raw vertical motion.
 
 **Available Algorithms:**
 - **Algorithm 1**: BBox motion only
@@ -548,6 +563,12 @@ FALL_COUNT_THRES = 2               # Consecutive falls to confirm
 | `show_safe_areas` | False | Overlay safe areas on display |
 | `show_bed_areas` | False | Overlay bed areas on display |
 | `show_floor_areas` | False | Overlay floor areas on display |
+| `show_bench_areas` | False | Overlay bench areas on display |
+| `show_couch_areas` | False | Overlay couch areas on display |
+| `show_chair_areas` | False | Overlay chair areas on display |
+| `max_sleep_duration` | 0 | Max sleep duration in minutes (0=disabled) |
+| `bedtime` | "" | Target bedtime (HH:MM) |
+| `wakeup_time` | "" | Target wakeup time (HH:MM) |
 
 ### Safety Check Methods
 
@@ -610,6 +631,9 @@ The following data is sent to the Streaming Server in real-time:
 - **Safe Areas**: `/root/safe_areas.json` - List of polygon definitions for safe zones
 - **Bed Areas**: `/root/bed_areas.json` - List of polygon definitions for bed areas
 - **Floor Areas**: `/root/floor_areas.json` - List of polygon definitions for floor areas
+- **Couch Areas**: `/root/couch_areas.json` - List of polygon definitions for couch areas
+- **Bench Areas**: `/root/bench_areas.json` - List of polygon definitions for bench areas
+- **Chair Areas**: `/root/chair_areas.json` - List of polygon definitions for chair areas
 
 ## 🔧 Technical Details
 
@@ -779,9 +803,11 @@ if fall_detected:
     return "fall"
 elif lying_down and in_floor_area:
     return "unsafe"  # Lying on floor
-elif in_bed_area and too_long_in_bed:
-    return "unsafe"  # In bed too long
-elif lying_down and not in_safe_zone:
+elif (in_bed_area or in_couch_area) and (too_long_in_bed/couch or past_wakeup):
+    return "unsafe"  # Smart sleep monitoring (duration/time)
+elif sitting and in_chair_area:
+    return "safe"    # Explicit chair sitting
+elif lying_down and not (in_safe_area or in_bed_area or in_couch_area or in_bench_area):
     return "unsafe"  # Lying outside safe zone
 else:
     return "normal"
@@ -796,15 +822,24 @@ flowchart TD
 
     Lying -- Yes --> Floor{In Floor Area?}
     Floor -- Yes --> UnsafeFloor[Status: UNSAFE<br/>(Lying on Floor)]
-    Floor -- No --> SafeZone{In Safe Area?}
+    Floor -- No --> SafeResting{In Bed/Couch/Bench?}
+    
+    SafeResting -- Yes --> SmartCheck{Smart Sleep Check?}
+    SmartCheck -- Unsafe --> UnsafeSleep[Status: UNSAFE<br/>(Sleep Alert)]
+    SmartCheck -- Safe --> Safe
+    
+    SafeResting -- No --> SafeZone{In Safe Area?}
     SafeZone -- No --> UnsafeSafe[Status: UNSAFE<br/>(Lying Outside Safe)]
     SafeZone -- Yes --> Safe[Status: SAFE]
 
-    Lying -- No --> Bed{In Bed Area?}
-    Bed -- Yes --> Time{Time > Threshold?}
-    Time -- Yes --> UnsafeBed[Status: UNSAFE<br/>(In Bed Too Long)]
-    Time -- No --> Safe
-    Bed -- No --> Safe
+    Lying -- No --> Sitting{Sitting?}
+    Sitting -- Yes --> SeatCheck{In Chair/Couch/Bench?}
+    SeatCheck -- Yes --> Safe
+    SeatCheck -- No --> BedCheck{In Bed Area?}
+    
+    BedCheck -- Yes --> SmartCheck
+    BedCheck -- No --> Safe
+    Sitting -- No --> Safe
 
     classDef fall fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000000
     classDef unsafe fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000000
@@ -812,9 +847,9 @@ flowchart TD
     classDef neutral fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#000000
 
     class UnsafeFall fall
-    class UnsafeFloor,UnsafeSafe,UnsafeBed unsafe
+    class UnsafeFloor,UnsafeSafe,UnsafeSleep unsafe
     class Safe safe
-    class Start,Fall,Lying,Floor,SafeZone,Bed,Time neutral
+    class Start,Fall,Lying,Floor,SafeResting,SmartCheck,SafeZone,Sitting,SeatCheck,BedCheck neutral
 ```
 
 
