@@ -3,6 +3,7 @@ import requests
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Set
+from config import STREAMING_HTTP_URL
 
 def get_timestamp_str():
     """
@@ -24,36 +25,17 @@ def get_current_time_str(camera_id: str = None) -> str:
     """
     # 1. Try to fetch from server
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        
-        analytics_url = os.getenv("ANALYTICS_API_URL")
-        # Handle case where ANALYTICS_API_URL might be constructed from IP/PORT
-        if not analytics_url:
-            ip = os.getenv("ANALYTICS_SERVER_IP")
-            port = os.getenv("ANALYTICS_SERVER_PORT")
-            if ip and port:
-                analytics_url = f"http://{ip}:{port}/api"
         
         if camera_id is None:
             camera_id = os.getenv("CAMERA_ID", "unknown")
             
-        if analytics_url:
-            # Construct URL: GET api/stream/current-time?camera_id={cameraId}
-            # Note: The user specified 'api/stream/current-time', 
-            # ensure we don't double 'api' if ANALYTICS_API_URL already has it.
-            # Assuming ANALYTICS_API_URL usually ends in /api or just the base.
-            # Let's be safe and join properly or check.
-            
-            # Common pattern in this repo: ANALYTICS_API_URL includes /api
-            url = f"{analytics_url}/stream/current-time"
-            
-            response = requests.get(url, params={"camera_id": camera_id}, timeout=2)
-            if response.status_code == 200:
-                data = response.json()
-                # Expected: { "time": "14:30", "timezone": "Asia/Jakarta" }
-                if "time" in data:
-                    return data["time"]
+        url = STREAMING_HTTP_URL + "/api/stream/current-time"
+        response = requests.get(url, params={"camera_id": camera_id}, timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            # Expected: { "time": "14:30", "timezone": "Asia/Jakarta" }
+            if "time" in data:
+                return data["time"]
     except Exception as e:
         print(f"Time Sync Error: {e}") # Fail silently/log internally
         pass

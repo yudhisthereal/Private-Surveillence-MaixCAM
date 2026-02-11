@@ -106,7 +106,7 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False, safety_judgment=None):
+def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False, safety_judgment=None):
     """Process a single track - handle fall detection and safety checking
 
     Args:
@@ -325,9 +325,7 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                         max_sleep_duration = get_flag("max_sleep_duration", 0)
                         bedtime = get_flag("bedtime", "")
                         wakeup_time = get_flag("wakeup_time", "")
-                        
-                        # Get camera_id for server time sync
-                        camera_id = os.getenv("CAMERA_ID", "unknown")
+
                         # Fetch current time from server (with local fallback)
                         current_time_str = get_current_time_str(camera_id)
                     except (ImportError, Exception):

@@ -7,7 +7,7 @@ from config import STREAMING_HTTP_URL
 from debug_config import DebugLogger
 
 # Module-level debug logger instance
-logger = DebugLogger(tag="STREAMING", instance_enable=true  )
+logger = DebugLogger(tag="STREAMING", instance_enable=False)
 
 def send_to_streaming_server(endpoint, data):
     """Send data to streaming server (async)

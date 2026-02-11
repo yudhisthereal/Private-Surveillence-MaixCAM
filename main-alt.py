@@ -705,7 +705,7 @@ def main():
         
         for track in tracks:
             track_result = process_track(
-                track, objs,
+                track, objs, CAMERA_ID,
                 is_recording=is_recording,
                 skeleton_saver=skeleton_saver_2d if is_recording else None,
                 frame_id=frame_id,
