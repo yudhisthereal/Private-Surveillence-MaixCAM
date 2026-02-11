@@ -22,7 +22,7 @@ valid_class_id = [0]
 
 # Fall detection parameters
 fallParam = {
-    "v_bbox_y": 0.12,
+    "v_bbox_y": 0.17,
     "angle": 70
 }
 
@@ -41,6 +41,7 @@ online_targets = {
 # Fall and unsafe IDs tracking
 fall_ids = set()
 unsafe_ids = set()
+fall_states = {}  # Per-track fall detection state: {track_id: state_dict}
 
 # FPS tracking for fall detection
 current_fps = 30.0
@@ -118,7 +119,7 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
         analytics_mode: If True, use AnalyticsWorker results; if False, use local fall detection
         safety_judgment: SafetyJudgment instance that combines all area checkers
     """
-    global online_targets, fall_ids, unsafe_ids, current_fps
+    global online_targets, fall_ids, unsafe_ids, current_fps, fall_states
     
     # Initialize encrypted_features for all code paths
     encrypted_features = None
@@ -235,9 +236,12 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                 if not use_analytics:
                     # Analytics server not available or no data yet, fall back to local processing
                     if online_targets["bbox"][idx].qsize() >= 2:
-                        fall_result = check_fall(tracker_obj, online_targets, idx, fps)
+                        state = fall_states.get(track.id)
+                        fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state)
                         if fall_result:
-                            fall_info, pose_label, encrypted_features = fall_result
+                            fall_info, pose_label, encrypted_features, updated_state = fall_result
+                            fall_states[track.id] = updated_state
+                            
                             (fall_detected_method1, counter_method1,
                              fall_detected_method2, counter_method2) = fall_info
 
@@ -258,9 +262,12 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
             else:
                 # Not in analytics mode, use local fall detection
                 if online_targets["bbox"][idx].qsize() >= 2:
-                    fall_result = check_fall(tracker_obj, online_targets, idx, fps)
+                    state = fall_states.get(track.id)
+                    fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state)
                     if fall_result:
-                        fall_info, pose_label, encrypted_features = fall_result
+                        fall_info, pose_label, encrypted_features, updated_state = fall_result
+                        fall_states[track.id] = updated_state
+                        
                         (fall_detected_method1, counter_method1,
                          fall_detected_method2, counter_method2) = fall_info
 
@@ -304,9 +311,35 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
                     # Assuming typical MaixCAM resolution 320x224
                     normalized_keypoints = normalize_keypoints(obj.points, 320, 224)
 
+                    # Get sleep monitoring configuration
+                    max_sleep_duration = 0
+                    bedtime = ""
+                    wakeup_time = ""
+                    current_time_str = "12:00" # Default/Fallback
+                    
+                    try:
+                        from control_manager import get_flag
+                        from tools.time_utils import get_current_time_str
+                        import os
+                        
+                        max_sleep_duration = get_flag("max_sleep_duration", 0)
+                        bedtime = get_flag("bedtime", "")
+                        wakeup_time = get_flag("wakeup_time", "")
+                        
+                        # Get camera_id for server time sync
+                        camera_id = os.getenv("CAMERA_ID", "unknown")
+                        # Fetch current time from server (with local fallback)
+                        current_time_str = get_current_time_str(camera_id)
+                    except (ImportError, Exception):
+                        pass
+
                     # Use SafetyJudgment to evaluate safety
                     is_safe, safety_reason, details = safety_judgment.evaluate_safety(
-                        track.id, normalized_keypoints, pose_label
+                        track.id, normalized_keypoints, pose_label,
+                        current_time_str=current_time_str,
+                        max_sleep_duration_min=max_sleep_duration,
+                        bedtime_str=bedtime,
+                        wakeup_time_str=wakeup_time
                     )
 
                     if not is_safe:
@@ -350,14 +383,15 @@ def process_track(track, objs, is_recording=False, skeleton_saver=None, frame_id
     
     return None
 
-def check_fall(tracker_obj, track_history, idx, fps=30):
+def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
     """Check for fall using track history
     
     Returns:
-        tuple: (fall_info, pose_label, encrypted_features)
+        tuple: (fall_info, pose_label, encrypted_features, updated_state)
                - fall_info: Fall detection result tuple
                - pose_label: Pose classification label
                - encrypted_features: Dict of encrypted features when use_hme=True, else None
+               - updated_state: Updated fall detection state dict
     """
     global current_fps, pose_estimator
     
@@ -399,17 +433,68 @@ def check_fall(tracker_obj, track_history, idx, fps=30):
                 pass
 
     # Call fall detection with the tracker object and pose data
-    fall_info = get_fall_info(
+    # get_fall_info returns: (fall_detected_bbox_only, counter_bbox_only, fall_detected_motion_pose_and, counter_motion_pose_and, state)
+    result = get_fall_info(
         tracker_obj,
         track_history,
         idx,
         fallParam,
         queue_size,
         effective_fps,
-        pose_data
+        pose_data,
+        state
     )
     
-    return fall_info, pose_label, encrypted_features
+    # Unpack result
+    fall_detected_bbox_only = result[0]
+    counter_bbox_only = result[1]
+    fall_detected_motion_pose_and = result[2]
+    counter_motion_pose_and = result[3]
+    updated_state = result[4]
+    
+    # Reconstruct fall_info tuple expected by other parts of the system
+    # Note: get_fall_info used to return 4 values, now 5.
+    # The caller expects fall_info to be used in update_fall_counters.
+    # update_fall_counters expects 6 values? Wait, let's check judge_fall.py again.
+    # judge_fall.py returned 4 values. update_fall_counters unpacks 6?
+    # Let's check update_fall_counters in tracking.py.
+    
+    # tracking.py:
+    # def update_fall_counters(fall_info):
+    # (fall_detected_method1, counter_method1,
+    #  fall_detected_method2, counter_method2,
+    #  fall_detected_method3, counter_method3) = fall_info
+    
+    # Wait, get_fall_info in judge_fall.py (ORIGNAL) returned 4 values.
+    #     return (
+    #         fall_detected_bbox_only, counter_bbox_only,
+    #         fall_detected_motion_pose_and, counter_motion_pose_and
+    #     )
+    
+    # But update_fall_counters unpacks 6. This implies there's a mismatch or I misread something.
+    # Let's check update_fall_counters again.
+    # It likely expects more, or get_fall_info logic has changed in the past.
+    # The user didn't mention this was broken, but it looks suspicious.
+    # Or maybe update_fall_counters is used with analytics data which has 3 methods.
+    
+    # In process_track (lines 241-242):
+    # (fall_detected_method1, counter_method1,
+    #  fall_detected_method2, counter_method2) = fall_info
+    # Process track unpacks 4 values!
+    
+    # So update_fall_counters unpacking 6 is likely for analytics return or unused/broken code?
+    # Ah, update_fall_counters is defined but where is it used?
+    # I grepped get_fall_info usage, but not update_fall_counters usage.
+    # It's not called in process_track.
+    
+    # Anyway, I should return fall_info as a tuple of 4 to match process_track expectation.
+    
+    fall_info = (
+        fall_detected_bbox_only, counter_bbox_only,
+        fall_detected_motion_pose_and, counter_motion_pose_and
+    )
+    
+    return fall_info, pose_label, encrypted_features, updated_state
 
 def update_fall_counters(fall_info):
     """Update fall counters and IDs based on fall detection result"""
@@ -438,7 +523,7 @@ def update_fall_counters(fall_info):
 
 def clear_track_history():
     """Clear all track history"""
-    global online_targets, fall_ids, unsafe_ids
+    global online_targets, fall_ids, unsafe_ids, fall_states
     online_targets = {
         "id": [],
         "bbox": [],
@@ -446,6 +531,7 @@ def clear_track_history():
     }
     fall_ids.clear()
     unsafe_ids.clear()
+    fall_states.clear()
 
 def get_online_targets():
     """Get current online targets"""
@@ -453,7 +539,7 @@ def get_online_targets():
 
 def reset_tracker():
     """Reset the tracker and all tracking state"""
-    global tracker0, online_targets, fall_ids, unsafe_ids
+    global tracker0, online_targets, fall_ids, unsafe_ids, fall_states
     tracker0 = tracker.ByteTracker(max_lost_buff_time, track_thresh, high_thresh, match_thresh, max_history_num)
     clear_track_history()
 

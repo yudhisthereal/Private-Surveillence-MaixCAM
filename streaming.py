@@ -7,7 +7,7 @@ from config import STREAMING_HTTP_URL
 from debug_config import DebugLogger
 
 # Module-level debug logger instance
-logger = DebugLogger(tag="STREAMING", instance_enable=False)
+logger = DebugLogger(tag="STREAMING", instance_enable=true  )
 
 def send_to_streaming_server(endpoint, data):
     """Send data to streaming server (async)
@@ -207,6 +207,7 @@ def send_tracks_to_streaming_server(camera_id, tracks):
             - bbox: list [x, y, w, h]
             - pose_label: str
             - safety_status: str (normal, unsafe, fall)
+            - safety_reason: str (e.g., "lying_on_floor", "unsafe_sleep_too_long", "normal")
             - encrypted_features: dict (omitted from sending to streaming server)
 
     Returns:

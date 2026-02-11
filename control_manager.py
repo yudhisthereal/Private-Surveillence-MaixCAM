@@ -166,7 +166,10 @@ control_flags = {
     "analytics_mode": True,
     "fall_algorithm": 1,
     "check_method": 3,  # CheckMethod.TORSO_HEAD
-    "hme": False
+    "hme": False,
+    "max_sleep_duration": 0,  # Minutes, 0 = disabled
+    "bedtime": "", # "HH:MM", e.g. "22:00"
+    "wakeup_time": "" # "HH:MM", e.g. "07:00"
 }
 
 # Flag change callbacks

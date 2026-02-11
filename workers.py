@@ -1364,6 +1364,7 @@ class TracksSenderWorker(threading.Thread):
                 - bbox: list [x, y, w, h]
                 - pose_label: str
                 - safety_status: str (normal, unsafe, fall)
+                - safety_reason: str (e.g., "lying_on_floor", "unsafe_sleep_too_long", "normal")
                 - encrypted_features: dict (only sent to analytics server, not streaming)
         """
         try:
@@ -1377,7 +1378,8 @@ class TracksSenderWorker(threading.Thread):
                     "keypoints": track.get("keypoints", []),
                     "bbox": track.get("bbox"),
                     "pose_label": track.get("pose_label", "unknown"),
-                    "safety_status": track.get("safety_status", "normal")
+                    "safety_status": track.get("safety_status", "normal"),
+                    "safety_reason": track.get("safety_reason", "normal")
                     # encrypted_features is omitted for streaming server
                 }
                 tracks_for_streaming.append(track_for_streaming)

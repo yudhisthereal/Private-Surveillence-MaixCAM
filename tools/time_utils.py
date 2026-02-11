@@ -1,6 +1,8 @@
 import time
+import requests
+import os
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 def get_timestamp_str():
     """
@@ -8,6 +10,57 @@ def get_timestamp_str():
     """
     tm = time.localtime()
     return f"{tm[0]:04d}-{tm[1]:02d}-{tm[2]:02d}_{tm[3]:02d}-{tm[4]:02d}-{tm[5]:02d}"
+
+def get_current_time_str(camera_id: str = None) -> str:
+    """
+    Returns current time in HH:MM format.
+    Tries to fetch from server first, falls back to system time.
+    
+    Args:
+        camera_id: ID of the camera to send to server. If None, tries to read from env.
+    
+    Returns:
+        str: Time in "HH:MM" format
+    """
+    # 1. Try to fetch from server
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        
+        analytics_url = os.getenv("ANALYTICS_API_URL")
+        # Handle case where ANALYTICS_API_URL might be constructed from IP/PORT
+        if not analytics_url:
+            ip = os.getenv("ANALYTICS_SERVER_IP")
+            port = os.getenv("ANALYTICS_SERVER_PORT")
+            if ip and port:
+                analytics_url = f"http://{ip}:{port}/api"
+        
+        if camera_id is None:
+            camera_id = os.getenv("CAMERA_ID", "unknown")
+            
+        if analytics_url:
+            # Construct URL: GET api/stream/current-time?camera_id={cameraId}
+            # Note: The user specified 'api/stream/current-time', 
+            # ensure we don't double 'api' if ANALYTICS_API_URL already has it.
+            # Assuming ANALYTICS_API_URL usually ends in /api or just the base.
+            # Let's be safe and join properly or check.
+            
+            # Common pattern in this repo: ANALYTICS_API_URL includes /api
+            url = f"{analytics_url}/stream/current-time"
+            
+            response = requests.get(url, params={"camera_id": camera_id}, timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                # Expected: { "time": "14:30", "timezone": "Asia/Jakarta" }
+                if "time" in data:
+                    return data["time"]
+    except Exception as e:
+        print(f"Time Sync Error: {e}") # Fail silently/log internally
+        pass
+
+    # 2. Fallback to local system time
+    tm = time.localtime()
+    return f"{tm.tm_hour:02d}:{tm.tm_min:02d}"
 
 def time_ms():
     return round(time.time() * 1000)
