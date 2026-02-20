@@ -5,7 +5,6 @@ from debug_config import DebugLogger
 from tools.wifi_connect import connect_wifi
 from tools.video_record import VideoRecorder
 from tools.skeleton_saver import SkeletonSaver2D
-from tools.safe_area import CheckMethod
 from tools.bed_area_checker import BedAreaChecker
 from tools.floor_area_checker import FloorAreaChecker
 from tools.chair_area_checker import ChairAreaChecker
@@ -207,7 +206,7 @@ def main():
     # Initialize SafetyJudgment with all three checkers
     # Get check_method from control_flags (default: 3 = TORSO_HEAD)
     check_method_value = control_flags.get("check_method", 3)
-    from tools.safe_area import CheckMethod
+    from tools.polygon_checker import CheckMethod
 
     # Map integer value to CheckMethod enum
     check_method_map = {

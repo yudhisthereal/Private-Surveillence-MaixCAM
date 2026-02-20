@@ -1,5 +1,5 @@
 from typing import List, Tuple
-from tools.safe_area import BodyInPolygonChecker, CheckMethod
+from tools.polygon_checker import BodyInPolygonChecker, CheckMethod
 
 
 class ChairAreaChecker:

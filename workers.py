@@ -617,7 +617,7 @@ def handle_command(command, value, camera_id, registration_status, save_camera_i
             # update_safety_checker_polygons(value)
     elif command in get_default_control_flags():
         from control_manager import camera_state_manager, get_control_flags, update_control_flag, get_camera_id
-        from tools.safe_area import CheckMethod
+        from tools.polygon_checker import CheckMethod
         update_control_flag(command, value)
     elif command == "set_fall_algorithm":
         algorithm = int(value) if isinstance(value, (int, float)) else 3

@@ -1,6 +1,6 @@
 import time
 from typing import List, Tuple, Dict
-from tools.safe_area import BodyInPolygonChecker, CheckMethod
+from tools.polygon_checker import BodyInPolygonChecker, CheckMethod
 from tools.time_utils import time_ms
 
 

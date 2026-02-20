@@ -22,7 +22,7 @@ valid_class_id = [0]
 
 # Fall detection parameters
 fallParam = {
-    "v_bbox_y": 0.3,
+    "v_bbox_y": 0.4, # amount of shrinkage in bounding box relative to the original size in percent (30%)
     "angle": 70
 }
 
@@ -150,7 +150,6 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
         pass
     
     # Find corresponding YOLO object
-    # Find corresponding YOLO object
     # We want to associate the Tracked Object (detector) with a Pose Object (extractor)
     # Strategy: Find the closest Pose Object to the current Tracked Object
     if len(track.history) > 0 and len(objs) > 0:
@@ -167,7 +166,7 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                 min_dist = dist
                 best_obj = obj
         
-        # Always use the best match if we have one (User Request: "Always allow")
+        # Always use the best match if we have one
         if best_obj:
             obj = best_obj
             keypoints_np = to_keypoints_np(obj.points)
@@ -211,10 +210,6 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                     # Check fall detection results from analytics server
                     fall_detected_method1 = analytics_fall.get("fall_detected_method1", False)
                     fall_detected_method2 = analytics_fall.get("fall_detected_method2", False)
-                    fall_detected_method3 = analytics_fall.get("fall_detected_method3", False)
-                    counter_method1 = analytics_fall.get("counter_method1", 0)
-                    counter_method2 = analytics_fall.get("counter_method2", 0)
-                    counter_method3 = analytics_fall.get("counter_method3", 0)
 
                     # Update fall_ids based on selected fall algorithm
                     fall_detected = False

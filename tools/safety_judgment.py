@@ -1,7 +1,10 @@
 from typing import List, Tuple, Optional, Dict
-from tools.safe_area import CheckMethod, COCOKeypoints
+from tools.polygon_checker import CheckMethod
 from tools.bed_area_checker import BedAreaChecker
 from tools.floor_area_checker import FloorAreaChecker
+from tools.chair_area_checker import ChairAreaChecker
+from tools.couch_area_checker import CouchAreaChecker
+from tools.bench_area_checker import BenchAreaChecker
 
 
 class SafetyReason:
@@ -35,9 +38,9 @@ class SafetyJudgment:
     def __init__(self,
                  bed_area_checker: Optional[BedAreaChecker] = None,
                  floor_area_checker: Optional[FloorAreaChecker] = None,
-                 chair_area_checker: Optional['ChairAreaChecker'] = None,
-                 couch_area_checker: Optional['CouchAreaChecker'] = None,
-                 bench_area_checker: Optional['BenchAreaChecker'] = None,
+                 chair_area_checker: Optional[ChairAreaChecker] = None,
+                 couch_area_checker: Optional[CouchAreaChecker] = None,
+                 bench_area_checker: Optional[BenchAreaChecker] = None,
                  check_method: CheckMethod = CheckMethod.TORSO_HEAD):
         """
         Initialize SafetyJudgment.

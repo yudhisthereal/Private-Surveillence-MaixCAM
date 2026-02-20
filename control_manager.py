@@ -5,7 +5,7 @@ import json
 import time
 import threading
 from debug_config import DebugLogger
-from tools.safe_area import CheckMethod
+from tools.polygon_checker import CheckMethod
 
 # Module-level debug logger instance
 logger = DebugLogger(tag="CTRL_MGR", instance_enable=False)

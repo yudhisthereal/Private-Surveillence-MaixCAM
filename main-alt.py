@@ -95,7 +95,7 @@ from debug_config import DebugLogger
 from tools.skeleton_saver import SkeletonSaver2D
 from tools.bed_area_checker import BedAreaChecker
 from tools.floor_area_checker import FloorAreaChecker
-from tools.safe_area import CheckMethod
+from tools.polygon_checker import CheckMethod
 from tools.chair_area_checker import ChairAreaChecker
 from tools.couch_area_checker import CouchAreaChecker
 from tools.bench_area_checker import BenchAreaChecker
@@ -122,7 +122,8 @@ from control_manager import (
     initialize_floor_area_checker, update_floor_area_polygons, load_floor_areas,
     initialize_chair_area_checker, update_chair_area_polygons, load_chair_areas,
     initialize_couch_area_checker, update_couch_area_polygons, load_couch_areas,
-    initialize_bench_area_checker, update_bench_area_polygons, load_bench_areas
+    initialize_bench_area_checker, update_bench_area_polygons, load_bench_areas,
+    CameraStateManager
 )
 from workers import (
     CameraStateSyncWorker, StateReporterWorker, FrameUploadWorker,
@@ -254,6 +255,10 @@ def merge_background_with_mask(old_background, new_frame, processed_tracks, padd
 # ============================================
 # MAIN INITIALIZATION
 # ============================================
+
+
+# Global camera state manager instance
+camera_state_manager = CameraStateManager()
 
 def main():
     """Main entry point"""

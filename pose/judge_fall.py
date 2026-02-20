@@ -52,8 +52,6 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     # keypoints_flat = list(track_history["points"][idx].queue)
     # latest_keypoints = keypoints_flat[-1]
     
-    # Let's see how we can get the latest keypoints here.
-    # We can peek at the queue's last element without popping, or tracking.py should pass it.
     # Currently tracking.py passes `online_targets` (the dict of queues) and `index`.
     
     try:
