@@ -16,6 +16,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from debug_config import DebugLogger
+from config import INPUT_WIDTH, INPUT_HEIGHT
 
 # Module-level debug logger instance
 logger = DebugLogger(tag="CAM_MGR", instance_enable=False)
@@ -42,8 +43,8 @@ class MediaPipePose:
     def __init__(self, model_path="pose_landmarker_heavy.task", num_poses=3):
         self.model_path = model_path
         self.num_poses = num_poses
-        self._input_width = 320
-        self._input_height = 224
+        self._input_width = INPUT_WIDTH
+        self._input_height = INPUT_HEIGHT
         
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"MediaPipe model not found: {model_path}")
@@ -62,10 +63,10 @@ class MediaPipePose:
         logger.print("CAM_MGR", f"MediaPipe Pose initialized (max_poses={num_poses})")
 
     def input_width(self):
-        return 320
+        return INPUT_WIDTH
 
     def input_height(self):
-        return 224
+        return INPUT_HEIGHT
 
     def input_format(self):
         return "RGB"
@@ -168,14 +169,14 @@ class YOLO11_Pose:
         if YOLO is None:
              raise ImportError("Ultralytics not installed")
         self.model = YOLO(model_path)
-        self._input_width = 320
-        self._input_height = 224
+        self._input_width = INPUT_WIDTH
+        self._input_height = INPUT_HEIGHT
 
     def input_width(self):
-        return 320
+        return INPUT_WIDTH
 
     def input_height(self):
-        return 224
+        return INPUT_HEIGHT
 
     def input_format(self):
         return "RGB"
@@ -239,8 +240,8 @@ class Camera:
         self.cap.set(cv2.CAP_PROP_FPS, fps)
         
         self._fps = fps
-        self._width = 320  # Force report 320
-        self._height = 224 # Force report 224
+        self._width = INPUT_WIDTH  # Force report 320
+        self._height = INPUT_HEIGHT # Force report 224
 
     def read(self):
         ret, frame = self.cap.read()
@@ -248,15 +249,15 @@ class Camera:
             # Return blank image if read fails to prevent crash
             return np.zeros((self._height, self._width, 3), dtype=np.uint8)
         
-        # Resize to have height = 224, preserving aspect ratio
+        # Resize to have height = INPUT_HEIGHT, preserving aspect ratio
         h, w = frame.shape[:2]
-        target_h = 224
+        target_h = INPUT_HEIGHT
         scale = target_h / h
         new_w = int(w * scale)
         resized = cv2.resize(frame, (new_w, target_h))
         
-        # Center crop to width = 320
-        target_w = 320
+        # Center crop to width = INPUT_WIDTH
+        target_w = INPUT_WIDTH
         if new_w > target_w:
             start_x = (new_w - target_w) // 2
             cropped = resized[:, start_x:start_x+target_w]

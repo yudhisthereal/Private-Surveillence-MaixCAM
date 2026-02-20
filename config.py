@@ -72,6 +72,10 @@ GC_INTERVAL_MS = 30000
 # Pose Analysis
 POSE_ANALYSIS_INTERVAL_MS = 50
 
+# Image dimensions for pose estimation (MaixCAM standard resolution)
+INPUT_WIDTH = 320
+INPUT_HEIGHT = 224
+
 # ============================================
 # ANALYTICS SERVER CONFIGURATION (loaded from .env)
 # ============================================

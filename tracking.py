@@ -5,6 +5,7 @@ import numpy as np
 from maix import tracker, image
 from pose.judge_fall import get_fall_info, FALL_COUNT_THRES
 from pose.pose_estimation import PoseEstimation
+from config import INPUT_WIDTH, INPUT_HEIGHT
 from debug_config import DebugLogger
 
 # Module-level debug logger instance
@@ -303,8 +304,8 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                             body_keypoints.append((x, y, 1.0))
 
                     # Normalize keypoints for safety check (expects 0-1 range)
-                    # Assuming typical MaixCAM resolution 320x224
-                    normalized_keypoints = normalize_keypoints(obj.points, 320, 224)
+                    # Using INPUT_WIDTH and INPUT_HEIGHT from config
+                    normalized_keypoints = normalize_keypoints(obj.points, INPUT_WIDTH, INPUT_HEIGHT)
 
                     # Get sleep monitoring configuration
                     max_sleep_duration = 0
