@@ -95,6 +95,55 @@ def normalize_keypoints(keypoints_flat, img_width, img_height):
     
     return normalized
 
+def should_process_track(keypoints, input_width, input_height):
+    """Check if keypoints are complete enough for pose classification and fall detection.
+    
+    Args:
+        keypoints: Flat list of keypoints [x1, y1, x2, y2, ...]
+        input_width: Width of the input frame
+        input_height: Height of the input frame
+    
+    Returns:
+        bool: True if at least one side (left or right) has all 4 required keypoints visible,
+              False otherwise
+    """
+    if not keypoints or len(keypoints) < 28:  # Need at least 14 keypoints (x,y pairs)
+        return False
+    
+    def is_visible(k_idx, points):
+        """Check if a keypoint is visible (within frame bounds).
+        
+        Args:
+            k_idx: 1-based COCO keypoint index
+            points: Flat list of keypoints
+        
+        Returns:
+            bool: True if keypoint is visible (within frame bounds)
+        """
+        # k_idx is 1-based COCO index
+        # 0-based index in list is (k_idx - 1) * 2
+        idx_x = (k_idx - 1) * 2
+        idx_y = idx_x + 1
+        if idx_x >= len(points) or idx_y >= len(points):
+            return False
+        x, y = points[idx_x], points[idx_y]
+        # Check if coordinates are within frame bounds
+        return x > 0 and x <= input_width and y > 0 and y <= input_height
+    
+    # Left side: Left Eye (1), Left Shoulder (5), Left Hip (11), Left Knee (13)
+    left_visible = (is_visible(1, keypoints) and   # Left Eye
+                    is_visible(5, keypoints) and   # Left Shoulder
+                    is_visible(11, keypoints) and  # Left Hip
+                    is_visible(13, keypoints))     # Left Knee
+                    
+    # Right side: Right Eye (2), Right Shoulder (6), Right Hip (12), Right Knee (14)
+    right_visible = (is_visible(2, keypoints) and   # Right Eye
+                     is_visible(6, keypoints) and   # Right Shoulder
+                     is_visible(12, keypoints) and  # Right Hip
+                     is_visible(14, keypoints))     # Right Knee
+    
+    return left_visible or right_visible
+
 def update_tracks(objs, current_time_ms=None):
     """Update tracking with new detections"""
     global online_targets, fall_ids, unsafe_ids
@@ -172,6 +221,10 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
             obj = best_obj
             keypoints_np = to_keypoints_np(obj.points)
             
+            # Check if keypoints are complete enough for processing
+            # This prevents pose classification and fall detection when keypoints are incomplete
+            can_process = should_process_track(obj.points, INPUT_WIDTH, INPUT_HEIGHT)
+            
             # Local tracking - add to history
             if track.id not in online_targets["id"]:
                 online_targets["id"].append(track.id)
@@ -186,6 +239,25 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
             
             online_targets["bbox"][idx].put([tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h])
             online_targets["points"][idx].put(obj.points)
+            
+            # Skip pose classification and fall detection if keypoints are incomplete
+            if not can_process:
+                logger.print("TRACKING", "Track %d: Keypoints incomplete, skipping pose classification and fall detection.", track.id)
+                
+                # Still return track result with default values
+                track_result = {
+                    "track_id": track.id,
+                    "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
+                    "keypoints": obj.points,
+                    "keypoints_np": keypoints_np,
+                    "pose_label": "unknown",  # Unknown due to incomplete keypoints
+                    "status": "tracking",
+                    "encrypted_features": None,
+                    "use_hme": use_hme,
+                    "safety_reason": "normal",
+                    "safety_details": {}
+                }
+                return track_result
                 
             # Get fall_algorithm flag to determine which algorithm to use
             fall_algorithm = 1  # Default: Algorithm 1 (BBox motion only)

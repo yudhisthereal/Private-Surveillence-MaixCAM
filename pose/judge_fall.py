@@ -24,77 +24,9 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     fall_detected_bbox_only = False      # Algorithm 1
     fall_detected_motion_pose_and = False # Algorithm 2
 
-    # Safeguard: Check if person is too close (incomplete body)
-    # We require at least one side (Left or Right) to have all 4 key points visible:
-    # Eye, Shoulder, Hip, Knee
-    # COCO Keypoints:
-    # 1: Left Eye, 2: Right Eye
-    # 5: Left Shoulder, 6: Right Shoulder
-    # 11: Left Hip, 12: Right Hip
-    # 13: Left Knee, 14: Right Knee
-    
-    # Note: online_targets["points"] stores flat list [x1, y1, x2, y2, ...]
-    # We need to access by index. 
-    # Left Eye (1) -> indices 2,3 (0-indexed logic: index * 2, index * 2 + 1)
-    # But wait, original code:
-    # _ = online_targets["points"][index].get() 
-    # This just gets the queue item. We need the current points for THIS detection.
-    # The current detection points are in online_targets_det if passed as object, 
-    # but looking at tracking.py, online_targets_det is actually tracker_obj (x,y,w,h)
-    # AND keyspoints are passed via "online_targets" queue?
-    # No, tracking.py calls get_fall_info with "tracker_obj" as first arg.
-    # We need the keypoints for the CURRENT frame to check visibility.
-    # The queue has history. The LATEST item in the queue is what we want?
-    # In tracking.py:
-    # online_targets["points"][idx].put(obj.points)
-    # Then check_fall calls get_fall_info.
-    # Inside check_fall: 
-    # keypoints_flat = list(track_history["points"][idx].queue)
-    # latest_keypoints = keypoints_flat[-1]
-    
-    # Currently tracking.py passes `online_targets` (the dict of queues) and `index`.
-    
-    try:
-        # Access the queue for this target
-        points_queue = online_targets["points"][index]
-        if not points_queue.empty():
-            # Get list of all items in queue to peek at the last one (latest)
-            all_points = list(points_queue.queue)
-            latest_points = all_points[-1]
-            
-            # Helper to check visibility (assuming 0,0 is invisible or implied by bounds)
-            # Actually, typically 0,0 or low confidence means invisible. 
-            # Here we have [x, y, x, y...]. 
-            # Let's assume (0,0) is invalid/invisible.
-            
-            def is_visible(k_idx, points):
-                # k_idx is 1-based COCO index
-                # 0-based index in list is (k_idx - 1) * 2
-                idx_x = (k_idx - 1) * 2
-                idx_y = idx_x + 1
-                if idx_x >= len(points) or idx_y >= len(points):
-                    return False
-                x, y = points[idx_x], points[idx_y]
-                return x > 1 and y > 1 # Simple check, strictly > 0 or > 1 to avoid noise
-            
-            # Left side
-            left_visible = (is_visible(1, latest_points) and   # Left Eye
-                            is_visible(5, latest_points) and   # Left Shoulder
-                            is_visible(11, latest_points) and  # Left Hip
-                            is_visible(13, latest_points))     # Left Knee
-                            
-            # Right side
-            right_visible = (is_visible(2, latest_points) and   # Right Eye
-                             is_visible(6, latest_points) and   # Right Shoulder
-                             is_visible(12, latest_points) and  # Right Hip
-                             is_visible(14, latest_points))     # Right Knee
-                             
-            if not (left_visible or right_visible):
-                logger.print("FALL_DETECT", "Safeguard: Person too close/incomplete. Aborting fall detection.")
-                return False, counter_bbox_only, False, counter_motion_pose_and, state
-
-    except Exception as e:
-        logger.print("FALL_DETECT", "Error in safeguard check: %s", e)
+    # Note: Visibility check is now handled in tracking.py's should_process_track()
+    # before calling pose classification and fall detection.
+    # This function now only handles fall detection logic.
 
     # Reset all counters when pose data is invalid
     if pose_data is None or (isinstance(pose_data, dict) and pose_data.get('label') == "None"):

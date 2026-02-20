@@ -47,14 +47,6 @@ class PoseEstimation:
         hme_mode = use_hme if use_hme is not None else self.hme_enabled
         return self.feed_keypoints_map(kp_map, hme_mode)
 
-    def _is_frame_complete(self, keypoints_map):
-        for v in keypoints_map.values():
-            if v is None:
-                return False
-            if v[0] == self.missing_value or v[1] == self.missing_value:
-                return False
-        return True
-
     def _calculate_limb_lengths_and_ratios(self, km):
         try:
             thigh = (
@@ -129,11 +121,9 @@ class PoseEstimation:
         return label, pose_code, flags
 
     def feed_keypoints_map(self, keypoints_map, use_hme=True):
-        if not self._is_frame_complete(keypoints_map):
-            self.status = []
-            self.pose_data = {}
-            return None
-
+        # Note: Visibility check is now handled in tracking.py's should_process_track()
+        # before calling pose classification. This function now only handles pose estimation.
+        
         self.keypoints_map_deque.append(keypoints_map)
 
         try:
