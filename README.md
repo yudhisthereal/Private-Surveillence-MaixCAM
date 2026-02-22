@@ -31,18 +31,18 @@ This project is one component of a three-part distributed system:
 ┌─────────────────────────────────────────────────────────────────┐
 │                    PRIVACY-PRESERVING PATIENT                   │
 │                      MONITORING SYSTEM                          │
-├─────────────────┬─────────────────────┬─────────────────────────┤
-│                 │                     │                         │
-│    CAMERA       │   STREAMING SERVER  │      ANALYTICS          │
-│    (MaixCAM)    │   (Caregiver UI)    │      (Disabled)         │
-│                 │                     │                         │
-│  • Pose Est.    │  • MJPEG Streaming  │  • Cloud Processing     │
-│  • Fall Detect  │  • Web Dashboard    │  • HME Inference        │
-│  • Tracking     │  • Camera Mgmt      │  • Advanced Analytics   │
-│  • HME Encrypt  │  • Alert System     │                         │
-│  • Safety Chk   │                     │                         │
-│                 │                     │                         │
-└─────────────────┴─────────────────────┴─────────────────────────┘
+├────────────────────────────┬────────────────────────────────────┤
+│                            │                                    │
+│       CAMERA               │         STREAMING SERVER           │
+│       (MaixCAM)            │         (Caregiver UI)             │
+│                            │                                    │
+│  • Pose Estimation         │  • MJPEG Streaming                 │
+│  • Fall Detection          │  • Web Dashboard                   │
+│  • Tracking                │  • Camera Management               │
+│  • Feature Extraction      │  • Alert System                    │
+│  • Safety Checking         │                                    │
+│                            │                                    │
+└────────────────────────────┴────────────────────────────────────┘
 ```
 
 ### Component Overview
@@ -51,7 +51,6 @@ This project is one component of a three-part distributed system:
 |-----------|------------|-------------|--------|
 | **Camera** | [private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM) | Edge device with pose estimation, fall detection, and privacy protection | ✅ Active |
 | **Streaming Server** | [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/) | Web interface for caregivers to monitor patients | ✅ Active |
-| **Analytics Server** | [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/) | Privacy-preserving cloud analytics using Homomorphic Encryption | ⚠️ Disabled (using local fallback) |
 
 ## ✨ Features
 
@@ -67,13 +66,13 @@ This project is one component of a three-part distributed system:
 
 ### 🔐 Privacy-Preserving Features
 
-- **Homomorphic Encryption (HME)**: Optional encryption of pose features for privacy-preserving analytics
+- **Integer Feature Extraction**: Consistent extraction of integer body measurements for standardized downstream analysis.
 - **Smart Background Management**: Auto-update background that masks out human regions:
   - Preserves body bounding box areas in old background
   - Preserves head area (ear-nose-ear keypoints) with proportional padding
   - Updates non-human areas with new frame content
 - **Mask Visualization** (PC version): Color-coded overlay showing masked regions (white=body, red=head)
-- **Local Fallback**: All pose classification and fall detection runs locally when analytics server is unavailable
+- **Edge Processing**: All pose classification, feature extraction, and fall detection runs completely locally on the device to ensure patient privacy.
 
 ### 🎥 Recording System
 
@@ -202,10 +201,6 @@ graph TB
         API <--> Dashboard
     end
 
-    subgraph Analytics [Analytics Server]
-        HME["HME Inference<br/>Optional/Disabled"]
-    end
-
     FrameUpload -->|"HTTP POST<br/>JPEG"| API
     TrackSender -->|"HTTP POST<br/>Keypoints"| API
     StateReporter -->|"HTTP POST<br/>State"| API
@@ -222,8 +217,6 @@ graph TB
     API -.->|Commands| StateSync
     Dashboard -->|MJPEG Stream| Display
 
-    TrackSender -.->|HME Features| HME
-
     classDef camera fill:#e1f5fe,stroke:#01579b,stroke-width:3px,color:#000000
     classDef ai fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000000
     classDef safety fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000000
@@ -238,7 +231,7 @@ graph TB
     class BG,Mask,Merge privacy
     class StateSync,StateReporter,FrameUpload,TrackSender,PingWorker workers
     class Record,Display output
-    class API,Dashboard,HME server
+    class API,Dashboard server
 ```
 
 ### Main Components
@@ -252,9 +245,9 @@ private-cctv/
 ├── control_manager.py         # Control flags and state management
 ├── streaming.py               # Streaming server communication
 ├── tracking.py                # Multi-object tracking
-├── workers.py                 # Async worker threads
+├── workers.py                 # Async worker threads for streaming server
 ├── pose/
-│   ├── pose_estimation.py    # YOLO11 pose estimation with HME support
+│   ├── pose_estimation.py    # YOLO11 pose estimation & integer features
 │   └── judge_fall.py         # Fall detection algorithms (2 algorithms)
 ├── tools/
 │   ├── safe_area.py          # Safe zone polygon checking
@@ -470,8 +463,6 @@ Place these files in `/root/models/` on your MaixCAM:
 ```bash
 STREAMING_SERVER_IP=your.server.ip
 STREAMING_SERVER_PORT=8000
-ANALYTICS_SERVER_IP=analytics.server
-ANALYTICS_SERVER_PORT=5000
 ```
 
 2. **Configure Wi-Fi** in `main.py` or via environment:
@@ -555,8 +546,6 @@ FALL_COUNT_THRES = 2               # Consecutive frames to confirm
 | `show_raw` | False | Show raw feed instead of privacy-protected |
 | `auto_update_bg` | False | Enable automatic background updates with masking |
 | `set_background` | False | Capture current frame as background (manual trigger) |
-| `analytics_mode` | True | Enable analytics server integration |
-| `hme` | False | Enable Homomorphic Encryption |
 | `fall_algorithm` | 1 | Fall detection algorithm (1 or 2) |
 | `use_safety_check` | True | Enable safety checking system |
 | `check_method` | 3 | Safety check method for ALL checkers (Safe/Bed/Floor Areas) (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
@@ -609,7 +598,7 @@ The following data is sent to the Streaming Server in real-time:
 |-----------|----------|-------------|
 | Pose Label | `/api/stream/pose-label` | Pose classification (standing/sitting/bending_down/lying_down) |
 | Safety Status | `/api/stream/pose-label` | Safety status (normal/unsafe/fall) |
-| Keypoints | `/api/stream/keypoints` | 17 keypoint coordinates (34 values) |
+| Keypoints & Features | `/api/stream/keypoints` | 17 keypoint coordinates (34 values) & Integer Features `[Tra, Tha, Thl, cl, Trl, ll]` |
 | Fall Alerts | `/api/stream/pose-label` | Fall detection with track_id and timestamp |
 | Background | `/api/stream/upload-bg` | Privacy-protected background image |
 | Frames | `/api/stream/upload-frame` | Live video frames (when show_raw=True) |
@@ -924,23 +913,22 @@ flowchart TD
 
 
 
-### Homomorphic Encryption (HME)
+### Integer Feature Extraction
 
-When `hme=True`, pose features are encrypted before transmission:
+Pose features are consistently extracted as integers and sent within `processed_tracks`. These enable privacy-preserving downstream processing (such as Caregiver Analytics or future HME) by representing physical ratios as reliable integers:
 
 ```python
-# Features encrypted
-{
-    'Tra': [c1, c2],  # Torso angle (encrypted)
-    'Tha': [c1, c2],  # Thigh uprightness (encrypted)
-    'Thl': [c1, c2],  # Thigh length (encrypted)
-    'cl':  [c1, c2],  # Calf length (encrypted)
-    'Trl': [c1, c2],  # Torso height (encrypted)
-    'll':  [c1, c2]   # Leg length (encrypted)
-}
-```
+# Features extracted in order:
+'int_features': [Tra, Tha, Thl, cl, Trl, ll] 
 
-Encryption uses a Paillier-like scheme with large primes for privacy-preserving inference.
+# Where:
+# Tra = Torso angle
+# Tha = Thigh uprightness
+# Thl = Thigh length
+# cl  = Calf length
+# Trl = Torso height
+# ll  = Leg length
+```
 
 ### Async Workers
 
@@ -953,15 +941,14 @@ The system uses multiple background workers for non-blocking operation:
 | `FrameUploadWorker` | Upload frames to streaming server | Continuous (fire-and-forget) |
 | `PingWorker` | Heartbeat to streaming server | 250ms |
 | `CommandReceiverWorker` | Receive commands from server | Event-driven |
-| `AnalyticsWorker` | Process with analytics server (optional) | Event-driven |
-| `TracksSenderWorker` | Send keypoints/pose to streaming server | Continuous |
+| `TracksSenderWorker` | Send keypoints/pose/features to streaming server | Continuous |
 
 ## 🔒 Privacy Design
 
 ### Data Minimization
 
 1. **Local Processing**: All pose estimation and fall detection runs locally
-2. **Encrypted Transmission**: HME encrypts features before sending (when enabled)
+2. **Edge Processing**: All feature extraction, pose classification, and fall detection runs completely locally on the device
 3. **Smart Background Privacy**: Background updates exclude human regions using intelligent masking
 4. **No Raw Video Upload**: Only processed data and selective frames are sent
 
@@ -973,13 +960,7 @@ The auto-update background mechanism ensures patient privacy by:
 - **Body bbox padding**: 20px padding around detected bodies
 - **Pixel stepping optimization**: Efficient processing with step=4
 
-### Fallback Mechanisms
 
-When the analytics server is unavailable:
-- All processing continues locally
-- Fall detection uses plain-domain algorithms
-- No data is sent to external servers
-- System maintains full functionality
 
 ## 🐛 Troubleshooting
 
@@ -1078,7 +1059,6 @@ Enable detailed logging by checking console output for these prefixes:
 |--------|-------------|
 | `[DEBUG]` | Detailed debugging information |
 | `[DEBUG POSE]` | Pose estimation details |
-| `[DEBUG HME]` | HME encryption details |
 | `[ALGORITHM 1]` | Fall detection Algorithm 1 output |
 | `[ALGORITHM 2]` | Fall detection Algorithm 2 output |
 | `[FALL_DETECT]` | Fall detection system |
@@ -1103,7 +1083,6 @@ This research software is developed for privacy-preserving patient monitoring. Y
 ### References
 
 - **This Project (Camera)**: [private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM)
-- **Analytics Server**: [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/)
 - **Streaming Server (Caregiver UI)**: [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/)
 - MaixCAM: [Sipeed MaixCAM](https://wiki.sipeed.com/maixcam)
 - YOLO11: [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
@@ -1112,7 +1091,7 @@ This research software is developed for privacy-preserving patient monitoring. Y
 
 ## 🌐 API Endpoints
 
-This section documents all API endpoints used for communication between the Camera (MaixCAM), Streaming Server, and Analytics Server.
+This section documents all API endpoints used for communication between the Camera (MaixCAM) and Streaming Server.
 
 ### Camera → Streaming Server Endpoints
 
@@ -1288,8 +1267,6 @@ Get camera state including control flags from the streaming server.
         "show_raw": false,
         "auto_update_bg": true,
         "set_background": false,
-        "analytics_mode": true,
-        "hme": false,
         "fall_algorithm": 1,
         "use_safety_check": true,
         "show_safe_areas": false,
@@ -1386,84 +1363,7 @@ Register a new camera or re-register an existing camera.
 
 ---
 
-### Camera → Analytics Server Endpoints
 
-These endpoints are called by the Camera to send encrypted data to the Analytics Server (when HME is enabled).
-
-#### POST /api/analytics/analyze-pose
-Request privacy-preserving pose analysis using encrypted features.
-
-**Content-Type:** application/json
-
-**Request Body:**
-```json
-{
-    "track_id": 1,
-    "camera_id": "camera_001",
-    "use_hme": true,
-    "bbox": [x, y, width, height]
-}
-```
-
-**Response (200 OK):**
-```json
-{
-    "status": "success",
-    "pose_data": {
-        "label": "standing",
-        "torso_angle": 25.5,
-        "thigh_uprightness": 35.2,
-        "thigh_calf_ratio": 0.85,
-        "torso_leg_ratio": 0.52
-    }
-}
-```
-
----
-
-#### POST /api/analytics/detect-fall
-Request privacy-preserving fall detection using encrypted features.
-
-**Content-Type:** application/json
-
-**Request Body:**
-```json
-{
-    "camera_id": "camera_001",
-    "track_id": 1,
-    "current_bbox": [x, y, width, height],
-    "previous_bbox": [x, y, width, height],
-    "elapsed_ms": 33.33,
-    "use_hme": true,
-}
-```
-
-**Response (200 OK):**
-```json
-{
-    "status": "success",
-    "fall_detection": {
-        "fall_detected_method1": false,
-        "fall_detected_method2": false,
-        "counter_method1": 0,
-        "counter_method2": 0
-    }
-}
-```
-
----
-
-#### GET /api/analytics/health
-Health check endpoint for the Analytics Server.
-
-**Response (200 OK):**
-```json
-{
-    "status": "healthy"
-}
-```
-
----
 
 ### Local Command Server (Camera Side)
 
