@@ -787,6 +787,7 @@ elif lying_down and not (in_safe_area or in_bed_area or in_couch_area or in_benc
     return "unsafe"  # Lying outside safe zone
 else:
     return "normal"
+```
 
 ### Safety Decision Flow Diagram
 
