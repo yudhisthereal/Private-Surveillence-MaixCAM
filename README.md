@@ -193,13 +193,7 @@ graph TB
     StateReporter -->|"HTTP POST<br/>State"| API
     PingWorker -->|"HTTP POST<br/>Ping"| API
 
-    StateSync -->|"HTTP GET<br/>Flags"| API
-    StateSync -->|"HTTP GET<br/>Safe Areas"| API
-    StateSync -->|"HTTP GET<br/>Bed Areas"| API
-    StateSync -->|"HTTP GET<br/>Couch Areas"| API
-    StateSync -->|"HTTP GET<br/>Floor Areas"| API
-    StateSync -->|"HTTP GET<br/>Chair Areas"| API
-    StateSync -->|"HTTP GET<br/>Bench Areas"| API
+    StateSync -->|"HTTP GET<br/>Flags, Safe Areas, Bed Areas,<br/>Couch Areas, Floor Areas,<br/>Chair Areas, Bench Areas"| API
 
     API -.->|Commands| StateSync
     Dashboard -->|MJPEG Stream| Display
@@ -214,7 +208,7 @@ graph TB
 
     class Cam camera
     class Det,Pose,Track ai
-    class Fall,SafeArea,BedArea,FloorArea,SafetyJudge safety
+    class Fall,SafeArea,BedArea,BenchArea,FloorArea,SafetyJudge safety
     class BG,Mask,Merge privacy
     class StateSync,StateReporter,FrameUpload,TrackSender,PingWorker workers
     class Record,Display output
@@ -675,17 +669,17 @@ flowchart TD
     Ratios --> Check1{"Torso < 30° AND<br/>Thigh < 40°?"}
 
     Check1 -- Yes --> SubCheck1{"Thigh/Calf < 0.7?"}
-    SubCheck1 -- Yes --> Sitting([Sitting])
+    SubCheck1 -- Yes --> Sitting(["Sitting"])
     SubCheck1 -- No --> SubCheck2{"Torso/Leg < 0.5?"}
-    SubCheck2 -- Yes --> Bending([Bending Down])
-    SubCheck2 -- No --> Standing([Standing])
+    SubCheck2 -- Yes --> Bending(["Bending Down"])
+    SubCheck2 -- No --> Standing(["Standing"])
 
     Check1 -- No --> Check2{"Torso < 30° AND<br/>Thigh >= 40°?"}
     Check2 -- Yes --> Sitting
-
+    
     Check2 -- No --> Check3{"30° <= Torso < 80° AND<br/>Thigh < 60°?"}
-    Check3 -- Yes --> Bending([Bending Down])
-    Check3 -- No --> Lying([Lying Down])
+    Check3 -- Yes --> Bending(["Bending Down"])
+    Check3 -- No --> Lying(["Lying Down"])
 
     classDef process fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#000000
     classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000000
@@ -717,15 +711,15 @@ flowchart TD
     
     Motion --> AlgoSelection{"Fall Algorithm?"}
     
-    AlgoSelection -- Algo 1<br/>(BBox Only) --> CheckMotion1{"Motion Detected?"}
+    AlgoSelection -- "Algo 1<br/>(BBox Only)" --> CheckMotion1{"Motion Detected?"}
     CheckMotion1 -- Yes --> Count1["Counter + 1"]
     CheckMotion1 -- No --> Dec1["Counter - 1"]
     Count1 --> Thres1{"Counter >= 2?"}
     Dec1 --> Thres1
-    Thres1 -- Yes --> Fall([FALL DETECTED])
-    Thres1 -- No --> NoFall([Normal])
+    Thres1 -- Yes --> Fall(["FALL DETECTED"])
+    Thres1 -- No --> NoFall(["Normal"])
 
-    AlgoSelection -- Algo 2<br/>(Motion + Pose) --> CheckMotion2{"Motion Detected?"}
+    AlgoSelection -- "Algo 2<br/>(Motion + Pose)" --> CheckMotion2{"Motion Detected?"}
     CheckMotion2 -- Yes --> StrictPose{"Strict Pose?<br/>(Torso>80°, Thigh>60°)"}
     StrictPose -- Yes --> Strong["Strong Evidence<br/>Counter + 2"]
     StrictPose -- No --> Moderate["Moderate Evidence<br/>Counter + 1"]
@@ -793,26 +787,26 @@ else:
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> Fall{Fall Detected?}
-    Fall -- Yes --> UnsafeFall[Status: FALL]
-    Fall -- No --> Lying{Lying Down?}
+    Start(["Start"]) --> Fall{"Fall Detected?"}
+    Fall -- Yes --> UnsafeFall["Status: FALL"]
+    Fall -- No --> Lying{"Lying Down?"}
 
-    Lying -- Yes --> Floor{In Floor Area?}
-    Floor -- Yes --> UnsafeFloor[Status: UNSAFE<br/>(Lying on Floor)]
-    Floor -- No --> SafeResting{In Bed/Couch/Bench?}
+    Lying -- Yes --> Floor{"In Floor Area?"}
+    Floor -- Yes --> UnsafeFloor["Status: UNSAFE<br/>(Lying on Floor)"]
+    Floor -- No --> SafeResting{"In Bed/Couch/Bench?"}
     
-    SafeResting -- Yes --> SmartCheck{Smart Sleep Check?}
-    SmartCheck -- Unsafe --> UnsafeSleep[Status: UNSAFE<br/>(Sleep Alert)]
+    SafeResting -- Yes --> SmartCheck{"Smart Sleep Check?"}
+    SmartCheck -- Unsafe --> UnsafeSleep["Status: UNSAFE<br/>(Sleep Alert)"]
     SmartCheck -- Safe --> Safe
     
-    SafeResting -- No --> SafeZone{In Safe Area?}
-    SafeZone -- No --> UnsafeSafe[Status: UNSAFE<br/>(Lying Outside Safe)]
-    SafeZone -- Yes --> Safe[Status: SAFE]
+    SafeResting -- No --> SafeZone{"In Safe Area?"}
+    SafeZone -- No --> UnsafeSafe["Status: UNSAFE<br/>(Lying Outside Safe)"]
+    SafeZone -- Yes --> Safe["Status: SAFE"]
 
-    Lying -- No --> Sitting{Sitting?}
-    Sitting -- Yes --> SeatCheck{In Chair/Couch/Bench?}
+    Lying -- No --> Sitting{"Sitting?"}
+    Sitting -- Yes --> SeatCheck{"In Chair/Couch/Bench?"}
     SeatCheck -- Yes --> Safe
-    SeatCheck -- No --> BedCheck{In Bed Area?}
+    SeatCheck -- No --> BedCheck{"In Bed Area?"}
     
     BedCheck -- Yes --> SmartCheck
     BedCheck -- No --> Safe
