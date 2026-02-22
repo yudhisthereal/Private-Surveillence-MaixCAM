@@ -36,6 +36,7 @@ This project is one component of a three-part distributed system:
 | Component | Repository | Description | Status |
 |-----------|------------|-------------|--------|
 | **Camera** | [private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM) | Edge device with pose estimation, fall detection, and privacy protection | ✅ Active |
+| **Analytics Server** (Optional) | [encrypted-anomaly-detection](https://github.com/yudhisthereal/encrypted-anomaly-detection/) | Intermediate server for polynomial evaluation of encrypted features | ✅ Active |
 | **Streaming Server** | [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/) | Web interface for caregivers to monitor patients | ✅ Active |
 
 ## ✨ Features
