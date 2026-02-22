@@ -1401,14 +1401,6 @@ Request privacy-preserving pose analysis using encrypted features.
     "track_id": 1,
     "camera_id": "camera_001",
     "use_hme": true,
-    "encrypted_features": {
-        "Tra": [c1, c2],
-        "Tha": [c1, c2],
-        "Thl": [c1, c2],
-        "cl": [c1, c2],
-        "Trl": [c1, c2],
-        "ll": [c1, c2]
-    },
     "bbox": [x, y, width, height]
 }
 ```
@@ -1443,14 +1435,6 @@ Request privacy-preserving fall detection using encrypted features.
     "previous_bbox": [x, y, width, height],
     "elapsed_ms": 33.33,
     "use_hme": true,
-    "encrypted_features": {
-        "Tra": [c1, c2],
-        "Tha": [c1, c2],
-        "Thl": [c1, c2],
-        "cl": [c1, c2],
-        "Trl": [c1, c2],
-        "ll": [c1, c2]
-    }
 }
 ```
 

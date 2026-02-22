@@ -76,15 +76,7 @@ POSE_ANALYSIS_INTERVAL_MS = 50
 INPUT_WIDTH = 320
 INPUT_HEIGHT = 224
 
-# ============================================
-# ANALYTICS SERVER CONFIGURATION (loaded from .env)
-# ============================================
-ANALYTICS_SERVER_IP = os.getenv("ANALYTICS_SERVER_IP", "102.127.136.213")
-ANALYTICS_SERVER_PORT = int(os.getenv("ANALYTICS_SERVER_PORT", "5000"))
-ANALYTICS_API_URL = f"http://{ANALYTICS_SERVER_IP}:{ANALYTICS_SERVER_PORT}"
-ANALYTICS_TIMEOUT = 10
-ANALYTICS_RETRY_COUNT = 3
-ANALYTICS_RETRY_BACKOFF = 1.0  # seconds
+
 
 def get_local_ip():
     """Get local IP address"""

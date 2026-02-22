@@ -156,7 +156,7 @@ def update_tracks(objs, current_time_ms=None):
     
     return tracks
 
-def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton_saver=None, frame_id=0, fps=30, analytics_mode=False, safety_judgment=None):
+def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton_saver=None, frame_id=0, fps=30, safety_judgment=None):
     """Process a single track - handle fall detection and safety checking
 
     Args:
@@ -166,13 +166,10 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
         skeleton_saver: SkeletonSaver2D instance for recording
         frame_id: Current frame ID
         fps: Current FPS for fall detection
-        analytics_mode: If True, use AnalyticsWorker results; if False, use local fall detection
         safety_judgment: SafetyJudgment instance that combines all area checkers
     """
     global online_targets, fall_ids, unsafe_ids, current_fps, fall_states
     
-    # Initialize encrypted_features for all code paths
-    encrypted_features = None
     pose_label = "unknown"
     safety_reason = "normal"
     safety_details = {}
@@ -182,22 +179,6 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
     
     if track.lost:
         return None
-    
-    # Import analytics functions here to avoid circular imports
-    from workers import get_analytics_pose_data, get_analytics_fall_data, is_analytics_server_available
-    
-    # Determine if we should use HME (only when analytics server is available)
-    # use_hme is True only when:
-    # 1. Analytics server is reachable (is_analytics_server_available())
-    # 2. hme flag is set in control_manager
-    # Otherwise, use_hme is False and we do local processing only
-    use_hme = False
-    try:
-        from control_manager import get_flag
-        if is_analytics_server_available():
-            use_hme = get_flag("hme", False)
-    except ImportError:
-        pass
     
     # Find corresponding YOLO object
     # We want to associate the Tracked Object (detector) with a Pose Object (extractor)
@@ -252,8 +233,7 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                     "keypoints_np": keypoints_np,
                     "pose_label": "unknown",  # Unknown due to incomplete keypoints
                     "status": "tracking",
-                    "encrypted_features": None,
-                    "use_hme": use_hme,
+                    "int_features": None,
                     "safety_reason": "normal",
                     "safety_details": {}
                 }
@@ -267,22 +247,20 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
             except ImportError:
                 pass
 
-            # Determine status based on analytics_mode and use_analytics result
-            if analytics_mode:
-                # In analytics mode, use AnalyticsWorker results
-                use_analytics = False
-
-                # Get analytics data from shared state
-                analytics_pose = get_analytics_pose_data(track.id)
-                analytics_fall = get_analytics_fall_data(track.id)
-
-                if analytics_pose and analytics_fall:
-                    # Analytics server has results for this track
-                    pose_label = analytics_pose.get("label", "unknown")
-
-                    # Check fall detection results from analytics server
-                    fall_detected_method1 = analytics_fall.get("fall_detected_method1", False)
-                    fall_detected_method2 = analytics_fall.get("fall_detected_method2", False)
+            # Determine status
+            pose_label = "unknown"
+            int_features = None
+            
+            # Use local fall detection
+            if online_targets["bbox"][idx].qsize() >= 2:
+                state = fall_states.get(track.id)
+                fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state)
+                if fall_result:
+                    fall_info, pose_label, int_features, updated_state = fall_result
+                    fall_states[track.id] = updated_state
+                    
+                    (fall_detected_method1, counter_method1,
+                     fall_detected_method2, counter_method2) = fall_info
 
                     # Update fall_ids based on selected fall algorithm
                     fall_detected = False
@@ -294,65 +272,10 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                     if fall_detected:
                         fall_ids.add(track.id)
                         unsafe_ids.discard(track.id)
-                        use_analytics = True
                     else:
                         # No fall detected - remove from fall_ids
                         if track.id in fall_ids:
                             fall_ids.discard(track.id)
-                        use_analytics = True
-
-                if not use_analytics:
-                    # Analytics server not available or no data yet, fall back to local processing
-                    if online_targets["bbox"][idx].qsize() >= 2:
-                        state = fall_states.get(track.id)
-                        fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state)
-                        if fall_result:
-                            fall_info, pose_label, encrypted_features, updated_state = fall_result
-                            fall_states[track.id] = updated_state
-                            
-                            (fall_detected_method1, counter_method1,
-                             fall_detected_method2, counter_method2) = fall_info
-
-                            # Update fall_ids based on selected fall algorithm
-                            fall_detected = False
-                            if fall_algorithm == 1:
-                                fall_detected = fall_detected_method1
-                            elif fall_algorithm == 2:
-                                fall_detected = fall_detected_method2
-
-                            if fall_detected:
-                                fall_ids.add(track.id)
-                                unsafe_ids.discard(track.id)
-                            else:
-                                # No fall detected - remove from fall_ids
-                                if track.id in fall_ids:
-                                    fall_ids.discard(track.id)
-            else:
-                # Not in analytics mode, use local fall detection
-                if online_targets["bbox"][idx].qsize() >= 2:
-                    state = fall_states.get(track.id)
-                    fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state)
-                    if fall_result:
-                        fall_info, pose_label, encrypted_features, updated_state = fall_result
-                        fall_states[track.id] = updated_state
-                        
-                        (fall_detected_method1, counter_method1,
-                         fall_detected_method2, counter_method2) = fall_info
-
-                        # Update fall_ids based on selected fall algorithm
-                        fall_detected = False
-                        if fall_algorithm == 1:
-                            fall_detected = fall_detected_method1
-                        elif fall_algorithm == 2:
-                            fall_detected = fall_detected_method2
-
-                        if fall_detected:
-                            fall_ids.add(track.id)
-                            unsafe_ids.discard(track.id)
-                        else:
-                            # No fall detected - remove from fall_ids
-                            if track.id in fall_ids:
-                                fall_ids.discard(track.id)
 
             # Safety checking using SafetyJudgment (only if not already marked as fall)
             if track.id not in fall_ids:
@@ -438,8 +361,6 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                 "keypoints_np": keypoints_np,
                 "pose_label": pose_label,  # Return pose label for analytics/local processing
                 "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking"),
-                "encrypted_features": encrypted_features,  # Encrypted features for analytics server (when use_hme=True)
-                "use_hme": use_hme,  # Whether HME is enabled (True only when analytics server is available)
                 "safety_reason": safety_reason,
                 "safety_details": safety_details
             }
@@ -453,10 +374,9 @@ def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
     """Check for fall using track history
     
     Returns:
-        tuple: (fall_info, pose_label, encrypted_features, updated_state)
+        tuple: (fall_info, pose_label, updated_state)
                - fall_info: Fall detection result tuple
                - pose_label: Pose classification label
-               - encrypted_features: Dict of encrypted features when use_hme=True, else None
                - updated_state: Updated fall detection state dict
     """
     global current_fps, pose_estimator
@@ -466,7 +386,7 @@ def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
     
     pose_data = None
     pose_label = "unknown"
-    encrypted_features = None
+    int_features = None
     
     # Get keypoints from history
     if not track_history["points"][idx].empty():
@@ -477,23 +397,15 @@ def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
             
             # Evaluate pose using PoseEstimation
             try:
-                # Check if HME mode is enabled (for analytics/encrypted features only)
-                use_hme_for_analytics = False
-                try:
-                    from control_manager import get_flag
-                    use_hme_for_analytics = get_flag("hme", False)
-                except ImportError:
-                    pass
-
-                # Evaluate pose with keypoints (always use plain mode for fall detection)
-                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints), use_hme=False)
+                # Evaluate pose with keypoints
+                pose_data = pose_estimator.evaluate_pose(np.array(latest_keypoints))
 
                 # Extract label from pose_data
                 if pose_data is not None:
                     pose_label = pose_data.get('plain_label', 'unknown')
-                    # Get encrypted features when HME is enabled for analytics
-                    if use_hme_for_analytics:
-                        encrypted_features = pose_estimator.get_encrypted_features()
+                    # Get features when HME is enabled for Caregiver payload or Analytics
+                    # Since use_hme is hardcoded to True, we always get int_features
+                    int_features = pose_estimator.get_int_features()
             except ImportError:
                 # Fallback if pose_estimation not available
                 pass
@@ -518,49 +430,16 @@ def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
     counter_motion_pose_and = result[3]
     updated_state = result[4]
     
-    # Reconstruct fall_info tuple expected by other parts of the system
-    # Note: get_fall_info used to return 4 values, now 5.
-    # The caller expects fall_info to be used in update_fall_counters.
-    # update_fall_counters expects 6 values? Wait, let's check judge_fall.py again.
-    # judge_fall.py returned 4 values. update_fall_counters unpacks 6?
-    # Let's check update_fall_counters in tracking.py.
-    
-    # tracking.py:
-    # def update_fall_counters(fall_info):
-    # (fall_detected_method1, counter_method1,
-    #  fall_detected_method2, counter_method2,
-    #  fall_detected_method3, counter_method3) = fall_info
-    
-    # Wait, get_fall_info in judge_fall.py (ORIGNAL) returned 4 values.
-    #     return (
-    #         fall_detected_bbox_only, counter_bbox_only,
-    #         fall_detected_motion_pose_and, counter_motion_pose_and
-    #     )
-    
-    # But update_fall_counters unpacks 6. This implies there's a mismatch or I misread something.
-    # Let's check update_fall_counters again.
-    # It likely expects more, or get_fall_info logic has changed in the past.
-    # The user didn't mention this was broken, but it looks suspicious.
-    # Or maybe update_fall_counters is used with analytics data which has 3 methods.
-    
-    # In process_track (lines 241-242):
-    # (fall_detected_method1, counter_method1,
-    #  fall_detected_method2, counter_method2) = fall_info
-    # Process track unpacks 4 values!
-    
-    # So update_fall_counters unpacking 6 is likely for analytics return or unused/broken code?
-    # Ah, update_fall_counters is defined but where is it used?
-    # I grepped get_fall_info usage, but not update_fall_counters usage.
-    # It's not called in process_track.
-    
-    # Anyway, I should return fall_info as a tuple of 4 to match process_track expectation.
-    
-    fall_info = (
-        fall_detected_bbox_only, counter_bbox_only,
-        fall_detected_motion_pose_and, counter_motion_pose_and
-    )
-    
-    return fall_info, pose_label, encrypted_features, updated_state
+    # Actually in judge_fall.py, it expects the exact return. We must just return what is needed.
+    # Original get_fall_info returns either 4 or 6. We unpack based on the caller of check_fall.
+    # The caller of check_fall is process_track, which unpacks 4 values:
+    # fall_info, pose_label, updated_state = fall_result
+    # We will expand it to 5 to pass int_features.
+
+    # fall_info can just be whatever get_fall_info returned, minus the 'state' which is the last element
+    fall_info = result[:-1] 
+
+    return fall_info, pose_label, int_features, updated_state
 
 def update_fall_counters(fall_info):
     """Update fall counters and IDs based on fall detection result"""

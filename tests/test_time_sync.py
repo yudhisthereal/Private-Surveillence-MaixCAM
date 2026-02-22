@@ -19,11 +19,8 @@ class TestTimeSync(unittest.TestCase):
         mock_response.status_code = 200
         mock_response.json.return_value = {"time": "23:45", "timezone": "Asia/Jakarta"}
         mock_get.return_value = mock_response
-        
-        # Test with dummy URL in env
-        # with patch.dict(os.environ, {"ANALYTICS_API_URL": "http://mock-server/api"}):
-        #    print(f"DEBUG Test: URL={os.environ.get('ANALYTICS_API_URL')}")
-        #    time_str = get_current_time_str("cam1")
+        # Use patch.dict to safely mock os.environ without modifying the actual environment
+        # with patch.dict(os.environ, {"STREAMING_SERVER_URL": "http://mock-server"}):
             
         # self.assertEqual(time_str, "23:45")
         print("Skipping server success test as endpoint is not ready.")
@@ -38,7 +35,7 @@ class TestTimeSync(unittest.TestCase):
         now = datetime.now()
         expected_local = f"{now.hour:02d}:{now.minute:02d}"
         
-        with patch.dict(os.environ, {"ANALYTICS_API_URL": "http://mock-server/api"}):
+        with patch.dict(os.environ, {"STREAMING_SERVER_URL": "http://mock-server/api"}):
             time_str = get_current_time_str("cam1")
             
         self.assertEqual(time_str, expected_local)
@@ -47,8 +44,6 @@ class TestTimeSync(unittest.TestCase):
     def test_no_url_fallback(self):
         # Test when no URL is configured
         with patch.dict(os.environ, {}, clear=True):
-             # clear=True removes all env vars including ANALYTICS_API_URL
-            
             # Get actual local time for comparison
             now = datetime.now()
             expected_local = f"{now.hour:02d}:{now.minute:02d}"

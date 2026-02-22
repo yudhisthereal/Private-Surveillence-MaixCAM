@@ -14,6 +14,30 @@ class PoseEstimation:
     p1 = 234406548094233827948571379965547188853
     q1 = 583457592311129510314141861330330044443
     u = 2355788435550222327802749264573303139783
+    
+    r = 696522972436164062959242838052087531431
+    s = 374670603170509799404699393785831797599
+    t = 443137959904584298054176676987615849169
+    w = 391475886865055383118586393345880578361
+
+    n1 = p1 * q1 * r * s * t * w
+    pinvq = 499967064455987294076532081570894386372
+    qinvp = 33542671637141449679641257954160235148
+    n11 = p1 * q1
+    gu = u.bit_length() // 2
+
+    np1prod = q1 * r * s * t * w
+    nq1prod = p1 * r * s * t * w
+    nrprod = p1 * q1 * s * t * w
+    nsprod = p1 * q1 * r * t * w
+    ntprod = p1 * q1 * r * s * w
+    nwprod = p1 * q1 * r * t * s
+    invnp1 = 205139046479782337030801215788009754117
+    invnq1 = 429235397156384978572995593851807405098
+    invnr = 592155359269217457562309991915739180471
+    invns = 115186784058467557094932562011798848762
+    invnt = 51850665316568177665825586294193267244
+    invnw = 44855536902472009823152313099539628632
 
     def __init__(self, keypoints_window_size=5, missing_value=-1, hme_enabled=True):
         self.keypoints_map_deque = deque(maxlen=keypoints_window_size)
@@ -25,7 +49,7 @@ class PoseEstimation:
         self.thigh_calf_ratio_threshold = 0.7
         self.torso_leg_ratio_threshold = 0.5
 
-    def feed_keypoints_17(self, keypoints_17, use_hme=None):
+    def feed_keypoints_17(self, keypoints_17):
         try:
             keypoints = np.array(keypoints_17).reshape((-1, 2))
             if keypoints.shape != (17, 2):
@@ -44,8 +68,7 @@ class PoseEstimation:
             'Right Ankle': keypoints[16]
         }
 
-        hme_mode = use_hme if use_hme is not None else self.hme_enabled
-        return self.feed_keypoints_map(kp_map, hme_mode)
+        return self.feed_keypoints_map(kp_map)
 
     def _calculate_limb_lengths_and_ratios(self, km):
         try:
@@ -120,7 +143,7 @@ class PoseEstimation:
 
         return label, pose_code, flags
 
-    def feed_keypoints_map(self, keypoints_map, use_hme=True):
+    def feed_keypoints_map(self, keypoints_map):
         # Note: Visibility check is now handled in tracking.py's should_process_track()
         # before calling pose classification. This function now only handles pose estimation.
         
@@ -180,40 +203,100 @@ class PoseEstimation:
                 'plain_comparison_flags': flags,
                 'label': plain_label,
                 'pose_code': plain_code,
-                'hme_enabled': use_hme,
+                'hme_enabled': True,  # HME always enabled
                 'hme_label_received': False,
                 'hme_label': None,
                 'timestamp': time.time(),
                 'frame_complete': True
             }
 
-            if use_hme:
-                Tra = self._truncate(torso_angle)
-                Tha = self._truncate(thigh_uprightness)
-                Thl = self._truncate(thigh_len)
-                cl = self._truncate(calf_len)
-                Trl = self._truncate(torso_h)
-                ll = self._truncate(leg_len)
+            # Production flow: extract actual characteristics for caregiver/analytics
+            Tra = self._truncate(torso_angle)
+            Tha = self._truncate(thigh_uprightness)
+            Thl = self._truncate(thigh_len)
+            cl = self._truncate(calf_len)
+            Trl = self._truncate(torso_h)
+            ll = self._truncate(leg_len)
 
-                self.pose_data['int_features'] = {
-                    'Tra': Tra, 'Tha': Tha,
-                    'Thl': Thl, 'cl': cl,
-                    'Trl': Trl, 'll': ll
-                }
+            # Store as array in exact order: [Tra, Tha, Thl, cl, Trl, ll]
+            self.pose_data['int_features'] = [Tra, Tha, Thl, cl, Trl, ll]
 
-                self.pose_data['encrypted_features'] = {
-                    'Tra': self._encrypt_simple(Tra),
-                    'Tha': self._encrypt_simple(Tha),
-                    'Thl': self._encrypt_simple(Thl),
-                    'cl': self._encrypt_simple(cl),
-                    'Trl': self._encrypt_simple(Trl),
-                    'll': self._encrypt_simple(ll)
-                }
+            # Testing flow: Local simulation of Caregiver and Analytics Server operations
+            
+            # Caregiver: Encrypting skeleton features
+            Tra1, Tra2 = self._Enc1(Tra)
+            Tha1, Tha2 = self._Enc1(Tha)
+            Thl1, Thl2 = self._Enc1(Thl)
+            cl1, cl2 = self._Enc1(cl)
+            Trl1, Trl2 = self._Enc1(Trl)
+            ll1, ll2 = self._Enc1(ll)
 
-                self.status = ['plain_fallback', 'hme_pending']
+            # Analytics: Comparison operations 
+            T301, T302 = self._priv_comp_an(Tra1, Tra2, 3000)        
+            T401, T402 = self._priv_comp_an(Tha1, Tha2, 4000)      
+            T801, T802 = self._priv_comp_an(Tra1, Tra2, 8000)
+            T601, T602 = self._priv_comp_an(Tha1, Tha2, 6000)
+            TC1, TC2 = self._priv_comp1_an(Thl1 * 10, Thl2 * 10, cl1 * 7, cl2 * 7)
+            TL1, TL2 = self._priv_comp1_an(Trl1 * 10, Trl2 * 10, ll1 * 5, ll2 * 5)      
+
+            # Caregiver: Comparison Operations and encrypting comparison result
+            T30 = self._priv_comp_cg(T301, T302)
+            T40 = self._priv_comp_cg(T401, T402)
+            T80 = self._priv_comp_cg(T801, T802)
+            T60 = self._priv_comp_cg(T601, T602)
+            TC = self._priv_comp1_cg(TC1, TC2)
+            TL = self._priv_comp1_cg(TL1, TL2)
+            
+            c11, c21, c31, c41, c51, c61 = self._Enc(T30)  # a
+            c12, c22, c32, c42, c52, c62 = self._Enc(T40)  # b
+            c13, c23, c33, c43, c53, c63 = self._Enc(T80)  # c
+            c14, c24, c34, c44, c54, c64 = self._Enc(TC)   # d
+            c15, c25, c35, c45, c55, c65 = self._Enc(TL)   # e
+            c16, c26, c36, c46, c56, c66 = self._Enc(T60)  # f
+
+            # Analytics: Polynomial evaluation
+            # Polynomial evaluation for LSB
+            pr1l = (c11 * c12 * c14) + (c11 * (1 - c12)) + (1 - c13) + ((1 - c11) * c13 * (1 - c16))
+            pr2l = (c21 * c22 * c24) + (c21 * (1 - c22)) + (1 - c23) + ((1 - c21) * c23 * (1 - c26))
+            pr3l = (c31 * c32 * c34) + (c31 * (1 - c32)) + (1 - c33) + ((1 - c31) * c33 * (1 - c36))
+            pr4l = (c41 * c42 * c44) + (c41 * (1 - c42)) + (1 - c43) + ((1 - c41) * c43 * (1 - c46))
+            pr5l = (c51 * c52 * c54) + (c51 * (1 - c52)) + (1 - c53) + ((1 - c51) * c53 * (1 - c56))
+            pr6l = (c61 * c62 * c64) + (c61 * (1 - c62)) + (1 - c63) + ((1 - c61) * c63 * (1 - c66))
+            
+            # Polynomial evaluation for MSB
+            pr1m = (c11 * c12 * (1 - c14) * c15) + ((1 - c11) * c13 * c16) + (1 - c13) + ((1 - c11) * c13 * (1 - c16))
+            pr2m = (c21 * c22 * (1 - c24) * c25) + ((1 - c21) * c23 * c26) + (1 - c23) + ((1 - c21) * c23 * (1 - c26))
+            pr3m = (c31 * c32 * (1 - c34) * c35) + ((1 - c31) * c33 * c36) + (1 - c33) + ((1 - c31) * c33 * (1 - c36))
+            pr4m = (c41 * c42 * (1 - c44) * c45) + ((1 - c41) * c43 * c46) + (1 - c43) + ((1 - c41) * c43 * (1 - c46))
+            pr5m = (c51 * c52 * (1 - c54) * c55) + ((1 - c51) * c53 * c56) + (1 - c53) + ((1 - c51) * c53 * (1 - c56))
+            pr6m = (c61 * c62 * (1 - c64) * c65) + ((1 - c61) * c63 * c66) + (1 - c63) + ((1 - c61) * c63 * (1 - c66))
+            
+            # Computing the class from MSB and LSB
+            pr1 = pr1m * 2 + pr1l
+            pr2 = pr2m * 2 + pr2l
+            pr3 = pr3m * 2 + pr3l
+            pr4 = pr4m * 2 + pr4l
+            pr5 = pr5m * 2 + pr5l
+            pr6 = pr6m * 2 + pr6l
+
+            # Caregiver: Decryption to get the pose
+            mout = self._decmul(pr1, pr2, pr3, pr4, pr5, pr6)
+            if mout == 0:
+                pose = "standing"
+            elif mout == 1:
+                pose = "sitting"
+            elif mout == 2:
+                pose = "bending_down"
+            elif mout == 3:
+                pose = "lying_down" 
             else:
-                self.status = ['plain_only']
+                pose = "unknown"
 
+            # Store both the test label and mark the fallback/pending status as handled!
+            self.pose_data['hme_testing_label'] = pose
+
+            self.status = ['hme_testing_verified']
+            
             return self.pose_data
 
         except Exception:
@@ -224,45 +307,90 @@ class PoseEstimation:
     def _truncate(self, num):
         return math.trunc(num * 100)
 
-    def _encrypt_simple(self, m):
+    def _Enc(self, m):
         g = random.randint(1, 2**32 - 1)
-        return [
-            ((g * self.u) + m) % self.p1,
-            ((g * self.u) + m) % self.q1
-        ]
+        c1 = ((g * self.u) + m) % self.p1
+        c2 = ((g * self.u) + m) % self.q1
+        c3 = ((g * self.u) + m) % self.r
+        c4 = ((g * self.u) + m) % self.s
+        c5 = ((g * self.u) + m) % self.t
+        c6 = ((g * self.u) + m) % self.w
+        return c1, c2, c3, c4, c5, c6
 
-    def evaluate_pose(self, keypoints, use_hme=None):
-        return self.feed_keypoints_17(keypoints, use_hme)
+    def _decmul(self, c1, c2, c3, c4, c5, c6):
+        mout = ((((c1 % self.p1) * self.invnp1 * self.np1prod) + 
+                 ((c2 % self.q1) * self.invnq1 * self.nq1prod) + 
+                 ((c3 % self.r) * self.invnr * self.nrprod) + 
+                 ((c4 % self.s) * self.invns * self.nsprod) + 
+                 ((c5 % self.t) * self.invnt * self.ntprod) + 
+                 ((c6 % self.w) * self.invnw * self.nwprod)) % self.n1) 
+        if mout > self.n1 // 2:
+            mout = mout - self.n1
+        mout = mout % self.u
+        return mout
 
-    def get_encrypted_features(self):
-        """Get encrypted features as a JSON-serializable dictionary.
-        
-        Returns:
-            dict: Encrypted features suitable for JSON transmission, or None if not available.
-                  Format: {'Tra': [c1, c2], 'Tha': [c1, c2], 'Thl': [c1, c2], ...}
-        """
-        if not self.pose_data:
-            return None
-        encrypted = self.pose_data.get('encrypted_features')
-        if not encrypted:
-            return None
-        # Ensure all values are plain Python lists (not numpy arrays) for JSON serialization
-        return {k: [int(v[0]), int(v[1])] if isinstance(v, (list, tuple, np.ndarray)) and len(v) == 2 else v 
-                for k, v in encrypted.items()}
+    def _Enc1(self, m):
+        g = random.randint(1, 2**32 - 1)
+        cth1 = ((g * self.u) + m) % self.p1
+        cth2 = ((g * self.u) + m) % self.q1
+        return cth1, cth2
+
+    def _priv_comp_an(self, cth1, cth2, cs):
+        r1 = random.randint(1, 2**22 - 1)
+        r2 = random.randint(1, 2**10 - 1)
+        c111 = r2 + (r1 * 2 * (cth1 - cs))
+        c121 = r2 + (r1 * 2 * (cth2 - cs))
+        return c111, c121 
+
+    def _priv_comp_cg(self, c111, c121):
+        mout = ((((c111 % self.p1) * self.qinvp * self.q1) + ((c121 % self.q1) * self.pinvq * self.p1)) % self.n11) % self.u
+        rn = (mout + self.u) % self.u
+        tg = rn.bit_length()
+        if self.gu > tg:
+            gcomp = 0
+        elif self.gu < tg:
+            gcomp = 1
+        else: 
+            gcomp = -1
+        return gcomp       
+
+    def _priv_comp1_an(self, cth11, cth21, cth3, cth4):
+        r1 = random.randint(1, 2**22 - 1)
+        r2 = random.randint(1, 2**10 - 1)
+        c11 = r2 + (r1 * 2 * (cth11 - cth3))
+        c12 = r2 + (r1 * 2 * (cth21 - cth4))
+        return c11, c12 
+       
+    def _priv_comp1_cg(self, c11, c12):
+        mout = ((((c11 % self.p1) * self.qinvp * self.q1) + ((c12 % self.q1) * self.pinvq * self.p1)) % self.n11) 
+        if mout > self.n11 // 2:
+            mout = mout - self.n11
+        mout = mout % self.u
+        tg = mout.bit_length()
+        if self.gu > tg:
+            gcomp1 = 0
+        elif self.gu < tg:
+            gcomp1 = 1
+        else:
+            gcomp1 = -1
+        return gcomp1
+
+    def evaluate_pose(self, keypoints):
+        return self.feed_keypoints_17(keypoints)
     
     def get_int_features(self):
-        """Get integer features (before encryption) as a JSON-serializable dictionary.
+        """Get integer features (before encryption) as a JSON-serializable list.
         
         Returns:
-            dict: Integer features scaled by 100, or None if not available.
-                  Format: {'Tra': int_val, 'Tha': int_val, 'Thl': int_val, ...}
+            list: Integer features scaled by 100, or None if not available.
+                  Format: [Tra, Tha, Thl, cl, Trl, ll]
         """
         if not self.pose_data:
             return None
         int_features = self.pose_data.get('int_features')
         if not int_features:
             return None
-        return {k: int(v) for k, v in int_features.items()}
+        return [int(v) for v in int_features]
 
     def get_plain_label(self):
         return self.pose_data.get('plain_label') if self.pose_data else None

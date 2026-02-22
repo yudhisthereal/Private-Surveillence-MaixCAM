@@ -24,7 +24,6 @@ class WebServer:
             "show_bed_areas": False,
             "show_floor_areas": False,
             "use_safety_check": True,
-            "analytics_mode": True,
             "fall_algorithm": 1,
             "check_method": 3,  # CheckMethod.TORSO_HEAD
             "hme": False

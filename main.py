@@ -34,8 +34,8 @@ from control_manager import (
 from workers import (
     CameraStateSyncWorker, StateReporterWorker, FrameUploadWorker,
     CommandReceiver, PingWorker, get_received_commands, handle_command,
-    update_is_recording, AnalyticsWorker,
-    send_track_to_analytics, is_analytics_server_available, set_analytics_queue, TracksSenderWorker,
+    update_is_recording,
+    TracksSenderWorker,
     set_tracks_worker, update_latest_tracks, mark_tracks_as_ready
 )
 from tracking import (
@@ -263,7 +263,6 @@ def main():
     chair_areas_queue = queue.Queue(maxsize=5)
     couch_areas_queue = queue.Queue(maxsize=5)
     bench_areas_queue = queue.Queue(maxsize=5)
-    analytics_queue = queue.Queue(maxsize=20)  # Queue for analytics worker
 
     # Start command server
     command_receiver = CommandReceiver()
@@ -286,17 +285,7 @@ def main():
     frame_upload_worker.start()
     ping_worker.start()
 
-    # Start Analytics Worker (only if analytics_mode is True)
-    analytics_worker = None
-    if get_flag("analytics_mode", False):
-        # Register the analytics queue with the workers module
-        set_analytics_queue(analytics_queue)
-        analytics_worker = AnalyticsWorker(analytics_queue, CAMERA_ID)
-        analytics_worker.start()
-        logger.print("MAIN", "[Analytics] Worker started (analytics_mode=True)")
-    else:
-        logger.print("MAIN", "[Analytics] Worker NOT started (analytics_mode=False)")
-    
+
     # Start Tracks Sender Worker (always runs to send all tracks to Streaming Server)
     tracks_sender = TracksSenderWorker(CAMERA_ID, profiler_enabled=False)
     set_tracks_worker(tracks_sender)
@@ -364,7 +353,6 @@ def main():
     logger.print("MAIN", "Final Configuration:")
     logger.print("MAIN", "  Camera: %s (%s)", CAMERA_NAME, CAMERA_ID)
     logger.print("MAIN", "  Status: %s", registration_status)
-    logger.print("MAIN", "  Analytics Mode: %s", 'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED')
     logger.print("MAIN", "  Recording: %s", 'ENABLED' if control_flags.get('record') else 'DISABLED')
     logger.print("MAIN", "  UI Rendering: DISABLED (no text/skeleton)")
     logger.print("MAIN", "  Display: DISABLED")
@@ -593,7 +581,6 @@ def main():
                 skeleton_saver=skeleton_saver_2d if is_recording else None,
                 frame_id=frame_id,
                 fps=current_fps,
-                analytics_mode=get_flag("analytics_mode", False),
                 safety_judgment=safety_judgment
             )
             
@@ -610,7 +597,7 @@ def main():
             safety_status = "normal" if status == "tracking" else status
             safety_reason = track_result.get("safety_reason", "normal")
             safety_details = track_result.get("safety_details", {})
-            encrypted_features = track_result.get("encrypted_features")
+            int_features = track_result.get("int_features")
 
             # Create processed track entry with all required data
             processed_track = {
@@ -621,7 +608,7 @@ def main():
                 "safety_status": safety_status,
                 "safety_reason": safety_reason,
                 "safety_details": safety_details,
-                "encrypted_features": encrypted_features  # Include for analytics server, omit when sending to streaming
+                "int_features": int_features
             }
             processed_tracks.append(processed_track)
         
@@ -715,9 +702,8 @@ def main():
             logger.print("MAIN", "Frame %d processed", frame_counter)
             if frame_counter % 60 == 0:
                 control_flags = get_control_flags()
-                logger.print("MAIN", "[STATUS] Flags: record=%s, analytics_mode=%s, fall_algorithm=%s",
+                logger.print("MAIN", "[STATUS] Flags: record=%s, fall_algorithm=%s",
                           control_flags.get('record'),
-                          control_flags.get('analytics_mode'),
                           control_flags.get('fall_algorithm'))
 
     # ============================================
@@ -742,7 +728,6 @@ def main():
     logger.print("MAIN", "Final Configuration:")
     logger.print("MAIN", "  Camera: %s (%s)", CAMERA_NAME, CAMERA_ID)
     logger.print("MAIN", "  Status: %s", registration_status)
-    logger.print("MAIN", "  Analytics Mode: %s", 'ENABLED' if control_flags.get('analytics_mode') else 'DISABLED')
     logger.print("MAIN", "  Recording: %s", 'ENABLED' if control_flags.get('record') else 'DISABLED')
     logger.print("MAIN", "  Fall Algorithm: %s", control_flags.get('fall_algorithm'))
 

@@ -14,7 +14,7 @@ logger = DebugLogger(tag="WORKERS", instance_enable=False)
 from config import (
     FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
-    LOCAL_PORT, ANALYTICS_API_URL
+    LOCAL_PORT
 )
 
 from control_manager import (
@@ -648,7 +648,6 @@ def get_default_control_flags():
         "show_bed_areas": False,
         "show_floor_areas": False,
         "use_safety_check": True,
-        "analytics_mode": True,
         "fall_algorithm": 1,
         "check_method": 3,  # CheckMethod.TORSO_HEAD
         "hme": False
@@ -684,442 +683,21 @@ def get_is_recording():
 
 
 # ============================================
-# ANALYTICS CLIENT AND WORKER
-# ============================================
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-
-class AnalyticsClient:
-    """Client for interacting with the Analytics Server (http://103.127.136.213:5000)
-    
-    Provides pose estimation and fall detection capabilities through REST API endpoints.
-    """
-    
-    def __init__(self, base_url=None, timeout=10, max_retries=3, backoff_factor=1.0):
-        self.base_url = base_url or ANALYTICS_API_URL
-        self.timeout = timeout
-        
-        # Setup session with retry strategy
-        self.session = requests.Session()
-        retry_strategy = Retry(
-            total=max_retries,
-            backoff_factor=backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-    
-    def health_check(self):
-        """Check if the analytics server is healthy.
-        
-        Returns:
-            bool: True if server is healthy, False otherwise
-        """
-        try:
-            endpoint = f"{self.base_url}/api/analytics/health"
-            logger.print("API_REQUEST", "%s | endpoint: /api/analytics/health", "GET")
-            response = self.session.get(
-                endpoint,
-                timeout=self.timeout
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("status") == "healthy"
-            return False
-        except requests.exceptions.RequestException as e:
-            logger.print("ANALYTICS", "Health check failed: %s", e)
-            return False
-    
-    def analyze_pose(self, use_hme=False, encrypted_features=None, bbox=None, track_id=0, camera_id=""):
-        """Analyze pose from encrypted features (HME mode) or skip (plain mode).
-
-        - When use_hme=True: Analyze encrypted features for privacy-preserving pose estimation
-        - When use_hme=False: Returns None (local processing should be used instead)
-
-        Args:
-            use_hme: Whether to use Homomorphic Encryption (must be True to process)
-            encrypted_features: Dictionary of encrypted features - required when use_hme=True
-            bbox: Optional bounding box [x, y, width, height]
-            track_id: Optional track ID for multi-object tracking
-            camera_id: Optional camera identifier
-
-        Returns:
-            dict: Pose analysis result or None on failure/not applicable
-        """
-        # Security check: Never process plain keypoints
-        if not use_hme:
-            # HME disabled means Analytics Server is not being used
-            # Return None to indicate local processing should be used
-            return None
-        
-        # encrypted_features is required when use_hme=True
-        if not encrypted_features:
-            logger.print("ANALYTICS", "Warning: use_hme=True but no encrypted_features provided")
-            return None
-        
-        payload = {
-            "track_id": track_id,
-            "camera_id": camera_id,
-            "use_hme": True,
-            "encrypted_features": encrypted_features
-        }
-        
-        if bbox is not None:
-            payload["bbox"] = bbox
-        
-        try:
-            endpoint = f"{self.base_url}/api/analytics/analyze-pose"
-            logger.print("API_REQUEST", "%s | endpoint: /api/analytics/analyze-pose | payload: track_id=%d, camera_id=%s, encrypted_features=YES", "POST", track_id, camera_id)
-            response = self.session.post(
-                endpoint,
-                json=payload,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.print("ANALYTICS", "Pose analysis failed: %s", e)
-            return None
-
-
-# Shared state for analytics results (thread-safe access)
-_analytics_state = {
-    "pose_data": {},          # track_id -> pose_data mapping
-    "fall_data": {},          # track_id -> fall_data mapping
-    "server_available": False,  # Whether analytics server is reachable
-    "last_health_check": 0     # Timestamp of last successful health check
-}
-_analytics_lock = threading.Lock()
-
-
-def get_analytics_pose_data(track_id):
-    """Get the latest pose data for a track from analytics server.
-    
-    Args:
-        track_id: The track ID to query
-    
-    Returns:
-        dict or None: Pose data for the track, or None if not available
-    """
-    with _analytics_lock:
-        return _analytics_state["pose_data"].get(track_id)
-
-
-def get_analytics_fall_data(track_id):
-    """Get the latest fall detection data for a track from analytics server.
-    
-    Args:
-        track_id: The track ID to query
-    
-    Returns:
-        dict or None: Fall data for the track, or None if not available
-    """
-    with _analytics_lock:
-        return _analytics_state["fall_data"].get(track_id)
-
-
-def is_analytics_server_available():
-    """Check if the analytics server is available.
-    
-    Returns:
-        bool: True if server is available, False otherwise
-    """
-    with _analytics_lock:
-        return _analytics_state["server_available"]
-
-
-class AnalyticsWorker(threading.Thread):
-    """Background worker for fetching pose and fall detection from Analytics Server.
-    
-    This worker is only started if control_flags["analytics_mode"] is True.
-    It receives track data (keypoints, bbox, track_id) from the main thread via a queue,
-    sends it to the Analytics Server for analysis, and updates shared variables with results.
-    
-    The worker runs asynchronously and doesn't block the main processing loop.
-    """
-    
-    def __init__(self, track_queue, camera_id, check_interval_ms=50):
-        super().__init__(daemon=True)
-        self.camera_id = camera_id
-        # Cap check interval to minimum 100ms (10 FPS max) to avoid overwhelming the server
-        actual_interval = max(check_interval_ms, 100)
-        self.check_interval = actual_interval / 1000.0  # Convert to seconds
-        self.running = True
-        self.track_queue = track_queue
-        
-        # Analytics client
-        self.client = AnalyticsClient()
-        
-        # Statistics for monitoring
-        self.pose_requests = 0
-        self.fall_requests = 0
-        self.errors = 0
-        
-        # Health check interval (every 30 seconds)
-        self.health_check_interval = 30.0
-        self.last_health_check = 0
-        
-    def run(self):
-        """Main worker loop - process track data from queue."""
-        logger.print("ANALYTICS_WORKER", "Starting worker for camera: %s", self.camera_id)
-        
-        # Initial health check
-        self._check_health()
-        
-        while self.running:
-            try:
-                # Check if analytics mode is still enabled
-                from control_manager import get_flag
-                if not get_flag("analytics_mode", False):
-                    # Analytics mode disabled, sleep and continue checking
-                    time.sleep(1.0)
-                    continue
-                
-                # Periodic health check
-                current_time = time.time()
-                if current_time - self.last_health_check > self.health_check_interval:
-                    self._check_health()
-                
-                # Check if server is available
-                if not is_analytics_server_available():
-                    # Server not available, sleep and retry later
-                    time.sleep(1.0)
-                    continue
-                
-                # Get next track data from queue (non-blocking)
-                try:
-                    track_data = self.track_queue.get_nowait()
-                    self._process_track(track_data)
-                except queue.Empty:
-                    # No track data available, sleep briefly
-                    time.sleep(0.01)  # 10ms
-                    
-            except Exception as e:
-                logger.print("ANALYTICS_WORKER", "Error in main loop: %s", e)
-                self.errors += 1
-                time.sleep(0.1)  # Sleep on error
-        
-        logger.print("ANALYTICS_WORKER", "Stopped (pose_requests=%d, fall_requests=%d, errors=%d)", self.pose_requests, self.fall_requests, self.errors)
-    
-    def _check_health(self):
-        """Check if analytics server is healthy and update control_flags accordingly."""
-        try:
-            is_healthy = self.client.health_check()
-            with _analytics_lock:
-                _analytics_state["server_available"] = is_healthy
-                if is_healthy:
-                    _analytics_state["last_health_check"] = time.time()
-            
-            # Update control_flags["analytics_mode"] based on server health
-            from control_manager import get_flag, update_control_flag
-            current_mode = get_flag("analytics_mode", False)
-            
-            if is_healthy:
-                if not current_mode:
-                    # Server is healthy, enable analytics mode
-                    update_control_flag("analytics_mode", True)
-                    logger.print("ANALYTICS_WORKER", "Server is healthy: %s - analytics_mode enabled", ANALYTICS_API_URL)
-                else:
-                    logger.print("ANALYTICS_WORKER", "Server is healthy: %s", ANALYTICS_API_URL)
-            else:
-                if current_mode:
-                    # Server is unhealthy, disable analytics mode
-                    update_control_flag("analytics_mode", False)
-                    logger.print("ANALYTICS_WORKER", "Server health check failed - analytics_mode disabled")
-                else:
-                    logger.print("ANALYTICS_WORKER", "Server health check failed")
-        except Exception as e:
-            logger.print("ANALYTICS_WORKER", "Health check error: %s", e)
-            with _analytics_lock:
-                _analytics_state["server_available"] = False
-            # Disable analytics mode on error
-            try:
-                from control_manager import get_flag, update_control_flag
-                if get_flag("analytics_mode", False):
-                    update_control_flag("analytics_mode", False)
-            except:
-                pass
-    
-    def _process_track(self, track_data):
-        """Process a single track data item.
-
-        This method ONLY processes encrypted features. Plain keypoints are never sent.
-
-        Args:
-            track_data: Dictionary containing:
-                - track_id: int
-                - encrypted_features: dict - required for HME mode
-                - bbox: list of [x, y, width, height]
-                - previous_bbox: optional previous bounding box
-                - elapsed_ms: time since last frame in ms
-                - use_hme: bool - must be True
-        """
-        try:
-            track_id = track_data.get("track_id")
-            encrypted_features = track_data.get("encrypted_features")
-            bbox = track_data.get("bbox")
-            previous_bbox = track_data.get("previous_bbox")
-            elapsed_ms = track_data.get("elapsed_ms", 33.33)
-            use_hme = track_data.get("use_hme", False)
-            
-            # Security check: Never process plain keypoints
-            if not use_hme:
-                # HME disabled means we should not be sending data to Analytics Server
-                logger.print("ANALYTICS_WORKER", "Warning: use_hme=False but track_data received for track_id=%d", track_id)
-                return
-            
-            # encrypted_features is required when use_hme=True
-            if not encrypted_features:
-                logger.print("ANALYTICS_WORKER", "Warning: No encrypted_features provided for track_id=%d", track_id)
-                return
-            
-            if not bbox:
-                logger.print("ANALYTICS_WORKER", "Warning: No bbox provided for track_id=%d", track_id)
-                return
-            
-            # Step 1: Analyze pose using encrypted features
-            pose_result = self.client.analyze_pose(
-                use_hme=True,
-                encrypted_features=encrypted_features,
-                bbox=bbox,
-                track_id=track_id,
-                camera_id=self.camera_id
-            )
-            
-            self.pose_requests += 1
-            
-            if pose_result and pose_result.get("status") == "success":
-                pose_data = pose_result.get("pose_data")
-                
-                # Update shared state with pose data
-                with _analytics_lock:
-                    _analytics_state["pose_data"][track_id] = {
-                        "label": pose_data.get("label"),
-                        "torso_angle": pose_data.get("torso_angle"),
-                        "thigh_uprightness": pose_data.get("thigh_uprightness"),
-                        "thigh_calf_ratio": pose_data.get("thigh_calf_ratio"),
-                        "torso_leg_ratio": pose_data.get("torso_leg_ratio"),
-                        "thigh_angle": pose_data.get("thigh_angle"),
-                        "thigh_length": pose_data.get("thigh_length"),
-                        "calf_length": pose_data.get("calf_length"),
-                        "torso_height": pose_data.get("torso_height"),
-                        "leg_length": pose_data.get("leg_length"),
-                        "server_analysis": pose_data.get("server_analysis", True),
-                        "timestamp": time.time()
-                    }
-                    
-                    self.fall_requests += 1
-            else:
-                self.errors += 1
-                
-        except Exception as e:
-            logger.print("ANALYTICS_WORKER", "Error processing track: %s", e)
-            self.errors += 1
-    
-    def stop(self):
-        """Stop the worker."""
-        self.running = False
-    
-    def get_stats(self):
-        """Get worker statistics.
-        
-        Returns:
-            dict: Statistics about the worker's activity
-        """
-        return {
-            "pose_requests": self.pose_requests,
-            "fall_requests": self.fall_requests,
-            "errors": self.errors,
-            "server_available": is_analytics_server_available()
-        }
-
-
-# Global analytics queue reference (set by main.py)
-_analytics_queue = None
-_tracks_worker = None  # Reference to tracks sender worker
-
-def set_analytics_queue(q):
-    """Set the analytics queue reference (called from main.py)"""
-    global _analytics_queue
-    _analytics_queue = q
+# Global reference to the tracks sender worker
+_tracks_worker = None
 
 def set_tracks_worker(worker):
-    """Set the tracks sender worker reference (called from main.py)"""
+    """Set the global tracks sender worker reference.
+    
+    Args:
+        worker: TracksSenderWorker instance
+    """
     global _tracks_worker
     _tracks_worker = worker
 
-def send_track_to_analytics(track_id, keypoints=None, bbox=None, previous_bbox=None, elapsed_ms=33.33, use_hme=False, encrypted_features=None):
-    """Send track data to analytics queue for processing.
-
-    - When use_hme=True: Send encrypted features only
-    - When use_hme=False: Do not send anything to Analytics Server (fall back to local processing)
-
-    This function is called from the main thread to queue track data
-    for the AnalyticsWorker to process.
-
-    Args:
-        track_id: The track ID
-        bbox: Current bounding box [x, y, width, height]
-        previous_bbox: Previous frame's bounding box (optional)
-        elapsed_ms: Time since last frame in milliseconds
-        use_hme: Whether to use HME mode (must be True to send to Analytics)
-        encrypted_features: Dictionary of encrypted features - required when use_hme=True
-
-    Returns:
-        bool: True if data was queued successfully, False otherwise
-    """
-    from control_manager import get_flag
-    
-    # Security check: Never send plain keypoints to Analytics Server
-    # Analytics Server only accepts encrypted features when use_hme=True
-    if not use_hme:
-        # HME disabled means Analytics Server is not being used for privacy-preserving inference
-        # Do not send anything to Analytics Server
-        return False
-    
-    # Only queue if analytics mode is enabled
-    if not get_flag("analytics_mode", False):
-        return False
-    
-    # Check if queue is available
-    if _analytics_queue is None:
-        return False
-    
-    # Security check: encrypted_features must be provided when use_hme=True
-    if not encrypted_features:
-        logger.print("ANALYTICS", "Warning: use_hme=True but no encrypted_features provided for track_id=%d", track_id)
-        return False
-    
-    try:
-        track_data = {
-            "track_id": track_id,
-            "bbox": bbox,
-            "previous_bbox": previous_bbox,
-            "elapsed_ms": elapsed_ms,
-            "use_hme": True,
-            "encrypted_features": encrypted_features
-        }
-        
-        logger.print("ANALYTICS", "Queueing track with encrypted features: track_id=%d", track_id)
-        
-        # Put data in the analytics queue for the worker to process
-        try:
-            _analytics_queue.put_nowait(track_data)
-            return True
-        except queue.Full:
-            # Queue is full, skip this frame
-            return False
-    except Exception as e:
-        logger.print("ANALYTICS", "Failed to prepare track data: %s", e)
-        return False
-
-
 def update_latest_tracks(processed_tracks):
-    """Update latest tracks for async sending to streaming and analytics servers.
+    """Update latest tracks for async sending to streaming servers.
 
     This function is called from the main thread to update the latest tracks
     for the TracksSenderWorker to send asynchronously. Always sends the latest
@@ -1135,7 +713,6 @@ def update_latest_tracks(processed_tracks):
             - bbox: list [x, y, w, h]
             - pose_label: str
             - safety_status: str (normal, unsafe, fall)
-            - encrypted_features: dict (only sent to analytics server, not streaming)
 
     Returns:
         bool: True if data was updated successfully, False otherwise
@@ -1178,11 +755,10 @@ def mark_tracks_as_ready():
 
 
 class TracksSenderWorker(threading.Thread):
-    """Background worker for sending all processed tracks to streaming and analytics servers.
+    """Background worker for sending all processed tracks to streaming server.
 
     This worker waits for the main thread to finish processing tracks, then sends them
-    to the streaming server (omitting encrypted_features) and analytics server (only encrypted_features
-    when use_hme=True) in the background, preventing blocking of the main loop.
+    to the streaming server in the background, preventing blocking of the main loop.
 
     Uses a flag-based synchronization mechanism:
     - Main thread processes tracks and sets _tracks_ready flag to True
@@ -1213,8 +789,7 @@ class TracksSenderWorker(threading.Thread):
         self.error_count = 0
         self.skip_count = 0
 
-        # Track previous bboxes for analytics server (per track_id)
-        self.previous_bboxes = {}
+
 
         # Rate limiting: max 10 FPS (100ms intervals)
         self._min_send_interval_ms = 100  # 100ms = 10 FPS max
@@ -1223,7 +798,7 @@ class TracksSenderWorker(threading.Thread):
         # Profiler for tracks sending
         self._profiler_enabled = profiler_enabled
         self.profiler = TaskProfiler(task_name="Tracks Sender", print_interval=30, enabled=self._profiler_enabled)
-        self.profiler.register_subtasks(["tracks_send", "streaming_send", "analytics_send"])
+        self.profiler.register_subtasks(["tracks_send", "streaming_send"])
         self.profiler.start_frame()
 
     def update_tracks(self, processed_tracks):
@@ -1355,7 +930,7 @@ class TracksSenderWorker(threading.Thread):
         logger.print("TRACKS_SENDER", "Stopped (sent=%d, errors=%d, skipped=%d)", self.sent_count, self.error_count, self.skip_count)
     
     def _send_tracks(self, processed_tracks):
-        """Send all processed tracks to streaming and analytics servers asynchronously.
+        """Send all processed tracks to streaming server asynchronously.
         
         Args:
             processed_tracks: List of track dictionaries, each containing:
@@ -1365,12 +940,11 @@ class TracksSenderWorker(threading.Thread):
                 - pose_label: str
                 - safety_status: str (normal, unsafe, fall)
                 - safety_reason: str (e.g., "lying_on_floor", "unsafe_sleep_too_long", "normal")
-                - encrypted_features: dict (only sent to analytics server, not streaming)
         """
         try:
             from control_manager import get_flag
             
-            # Prepare tracks for streaming server (omit encrypted_features)
+            # Prepare tracks for streaming server
             tracks_for_streaming = []
             for track in processed_tracks:
                 track_for_streaming = {
@@ -1378,9 +952,9 @@ class TracksSenderWorker(threading.Thread):
                     "keypoints": track.get("keypoints", []),
                     "bbox": track.get("bbox"),
                     "pose_label": track.get("pose_label", "unknown"),
-                    "safety_status": track.get("safety_status", "normal"),
-                    "safety_reason": track.get("safety_reason", "normal")
-                    # encrypted_features is omitted for streaming server
+                    "safety_status": track.get("status", "tracking"),
+                    "safety_reason": track.get("safety_reason", "normal"),
+                    "int_features": track.get("int_features")
                 }
                 tracks_for_streaming.append(track_for_streaming)
             
@@ -1389,33 +963,6 @@ class TracksSenderWorker(threading.Thread):
             self.profiler.start_task("streaming_send")
             self._send_to_streaming_async(self.camera_id, tracks_for_streaming)
             self.profiler.end_task("streaming_send")
-            
-            # Send to analytics server if analytics_mode is enabled and use_hme is True
-            analytics_mode = get_flag("analytics_mode", False)
-            use_hme = get_flag("hme", False)
-            
-            if analytics_mode and use_hme and is_analytics_server_available():
-                # Calculate elapsed_ms (approximate, using 33.33ms as default)
-                elapsed_ms = 33.33
-                
-                # Send encrypted features to analytics server for each track asynchronously
-                self.profiler.start_task("analytics_send")
-                for track in processed_tracks:
-                    track_id = track.get("track_id")
-                    encrypted_features = track.get("encrypted_features")
-                    bbox = track.get("bbox")
-                    previous_bbox = self.previous_bboxes.get(track_id)
-                    
-                    if encrypted_features and bbox:
-                        self._send_to_analytics_async(
-                            track_id=track_id,
-                            bbox=bbox,
-                            previous_bbox=previous_bbox,
-                            elapsed_ms=elapsed_ms,
-                            encrypted_features=encrypted_features
-                        )
-                        self.previous_bboxes[track_id] = bbox
-                self.profiler.end_task("analytics_send")
                 
         except Exception as e:
             logger.print("TRACKS_SENDER", "Error sending tracks: %s", e)
@@ -1429,24 +976,6 @@ class TracksSenderWorker(threading.Thread):
                 send_tracks_to_streaming_server(camera_id, tracks)
             except Exception as e:
                 logger.print("TRACKS_SENDER", "Error in async streaming send: %s", e)
-        
-        thread = threading.Thread(target=_send, daemon=True)
-        thread.start()
-    
-    def _send_to_analytics_async(self, track_id, bbox, previous_bbox, elapsed_ms, encrypted_features):
-        """Send track to analytics server asynchronously using a thread."""
-        def _send():
-            try:
-                send_track_to_analytics(
-                    track_id=track_id,
-                    bbox=bbox,
-                    previous_bbox=previous_bbox,
-                    elapsed_ms=elapsed_ms,
-                    use_hme=True,
-                    encrypted_features=encrypted_features
-                )
-            except Exception as e:
-                logger.print("TRACKS_SENDER", "Error in async analytics send: %s", e)
         
         thread = threading.Thread(target=_send, daemon=True)
         thread.start()
