@@ -27,23 +27,9 @@ A privacy-preserving patient monitoring system built for the **MaixCAM** platfor
 
 This project is one component of a three-part distributed system:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    PRIVACY-PRESERVING PATIENT                   │
-│                      MONITORING SYSTEM                          │
-├────────────────────────────┬────────────────────────────────────┤
-│                            │                                    │
-│       CAMERA               │         STREAMING SERVER           │
-│       (MaixCAM)            │         (Caregiver UI)             │
-│                            │                                    │
-│  • Pose Estimation         │  • MJPEG Streaming                 │
-│  • Fall Detection          │  • Web Dashboard                   │
-│  • Tracking                │  • Camera Management               │
-│  • Feature Extraction      │  • Alert System                    │
-│  • Safety Checking         │                                    │
-│                            │                                    │
-└────────────────────────────┴────────────────────────────────────┘
-```
+| Camera (MaixCAM) | Analytics Server (Intermediate) | Streaming Server (Caregiver UI) |
+| :--- | :--- | :--- |
+| • Pose Estimation<br>• Fall Detection<br>• Tracking<br>• Feature Extraction & Encryption<br>• Safety Checking | • Polynomial Evaluation of Encrypted Features<br>• Privacy-Preserving Pose Classification | • JPEG Streaming<br>• Web Dashboard<br>• Camera Management<br>• Alert System |
 
 ### Component Overview
 
@@ -66,13 +52,13 @@ This project is one component of a three-part distributed system:
 
 ### 🔐 Privacy-Preserving Features
 
-- **Integer Feature Extraction**: Consistent extraction of integer body measurements for standardized downstream analysis.
+- **Integer Feature Extraction**: Consistent extraction of integer body measurements. This serves as the critical first step for multi-party Homomorphic Encryption (HME) for privacy-preserving pose classification.
 - **Smart Background Management**: Auto-update background that masks out human regions:
   - Preserves body bounding box areas in old background
   - Preserves head area (ear-nose-ear keypoints) with proportional padding
   - Updates non-human areas with new frame content
 - **Mask Visualization** (PC version): Color-coded overlay showing masked regions (white=body, red=head)
-- **Edge Processing**: All pose classification, feature extraction, and fall detection runs completely locally on the device to ensure patient privacy.
+- **Edge Processing**: Feature extraction, and fall detection runs completely locally on the device to ensure patient privacy.
 
 ### 🎥 Recording System
 
@@ -913,9 +899,11 @@ flowchart TD
 
 
 
-### Integer Feature Extraction
+### Integer Feature Extraction & Homomorphic Encryption (HME)
 
-Pose features are consistently extracted as integers and sent within `processed_tracks`. These enable privacy-preserving downstream processing (such as Caregiver Analytics or future HME) by representing physical ratios as reliable integers:
+Pose features are consistently extracted as integers and sent within `processed_tracks`. This extraction is the first step for the **multi-party Homomorphic Encryption (HME)** scheme for privacy-preserving pose classification. 
+
+By representing physical ratios as reliable integers, it enables privacy-preserving downstream processing:
 
 ```python
 # Features extracted in order:
@@ -928,6 +916,39 @@ Pose features are consistently extracted as integers and sent within `processed_
 # cl  = Calf length
 # Trl = Torso height
 # ll  = Leg length
+```
+
+#### HME Multi-Party Computation Flow
+
+These extracted integer features are encrypted using a Paillier-like scheme by the Streaming Server (Caregiver) and processed in tandem with the [Analytics Server](https://github.com/yudhisthereal/fall-detection-analytics/). This allows the cloud service to securely compute pose classification without ever exposing the patient's raw physical measurements.
+
+The system relies on a multi-party protocol to evaluate non-linear comparisons and polynomial evaluations over encrypted data:
+
+```mermaid
+sequenceDiagram
+    participant C as Camera (MaixCAM)
+    participant S as Streaming Server<br/>(Caregiver UI)
+    participant A as Analytics Server<br/>(Cloud)
+
+    C->>S: 1. Send Plaintext Integer Features
+
+    Note over S: Encrypt Features<br/>(Paillier Scheme)
+    
+    S->>A: 2. Send Encrypted Features
+
+    Note over A: 3. Compute First Part of<br/>Comparison Function
+    
+    A->>S: Send Encrypted Intermediate<br/>Comparison Result (EICR)
+
+    Note over S: 4. Decrypt EICR<br/>Obtain Comparison Result<br/>Re-Encrypt Result
+    
+    S->>A: Send Encrypted Comparison Result
+
+    Note over A: 5. Polynomial Evaluation<br/>(MSB and LSB)<br/>Compute Pose Classification
+    
+    A->>S: Send Encrypted Classification Result
+
+    Note over S: 6. Decrypt Classification Result<br/>Display Pose state to UI
 ```
 
 ### Async Workers
@@ -948,7 +969,7 @@ The system uses multiple background workers for non-blocking operation:
 ### Data Minimization
 
 1. **Local Processing**: All pose estimation and fall detection runs locally
-2. **Edge Processing**: All feature extraction, pose classification, and fall detection runs completely locally on the device
+2. **Edge Processing**: All feature extraction and fall detection runs completely locally on the device
 3. **Smart Background Privacy**: Background updates exclude human regions using intelligent masking
 4. **No Raw Video Upload**: Only processed data and selective frames are sent
 
@@ -1083,6 +1104,7 @@ This research software is developed for privacy-preserving patient monitoring. Y
 ### References
 
 - **This Project (Camera)**: [private-cctv](https://github.com/yudhisthereal/Private-Surveillence-MaixCAM)
+- **Analytics Server**: [fall-detection-analytics](https://github.com/yudhisthereal/fall-detection-analytics/)
 - **Streaming Server (Caregiver UI)**: [fall-detection-streaming](https://github.com/yudhisthereal/fall-detection-streaming/)
 - MaixCAM: [Sipeed MaixCAM](https://wiki.sipeed.com/maixcam)
 - YOLO11: [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)

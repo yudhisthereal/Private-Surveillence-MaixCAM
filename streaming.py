@@ -7,7 +7,7 @@ from config import STREAMING_HTTP_URL
 from debug_config import DebugLogger
 
 # Module-level debug logger instance
-logger = DebugLogger(tag="STREAMING", instance_enable=False)
+logger = DebugLogger(tag="STREAMING", instance_enable=True)
 
 
 def _fire_and_forget_post(endpoint, json_data=None, data=None, params=None, headers=None, timeout=2.0, tag="API_REQUEST", log_success=False):
@@ -16,12 +16,12 @@ def _fire_and_forget_post(endpoint, json_data=None, data=None, params=None, head
         try:
             url = f"{STREAMING_HTTP_URL}{endpoint}"
             
+            req_headers = dict(headers) if headers else {}
+            
             if json_data is not None:
-                if not headers:
-                    headers = {}
                 # Set content type only if not already set
-                if 'Content-Type' not in headers:
-                    headers['Content-Type'] = 'application/json'
+                if 'Content-Type' not in req_headers:
+                    req_headers['Content-Type'] = 'application/json'
 
                 payload_str = str(json_data)
                 # Truncate payload string for logging if it's too long and not tracks endpoint
@@ -45,7 +45,7 @@ def _fire_and_forget_post(endpoint, json_data=None, data=None, params=None, head
                 json=json_data,
                 data=data,
                 params=params,
-                headers=headers,
+                headers=req_headers if req_headers else None,
                 timeout=timeout
             )
             
@@ -56,8 +56,8 @@ def _fire_and_forget_post(endpoint, json_data=None, data=None, params=None, head
                     logger.print(tag, "%s failed: HTTP %d", endpoint, response.status_code)
                     
         except Exception as e:
-            # For very short timeouts (<= 0.5s), we expect ReadTimeout often, so ignore it silently
-            if timeout > 0.5:
+            # For very short timeouts (< 0.5s), we expect ReadTimeout often, so ignore it silently
+            if timeout >= 0.5:
                 logger.print("STREAMING", "%s error: %s", tag, e)
                 
     thread = threading.Thread(target=_send, daemon=True)
@@ -111,7 +111,8 @@ def ping_streaming_server(camera_id):
     _fire_and_forget_post(
         "/api/stream/ping",
         params={'camera_id': camera_id},
-        timeout=0.5
+        timeout=0.5,
+        log_success=True
     )
 
 

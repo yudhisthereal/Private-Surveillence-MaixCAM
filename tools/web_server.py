@@ -26,7 +26,6 @@ class WebServer:
             "use_safety_check": True,
             "fall_algorithm": 1,
             "check_method": 3,  # CheckMethod.TORSO_HEAD
-            "hme": False
         }
         
         # === Config ===
