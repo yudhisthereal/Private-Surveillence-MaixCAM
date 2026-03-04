@@ -67,6 +67,7 @@ sys.modules["maix"].tracker = tracker_module
 # PATH PATCHING (Must be before importing modules that use these constants)
 # ============================================
 import config
+config.configure_env(".env")
 import control_manager
 
 # Redirect paths from /root/ (MaixCAM) to local directory

@@ -14,10 +14,24 @@ files:
   - pose/judge_fall.py
   - pose/pose_estimation.py
   - tools/__init__.py
+  - tools/bed_area_checker.py
+  - tools/bench_area_checker.py
+  - tools/chair_area_checker.py
+  - tools/couch_area_checker.py
+  - tools/floor_area_checker.py
+  - tools/log_manager.py
+  - tools/polygon_checker.py
+  - tools/safety_judgment.py
   - tools/skeleton_saver.py
   - tools/time_utils.py
   - tools/video_record.py
   - tools/web_server.py
   - tools/wifi_connect.py
+  - camera_manager.py
+  - config.py
+  - control_manager.py
   - debug_config.py
   - main.py
+  - streaming.py
+  - tracking.py
+  - workers.py

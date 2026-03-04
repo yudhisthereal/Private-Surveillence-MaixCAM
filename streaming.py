@@ -116,28 +116,6 @@ def ping_streaming_server(camera_id):
     )
 
 
-def send_pose_label_to_streaming_server(camera_id, track_id, pose_label, safety_status="normal"):
-    """Send pose label to streaming server for logging/display (async)
-    
-    Args:
-        camera_id: Camera identifier
-        track_id: Track ID of the person
-        pose_label: Pose classification label (standing, sitting, bending_down, lying_down, unknown)
-        safety_status: Safety status (normal, unsafe, fall)
-    
-    Returns:
-        bool: True (always returns True - fire-and-forget)
-    """
-    data = {
-        "camera_id": camera_id,
-        "track_id": track_id,
-        "pose_label": pose_label,
-        "safety_status": safety_status,
-        "timestamp": time.time()
-    }
-    return _fire_and_forget_post("/api/stream/pose-label", json_data=data)
-
-
 def send_keypoints_to_streaming_server(camera_id, track_id, keypoints, bbox=None, pose_label=None, safety_status="normal"):
     """Send keypoints to streaming server for logging/display
     

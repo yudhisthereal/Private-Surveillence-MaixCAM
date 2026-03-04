@@ -1,8 +1,5 @@
 from maix import network, err
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 def connect_wifi(ssid=None, password=None):
     # Load from environment if not provided

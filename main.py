@@ -1,5 +1,8 @@
 # main.py - Modularized main entry point for Private CCTV System
 
+import config
+config.configure_env("/root/.env")
+
 from maix import app, image, time
 from debug_config import DebugLogger
 from tools.wifi_connect import connect_wifi
@@ -166,12 +169,12 @@ def merge_background_with_mask(old_background, new_frame, processed_tracks, padd
 
 def main():
     """Main entry point"""
-    # 1. Initialize camera identity
-    CAMERA_ID, CAMERA_NAME, registration_status, local_ip = initialize_camera()
-    
-    # 2. Connect to WiFi
-    server_ip = connect_wifi("MaixCAM-Wifi", "maixcamwifi")
+    # 1. Connect to WiFi first (blocking call; waits until connected or timeout/error)
+    server_ip = connect_wifi()
     logger.print("MAIN", "Camera IP: %s", server_ip)
+
+    # 2. Initialize camera identity (registration needs network)
+    CAMERA_ID, CAMERA_NAME, registration_status, local_ip = initialize_camera()
     
     # 3. Initialize cameras and detectors (RTMP removed, now returns 4 values)
     cam, disp, pose_extractor, detector = initialize_cameras()

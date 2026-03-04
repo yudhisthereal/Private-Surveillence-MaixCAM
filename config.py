@@ -6,12 +6,6 @@ import time
 import socket
 import requests
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
-
-from debug_config import debug_print
-
 # Import CameraStateManager from control_manager for proper state management
 from control_manager import camera_state_manager
 
@@ -24,11 +18,102 @@ def _log(tag, message):
     get_log_manager().log(f"CONFIG {tag}", message)
 
 # ============================================
+# ENV LOADER
+# ============================================
+def _parse_env_file(path):
+    """Parse key=value pairs from a .env file into os.environ."""
+    abs_path = os.path.abspath(path)
+    try:
+        parsed_entries = []
+        skipped_lines = 0
+        invalid_lines = 0
+        with open(path, "r") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    skipped_lines += 1
+                    continue
+                if "=" not in stripped:
+                    invalid_lines += 1
+                    continue
+                key, value = stripped.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip("\"\'")
+                if key:
+                    os.environ[key] = value
+                    parsed_entries.append((key, value))
+
+        _log(
+            "INFO",
+            (
+                f"Parsed .env file: {path} (abs={abs_path}) "
+                f"| parsed={len(parsed_entries)} skipped={skipped_lines} invalid={invalid_lines}"
+            )
+        )
+        if parsed_entries:
+            for key, value in parsed_entries:
+                _log("INFO", f"ENV {key}={value}")
+        return {
+            "path": path,
+            "abs_path": abs_path,
+            "exists": True,
+            "parsed": len(parsed_entries),
+            "skipped": skipped_lines,
+            "invalid": invalid_lines,
+        }
+    except FileNotFoundError:
+        _log("WARN", f".env file not found: {path} (abs={abs_path})")
+        return {
+            "path": path,
+            "abs_path": abs_path,
+            "exists": False,
+            "parsed": 0,
+            "skipped": 0,
+            "invalid": 0,
+        }
+    except Exception as e:
+        _log("ERROR", f"Failed to read .env file {path}: {e}")
+        return {
+            "path": path,
+            "abs_path": abs_path,
+            "exists": os.path.exists(path),
+            "parsed": 0,
+            "skipped": 0,
+            "invalid": 0,
+            "error": str(e),
+        }
+
+def reload_from_env():
+    """Reload env-derived config values from os.environ."""
+    global STREAMING_SERVER_IP, STREAMING_SERVER_PORT, STREAMING_HTTP_URL
+    STREAMING_SERVER_IP = os.getenv("STREAMING_SERVER_IP", "103.150.93.198")
+    STREAMING_SERVER_PORT = int(os.getenv("STREAMING_SERVER_PORT", "8000"))
+    STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
+    _log(
+        "INFO",
+        (
+            "Effective streaming config: "
+            f"STREAMING_SERVER_IP={STREAMING_SERVER_IP}, "
+            f"STREAMING_SERVER_PORT={STREAMING_SERVER_PORT}, "
+            f"STREAMING_HTTP_URL={STREAMING_HTTP_URL}"
+        )
+    )
+
+def configure_env(path):
+    """Load environment variables from a fixed .env path and refresh config."""
+    _log("INFO", f"configure_env() called with path={path} (abs={os.path.abspath(path)})")
+    parse_result = _parse_env_file(path)
+    reload_from_env()
+    if parse_result:
+        _log("INFO", f"configure_env() result: {parse_result}")
+
+# ============================================
 # SERVER CONFIGURATION (loaded from .env)
 # ============================================
-STREAMING_SERVER_IP = os.getenv("STREAMING_SERVER_IP", "103.150.93.198")
-STREAMING_SERVER_PORT = int(os.getenv("STREAMING_SERVER_PORT", "8000"))
-STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
+STREAMING_SERVER_IP = None
+STREAMING_SERVER_PORT = None
+STREAMING_HTTP_URL = None
+reload_from_env()
 
 # ============================================
 # CAMERA IDENTITY

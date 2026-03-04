@@ -158,8 +158,6 @@ control_flags = {
     "record": False,
     "show_raw": False,
     "set_background": False,
-    "auto_update_bg": False,
-    "show_safe_areas": False,
     "show_bed_areas": False,
     "show_floor_areas": False,
     "use_safety_check": True,

@@ -33,7 +33,6 @@ demo-nodes-py==0.33.7
 diagnostic-msgs==5.3.6
 diagnostic-updater==4.2.6
 domain-coordinator==0.12.0
-dotenv==0.9.9
 dynamixel-sdk==3.8.4
 dynamixel-sdk-custom-interfaces==3.8.4
 example-interfaces==0.12.0
@@ -118,7 +117,6 @@ psutil==7.2.1
 pycparser==3.0
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
-python-dotenv==1.2.1
 python-qt-binding==2.2.2
 PyYAML==6.0.3
 qt-dotgraph==2.7.5

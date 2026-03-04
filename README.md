@@ -78,22 +78,18 @@ This project is one component of a three-part distributed system:
 
 ### 🛡️ Safety Features
 
-The system uses a unified safety judgment system that combines three area checkers:
+The system uses a unified safety judgment system with specific area types:
 
-1. **Safe Area Checker**: Monitors if patients are in designated safe zones
-   - Validates presence using the global check method (e.g., TORSO_HEAD)
-   - Configurable safe zone polygons
-
-2. **Bed & Couch Area Checkers (Smart Monitoring)**: Tracks time spent in resting areas with time-of-day awareness
+1. **Bed & Couch Area Checkers (Smart Monitoring)**: Tracks time spent in resting areas with time-of-day awareness
    - Detects "unsafe sleep" based on `max_sleep_duration`
    - Detects "oversleeping" based on `bedtime` and `wakeup_time` parameters
    - Distinguishes between normal night sleep and problematic daytime napping
 
-3. **Bench & Chair Area Checkers**: Monitors semi-stationary areas
+2. **Bench & Chair Area Checkers**: Monitors semi-stationary areas
    - **Chair**: Optimized for sitting poses (HIP check method)
    - **Bench**: Supports both sitting and lying detection
 
-4. **Floor Area Checker**: Detects when patients are lying on the floor
+3. **Floor Area Checker**: Detects when patients are lying on the floor
    - Uses the global check method to detect floor contact
    - Critical safety alert for fall situations
    - Distinguishes between safe lying (in bed/couch) and unsafe lying (on floor)
@@ -102,7 +98,7 @@ The system uses a unified safety judgment system that combines three area checke
 1. Fall detection always takes precedence
 2. If lying down AND in floor area → UNSAFE (lying on floor)
 3. If in bed/couch area AND (too long OR past wakeup) → UNSAFE (sleep monitoring)
-4. If lying down AND not in safe area → UNSAFE (lying outside safe zone)
+4. If lying down AND not in bed/couch/bench area → UNSAFE (lying outside resting areas)
 5. Otherwise → SAFE (tracking)
 
 ## 🏗️ Architecture
@@ -128,7 +124,6 @@ graph TB
 
         subgraph Safety [Safety System]
             Fall{"Fall Detection<br/>Individual Tracking"}
-            SafeArea{"Safe Area Checker<br/>5 Check Methods"}
             BedArea["Bed & Couch<br/>Smart Sleep Monitoring"]
             BenchArea["Bench & Chair<br/>Area Checkers"]
             FloorArea["Floor Area Checker<br/>Critical Detection"]
@@ -136,11 +131,9 @@ graph TB
 
             Track --> Fall
             Fall --> SafetyJudge
-            Track --> SafeArea
             Track --> BedArea
             Track --> BenchArea
             Track --> FloorArea
-            SafeArea --> SafetyJudge
             BedArea --> SafetyJudge
             BenchArea --> SafetyJudge
             FloorArea --> SafetyJudge
@@ -193,7 +186,7 @@ graph TB
     StateReporter -->|"HTTP POST<br/>State"| API
     PingWorker -->|"HTTP POST<br/>Ping"| API
 
-    StateSync -->|"HTTP GET<br/>Flags, Safe Areas, Bed Areas,<br/>Couch Areas, Floor Areas,<br/>Chair Areas, Bench Areas"| API
+    StateSync -->|"HTTP GET<br/>Flags, Bed Areas, Couch Areas,<br/>Floor Areas, Chair Areas,<br/>Bench Areas"| API
 
     API -.->|Commands| StateSync
     Dashboard -->|MJPEG Stream| Display
@@ -208,7 +201,7 @@ graph TB
 
     class Cam camera
     class Det,Pose,Track ai
-    class Fall,SafeArea,BedArea,BenchArea,FloorArea,SafetyJudge safety
+    class Fall,BedArea,BenchArea,FloorArea,SafetyJudge safety
     class BG,Mask,Merge privacy
     class StateSync,StateReporter,FrameUpload,TrackSender,PingWorker workers
     class Record,Display output
@@ -231,14 +224,16 @@ private-cctv/
 │   ├── pose_estimation.py    # YOLO11 pose estimation & integer features
 │   └── judge_fall.py         # Fall detection algorithms (2 algorithms)
 ├── tools/
-│   ├── safe_area.py          # Safe zone polygon checking
 │   ├── bed_area_checker.py   # Bed area monitoring
 │   ├── floor_area_checker.py # Floor area detection
+│   ├── chair_area_checker.py # Chair area detection
+│   ├── couch_area_checker.py # Couch area detection
+│   ├── bench_area_checker.py # Bench area detection
+│   ├── polygon_checker.py    # Shared polygon check methods (HIP, TORSO, etc.)
 │   ├── safety_judgment.py    # Unified safety judgment
 │   ├── skeleton_saver.py     # CSV skeleton data recording
 │   ├── video_record.py       # Video recording with MJPEG codec
 │   ├── wifi_connect.py       # Wi-Fi connectivity
-│   ├── web_server.py         # Local HTTP server
 │   ├── log_manager.py        # Centralized logging
 │   └── time_utils.py         # Time utilities and profiling
 ├── hme_from_sona/            # HME encryption research (legacy)
@@ -277,8 +272,8 @@ sequenceDiagram
 
     T->>S: Keypoints + Pose Label
     Note over S: Read check_method flag
-    Note over S: Safe Area Check
-    Note over S: Bed Area Check
+    Note over S: Bed/Couch Check
+    Note over S: Chair/Bench Check
     Note over S: Floor Area Check
     Note over S: Final Safety Decision
 
@@ -288,16 +283,17 @@ sequenceDiagram
 
     par Parallel Upload
         W->>SS: POST /upload-frame (JPEG)
-        W->>SS: POST /keypoints (JSON)
-        W->>SS: POST /pose-label (JSON)
+        W->>SS: POST /tracks (JSON)
         W->>SS: POST /report-state (JSON)
         W->>SS: POST /ping (Keep-alive)
     end
 
     SS-->>W: control_flags (every 1s)
-    SS-->>W: safe_areas (every 5s)
     SS-->>W: bed_areas (every 5s)
     SS-->>W: floor_areas (every 5s)
+    SS-->>W: chair_areas (every 5s)
+    SS-->>W: couch_areas (every 5s)
+    SS-->>W: bench_areas (every 5s)
 
     Note over W: Update local flags<br/>Affect next frame processing
 ```
@@ -332,8 +328,8 @@ graph LR
         M -->|fall_algorithm| L
         M -->|check_method| N[Safety Judgment]
         L --> N
-        N --> O[Safe Areas]
-        N --> P[Bed Areas]
+        N --> O[Bed/Couch Areas]
+        N --> P[Chair/Bench Areas]
         N --> Q[Floor Areas]
         N --> R[Safety Status]
     end
@@ -529,8 +525,7 @@ FALL_COUNT_THRES = 2               # Consecutive frames to confirm
 | `set_background` | False | Capture current frame as background (manual trigger) |
 | `fall_algorithm` | 1 | Fall detection algorithm (1 or 2) |
 | `use_safety_check` | True | Enable safety checking system |
-| `check_method` | 3 | Safety check method for ALL checkers (Safe/Bed/Floor Areas) (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
-| `show_safe_areas` | False | Overlay safe areas on display |
+| `check_method` | 3 | Safety check method for area checkers (Bed/Floor/Chair/Couch/Bench) (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `show_bed_areas` | False | Overlay bed areas on display |
 | `show_floor_areas` | False | Overlay floor areas on display |
 | `show_bench_areas` | False | Overlay bench areas on display |
@@ -543,7 +538,7 @@ FALL_COUNT_THRES = 2               # Consecutive frames to confirm
 ### Safety Check Methods
 
 The system supports 5 different check methods for validating if a person is in a specified zone.
-**Note**: The same `check_method` is used for **ALL** area checkers (Safe Area, Bed Area, and Floor Area).
+**Note**: The same `check_method` is used for **ALL** area checkers (Bed, Floor, Chair, Couch, Bench).
 
 | Method | Value | Keypoints Used | Description |
 |--------|-------|---------------|-------------|
@@ -577,13 +572,12 @@ The following data is sent to the Streaming Server in real-time:
 
 | Data Type | Endpoint | Description |
 |-----------|----------|-------------|
-| Pose Label | `/api/stream/pose-label` | Pose classification (standing/sitting/bending_down/lying_down) |
-| Safety Status | `/api/stream/pose-label` | Safety status (normal/unsafe/fall) |
-| Keypoints & Features | `/api/stream/keypoints` | 17 keypoint coordinates (34 values) & Integer Features `[Tra, Tha, Thl, cl, Trl, ll]` |
-| Fall Alerts | `/api/stream/pose-label` | Fall detection with track_id and timestamp |
+| Tracks (Primary) | `/api/stream/tracks` | Batched per-frame track data: keypoints, bbox, pose label, safety status/reason, integer features |
+| Keypoints (Optional helper) | `/api/stream/keypoints` | Single-track keypoint payload helper (available in `streaming.py`) |
 | Background | `/api/stream/upload-bg` | Privacy-protected background image |
-| Frames | `/api/stream/upload-frame` | Live video frames (when show_raw=True) |
+| Frames | `/api/stream/upload-frame` | Live raw JPEG frames |
 | Camera State | `/api/stream/report-state` | Heartbeat with recording status |
+| Keep-alive Ping | `/api/stream/ping` | Lightweight connectivity ping |
 
 ### Camera Info
 
@@ -598,7 +592,6 @@ The following data is sent to the Streaming Server in real-time:
 
 ### Area Definitions
 
-- **Safe Areas**: `/root/safe_areas.json` - List of polygon definitions for safe zones
 - **Bed Areas**: `/root/bed_areas.json` - List of polygon definitions for bed areas
 - **Floor Areas**: `/root/floor_areas.json` - List of polygon definitions for floor areas
 - **Couch Areas**: `/root/couch_areas.json` - List of polygon definitions for couch areas
@@ -748,20 +741,23 @@ flowchart TD
 
 ### Safety Judgment System
 
-The unified safety judgment combines three area checkers:
+The unified safety judgment combines specific area checkers:
 
-**1. Safe Area Checker (`tools/safe_area.py`)**
-- Validates if specific keypoints are within safe zone polygons
-- Uses configurable check method (HIP to FULL_BODY)
-- Returns boolean: in_safe_zone
-
-**2. Bed Area Checker (`tools/bed_area_checker.py`)**
+**1. Bed Area Checker (`tools/bed_area_checker.py`)**
 - Tracks how long a person stays in bed area polygons
 - Uses the same check method to determine presence in bed
 - Threshold: 5 seconds (configurable)
 - Returns: too_long_in_bed (boolean)
 
-**3. Floor Area Checker (`tools/floor_area_checker.py`)**
+**2. Couch Area Checker (`tools/couch_area_checker.py`)**
+- Tracks rest duration in couch polygons
+- Supports smart sleep checks similar to bed area logic
+
+**3. Chair & Bench Area Checkers (`tools/chair_area_checker.py`, `tools/bench_area_checker.py`)**
+- Chair checker is optimized for sitting checks
+- Bench checker supports broader sitting/lying occupancy checks
+
+**4. Floor Area Checker (`tools/floor_area_checker.py`)**
 - Detects if person is in floor area polygons
 - Uses the same check method to validate floor contact
 - Used to distinguish safe lying (in bed) from unsafe lying (on floor)
@@ -777,8 +773,8 @@ elif (in_bed_area or in_couch_area) and (too_long_in_bed/couch or past_wakeup):
     return "unsafe"  # Smart sleep monitoring (duration/time)
 elif sitting and in_chair_area:
     return "safe"    # Explicit chair sitting
-elif lying_down and not (in_safe_area or in_bed_area or in_couch_area or in_bench_area):
-    return "unsafe"  # Lying outside safe zone
+elif lying_down and not (in_bed_area or in_couch_area or in_bench_area):
+    return "unsafe"  # Lying outside resting areas
 else:
     return "normal"
 ```
@@ -799,9 +795,7 @@ flowchart TD
     SmartCheck -- Unsafe --> UnsafeSleep["Status: UNSAFE<br/>(Sleep Alert)"]
     SmartCheck -- Safe --> Safe
     
-    SafeResting -- No --> SafeZone{"In Safe Area?"}
-    SafeZone -- No --> UnsafeSafe["Status: UNSAFE<br/>(Lying Outside Safe)"]
-    SafeZone -- Yes --> Safe["Status: SAFE"]
+    SafeResting -- No --> UnsafeSafe["Status: UNSAFE<br/>(Lying Outside Resting Areas)"]
 
     Lying -- No --> Sitting{"Sitting?"}
     Sitting -- Yes --> SeatCheck{"In Chair/Couch/Bench?"}
@@ -1079,7 +1073,6 @@ Enable detailed logging by checking console output for these prefixes:
 | `[ALGORITHM 1]` | Fall detection Algorithm 1 output |
 | `[ALGORITHM 2]` | Fall detection Algorithm 2 output |
 | `[FALL_DETECT]` | Fall detection system |
-| `[SAFE_AREA]` | Safe area management |
 | `[BED_AREA]` | Bed area monitoring |
 | `[FLOOR_AREA]` | Floor area detection |
 | `[SAFETY_JUDGMENT]` | Unified safety decision output |
@@ -1113,25 +1106,34 @@ This section documents all API endpoints used for communication between the Came
 
 ### Camera → Streaming Server Endpoints
 
-These endpoints are called by the Camera to send data to the Streaming Server.
+These endpoints are called by the camera device.
+
+#### POST /api/stream/register
+Register a new camera or re-register an existing camera.
+
+**Query Parameters:**
+- `camera_id` (optional): Existing camera ID for re-registration.
+
+**Response (200 OK):**
+```json
+{
+    "status": "registered",
+    "camera_id": "camera_001",
+    "camera_name": "Room 101 Camera"
+}
+```
 
 #### POST /api/stream/upload-frame
-Upload a video frame to the streaming server (when `show_raw=True`).
+Upload raw JPEG frame bytes.
 
 **Headers:**
 ```
 X-Camera-ID: <camera_id>
 Content-Type: image/jpeg
 ```
-
-**Body:** Raw JPEG image bytes
-
-**Response:** 200 OK on success
-
----
 
 #### POST /api/stream/upload-bg
-Upload the background image to the streaming server.
+Upload current background JPEG bytes.
 
 **Headers:**
 ```
@@ -1139,47 +1141,36 @@ X-Camera-ID: <camera_id>
 Content-Type: image/jpeg
 ```
 
-**Body:** Raw JPEG image bytes
-
-**Response:** 200 OK on success
-
----
-
-#### POST /api/stream/pose-label
-Send pose classification and safety status for a tracked person.
+#### POST /api/stream/tracks
+Primary per-frame track upload endpoint.
 
 **Content-Type:** application/json
 
-**Request Body:**
+**Request Body (shape):**
 ```json
 {
     "camera_id": "camera_001",
-    "track_id": 1,
-    "pose_label": "standing",
-    "safety_status": "normal",
+    "tracks": [
+        {
+            "track_id": 1,
+            "keypoints": [x0, y0, x1, y1, "..."],
+            "bbox": [x, y, width, height],
+            "pose_label": "standing",
+            "safety_status": "normal",
+            "safety_reason": "normal",
+            "int_features": [0, 0, 0, 0, 0, 0]
+        }
+    ],
     "timestamp": 1710000000.123
 }
 ```
 
-**Response:** 200 OK on success
-
-**Field Descriptions:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `camera_id` | string | Unique camera identifier |
-| `track_id` | integer | Tracking ID for the person |
-| `pose_label` | string | Pose classification: `standing`, `sitting`, `bending_down`, `lying_down`, `unknown` |
-| `safety_status` | string | Safety status: `normal`, `unsafe`, `fall` |
-| `timestamp` | float | Unix timestamp of the detection |
-
----
-
 #### POST /api/stream/keypoints
-Send 17-keypoint skeleton data to the streaming server.
+Single-track keypoints helper endpoint (available but not primary in current flow).
 
 **Content-Type:** application/json
 
-**Request Body:**
+**Request Body (shape):**
 ```json
 {
     "camera_id": "camera_001",
@@ -1192,60 +1183,29 @@ Send 17-keypoint skeleton data to the streaming server.
 }
 ```
 
-**Response:** 200 OK on success
-
-**Field Descriptions:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `camera_id` | string | Unique camera identifier |
-| `track_id` | integer | Tracking ID for the person |
-| `keypoints` | array | 34 values (17 x,y pairs for COCO keypoints) |
-| `bbox` | array | Bounding box [x, y, width, height] |
-| `pose_label` | string | Pose classification label |
-| `safety_status` | string | Safety status: `normal`, `unsafe`, `fall` |
-| `timestamp` | float | Unix timestamp of the detection |
-
-**COCO Keypoint Order:**
-```
-0: Nose, 1: Left Eye, 2: Right Eye, 3: Left Ear, 4: Right Ear,
-5: Left Shoulder, 6: Right Shoulder, 7: Left Elbow, 8: Right Elbow,
-9: Left Wrist, 10: Right Wrist, 11: Left Hip, 12: Right Hip,
-13: Left Knee, 14: Right Knee, 15: Left Ankle, 16: Right Ankle
-```
-
----
-
 #### POST /api/stream/report-state
-Report camera state heartbeat to the streaming server.
+Periodic state heartbeat.
 
 **Content-Type:** application/json
 
-**Request Body:**
+**Request Body (current camera payload):**
 ```json
 {
-    "CameraId": "camera_001",
-    "Status": "online",
-    "IsRecording": false,
-    "RtmpConnected": false
+    "camera_id": "camera_001",
+    "status": "online",
+    "timestamp": 1710000000123,
+    "is_recording": false
 }
 ```
 
-**Response:** 200 OK on success
-
----
-
 #### POST /api/stream/ping
-Fire-and-forget heartbeat ping to notify the server the camera is connected.
+Fire-and-forget keep-alive ping.
 
 **Query Parameters:**
-- `camera_id`: Unique camera identifier
-
-**Response:** 200 OK (response not checked)
-
----
+- `camera_id`: Camera identifier.
 
 #### POST /api/stream/command
-Send a command to the streaming server (e.g., background_updated notification).
+Notify command-like events to server (currently used for `background_updated`).
 
 **Content-Type:** application/json
 
@@ -1258,134 +1218,44 @@ Send a command to the streaming server (e.g., background_updated notification).
 }
 ```
 
-**Response:** 200 OK on success
-
----
-
 ### Camera ← Streaming Server Endpoints
 
-These endpoints are called by the Camera to receive data from the Streaming Server.
-
-#### GET /api/stream/camera-state
-Get camera state including control flags from the streaming server.
-
-**Query Parameters:**
-- `camera_id`: Unique camera identifier
-
-**Response (200 OK):**
-```json
-{
-    "camera_id": "camera_001",
-    "camera_name": "Room 101 Camera",
-    "registration_status": "registered",
-    "local_ip": "192.168.1.100",
-    "check_method": 3,
-    "control_flags": {
-        "record": true,
-        "show_raw": false,
-        "auto_update_bg": true,
-        "set_background": false,
-        "fall_algorithm": 1,
-        "use_safety_check": true,
-        "show_safe_areas": false,
-        "show_bed_areas": false,
-        "show_floor_areas": false
-    }
-}
-```
-
----
-
-#### GET /api/stream/safe-areas
-Get safe area definitions from the streaming server.
-
-**Query Parameters:**
-- `camera_id`: Unique camera identifier
-
-**Response (200 OK):**
-```json
-[
-    [[0.1, 0.1], [0.4, 0.1], [0.4, 0.4], [0.1, 0.4]],
-    [[0.6, 0.6], [0.9, 0.6], [0.9, 0.9], [0.6, 0.9]]
-]
-```
-
----
-
-#### GET /api/stream/bed-areas
-Get bed area definitions from the streaming server.
-
-**Query Parameters:**
-- `camera_id`: Unique camera identifier
-
-**Response (200 OK):**
-```json
-[
-    [[0.2, 0.3], [0.7, 0.3], [0.7, 0.6], [0.2, 0.6]]
-]
-```
-
----
-
-#### GET /api/stream/floor-areas
-Get floor area definitions from the streaming server.
-
-**Query Parameters:**
-- `camera_id`: Unique camera identifier
-
-**Response (200 OK):**
-```json
-[
-    [[0.0, 0.8], [1.0, 0.8], [1.0, 1.0], [0.0, 1.0]]
-]
-```
-
----
+These endpoints are polled by the camera.
 
 #### GET /api/stream/registered
-Check which cameras are registered on the streaming server.
+Get server-side list of known cameras.
 
-**Response (200 OK):**
-```json
-{
-    "cameras": [
-        {"camera_id": "camera_001", "status": "registered"},
-        {"camera_id": "camera_002", "status": "pending"}
-    ]
-}
-```
-
----
-
-#### POST /api/stream/register
-Register a new camera or re-register an existing camera.
+#### GET /api/stream/camera-state
+Get latest control flags/state for a camera.
 
 **Query Parameters:**
-- `camera_id`: Existing camera ID (for re-registration)
+- `camera_id`: Camera identifier.
 
-**Response (200 OK):**
-```json
-{
-    "status": "registered",
-    "camera_id": "camera_001",
-    "camera_name": "Room 101 Camera"
-}
-```
+**Response:** Camera code currently expects a flat flag/param dictionary containing keys like:
+`record`, `show_raw`, `set_background`, `auto_update_bg`, `show_bed_areas`, `show_floor_areas`, `show_chair_areas`, `show_couch_areas`, `show_bench_areas`, `use_safety_check`, `fall_algorithm`, `check_method`, `max_sleep_duration`, `bedtime`, `wakeup_time`.
 
-**Status Values:**
-| Status | Description |
-|--------|-------------|
-| `registered` | Camera is approved and active |
-| `pending` | Camera registration awaiting approval |
-| `unknown` | Registration status unknown |
+#### GET /api/stream/bed-areas
+Get bed polygons.
 
----
+#### GET /api/stream/floor-areas
+Get floor polygons.
+
+#### GET /api/stream/chair-areas
+Get chair polygons.
+
+#### GET /api/stream/couch-areas
+Get couch polygons.
+
+#### GET /api/stream/bench-areas
+Get bench polygons.
+
+> Note: `safe-areas` endpoint is no longer used in current runtime flow.
 
 
 
 ### Local Command Server (Camera Side)
 
-The Camera runs a local HTTP server on port 80 to receive commands from the Streaming Server.
+The Camera runs a local HTTP server on port `LOCAL_PORT` (default: `8080`) to receive commands from the Streaming Server.
 
 #### POST /command
 Receive commands from the streaming server.
@@ -1415,7 +1285,6 @@ Receive commands from the streaming server.
 | `show_raw` | boolean | Show raw or privacy-protected feed |
 | `set_background` | boolean | Capture current frame as background |
 | `auto_update_bg` | boolean | Enable/disable automatic background updates with masking |
-| `update_safe_areas` | array | Update safe area polygons |
 | `fall_algorithm` | integer | Set fall detection algorithm (1 or 2) |
 | `check_method` | integer | Set safety check method (1=HIP, 2=TORSO, 3=TORSO_HEAD, 4=TORSO_HEAD_KNEES, 5=FULL_BODY) |
 | `approve_camera` | boolean | Approve camera registration |
