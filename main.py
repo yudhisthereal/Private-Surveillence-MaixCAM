@@ -20,7 +20,8 @@ from config import (
     initialize_camera, save_camera_info, STREAMING_HTTP_URL,
     BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START, NO_HUMAN_FRAMES_TO_STOP,
     MAX_RECORDING_DURATION_MS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
-    GC_INTERVAL_MS, NO_HUMAN_SECONDS_TO_STOP
+    GC_INTERVAL_MS, NO_HUMAN_SECONDS_TO_STOP,
+    STREAMING_SERVER_IP, register_with_streaming_server
 )
 from camera_manager import (
     initialize_cameras, load_fonts,
@@ -49,6 +50,7 @@ from tools.time_utils import time_ms, TaskProfiler, get_timestamp_str
 import os
 import queue
 import gc
+import time as py_time
 
 logger = DebugLogger("MAIN", instance_enable=False)
 
@@ -227,11 +229,53 @@ def draw_skeleton_lines(img, keypoints, color=image.COLOR_GREEN, thickness=2):
 def main():
     """Main entry point"""
     # 1. Connect to WiFi first (blocking call; waits until connected or timeout/error)
-    server_ip = connect_wifi()
+    server_ip = connect_wifi(timeout_s=10)
     logger.print("MAIN", "Camera IP: %s", server_ip)
 
     # 2. Initialize camera identity (registration needs network)
     CAMERA_ID, CAMERA_NAME, registration_status, local_ip = initialize_camera()
+
+    # 2b. Registration gate before main loop
+    # If status is not pending/registered, keep trying registration until it becomes pending/registered.
+    if registration_status not in ("pending", "registered"):
+        logger.print("MAIN", "[REG] Status is '%s'. Retrying registration until pending/registered...", registration_status)
+        while registration_status not in ("pending", "registered"):
+            CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
+                STREAMING_SERVER_IP,
+                existing_camera_id=CAMERA_ID if CAMERA_ID and CAMERA_ID != "camera_000" else None
+            )
+            camera_state_manager.set_camera_id(CAMERA_ID, notify=False)
+            camera_state_manager.set_camera_name(CAMERA_NAME)
+            camera_state_manager.set_registration_status(registration_status, notify=False)
+            camera_state_manager.set_local_ip(local_ip)
+            save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status, local_ip)
+
+            if registration_status not in ("pending", "registered"):
+                py_time.sleep(1)
+
+    # While pending, poll registration status every second until registered.
+    if registration_status == "pending":
+        logger.print("MAIN", "[REG] Status pending. Waiting for approval (polling every 1s)...")
+        while registration_status == "pending":
+            py_time.sleep(1)
+            polled_camera_id, polled_camera_name, polled_status, polled_ip = register_with_streaming_server(
+                STREAMING_SERVER_IP,
+                existing_camera_id=CAMERA_ID if CAMERA_ID and CAMERA_ID != "camera_000" else None
+            )
+
+            # Keep latest identity from server response
+            CAMERA_ID, CAMERA_NAME = polled_camera_id, polled_camera_name
+            registration_status = polled_status
+            if polled_ip and polled_ip != "unknown":
+                local_ip = polled_ip
+
+            camera_state_manager.set_camera_id(CAMERA_ID, notify=False)
+            camera_state_manager.set_camera_name(CAMERA_NAME)
+            camera_state_manager.set_registration_status(registration_status, notify=False)
+            camera_state_manager.set_local_ip(local_ip)
+            save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status, local_ip)
+
+        logger.print("MAIN", "[REG] Camera approved and registered. Continuing startup.")
     
     # 3. Initialize cameras and detectors (RTMP removed, now returns 4 values)
     cam, disp, pose_extractor, detector = initialize_cameras()
