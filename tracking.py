@@ -47,6 +47,85 @@ fall_states = {}  # Per-track fall detection state: {track_id: state_dict}
 # FPS tracking for fall detection
 current_fps = 30.0
 
+# Pose-recovery settings (tolerate short pose-estimation gaps)
+# If a new skeleton appears after a short gap, we can reuse the most recent
+# snapshot (bbox + pose_label + status) whose bbox bottom is spatially similar.
+POSE_RECOVERY_MAX_GAP_FRAMES = 3
+POSE_RECOVERY_BBOX_BOTTOM_TOLERANCE_PX = 20
+POSE_RECOVERY_CACHE_SIZE = 64
+
+# Frame index used for temporal matching in recovery logic
+tracking_frame_index = 0
+
+# Recent pose snapshots used for recovery
+# Each item: {
+#   frame_idx, bbox, bbox_bottom, pose_label, status, safety_reason,
+#   safety_details, int_features
+# }
+recent_pose_snapshots = []
+
+
+def _bbox_bottom_y(bbox):
+    """Get bottom-y coordinate from bbox [x, y, w, h]."""
+    if not bbox or len(bbox) < 4:
+        return None
+    return float(bbox[1]) + float(bbox[3])
+
+
+def _store_pose_snapshot(frame_idx, bbox, pose_label, status, safety_reason, safety_details, int_features):
+    """Store a recent pose snapshot for short-gap recovery."""
+    global recent_pose_snapshots
+
+    if bbox is None or pose_label in (None, "", "unknown"):
+        return
+
+    bbox_bottom = _bbox_bottom_y(bbox)
+    if bbox_bottom is None:
+        return
+
+    snapshot = {
+        "frame_idx": frame_idx,
+        "bbox": [bbox[0], bbox[1], bbox[2], bbox[3]],
+        "bbox_bottom": bbox_bottom,
+        "pose_label": pose_label,
+        "status": status,
+        "safety_reason": safety_reason,
+        "safety_details": safety_details,
+        "int_features": int_features,
+    }
+    recent_pose_snapshots.append(snapshot)
+
+    if len(recent_pose_snapshots) > POSE_RECOVERY_CACHE_SIZE:
+        recent_pose_snapshots = recent_pose_snapshots[-POSE_RECOVERY_CACHE_SIZE:]
+
+
+def _find_recovery_snapshot(current_bbox, current_frame_idx):
+    """Find best recent snapshot by bbox-bottom similarity within allowed frame gap."""
+    current_bottom = _bbox_bottom_y(current_bbox)
+    if current_bottom is None:
+        return None
+
+    best_snapshot = None
+    best_bottom_diff = None
+
+    for snap in reversed(recent_pose_snapshots):
+        gap = current_frame_idx - snap.get("frame_idx", -999999)
+
+        # Must be from previous frames and within tolerance window
+        if gap <= 0:
+            continue
+        if gap > POSE_RECOVERY_MAX_GAP_FRAMES:
+            # older snapshots (further in reversed order) will only be older
+            break
+
+        bottom_diff = abs(current_bottom - snap.get("bbox_bottom", current_bottom))
+        if bottom_diff <= POSE_RECOVERY_BBOX_BOTTOM_TOLERANCE_PX:
+            if best_snapshot is None or bottom_diff < best_bottom_diff:
+                best_snapshot = snap
+                best_bottom_diff = bottom_diff
+
+    return best_snapshot
+
 def set_fps(fps):
     """Set the current FPS for fall detection calculations"""
     global current_fps
@@ -146,7 +225,10 @@ def should_process_track(keypoints, input_width, input_height):
 
 def update_tracks(objs, current_time_ms=None):
     """Update tracking with new detections"""
-    global online_targets, fall_ids, unsafe_ids
+    global online_targets, fall_ids, unsafe_ids, tracking_frame_index
+
+    # Increment frame index once per tracking update
+    tracking_frame_index += 1
     
     # Convert YOLO objects to tracker objects
     out_bbox = yolo_objs_to_tracker_objs(objs, valid_class_id)
@@ -168,7 +250,7 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
         fps: Current FPS for fall detection
         safety_judgment: SafetyJudgment instance that combines all area checkers
     """
-    global online_targets, fall_ids, unsafe_ids, current_fps, fall_states
+    global online_targets, fall_ids, unsafe_ids, current_fps, fall_states, tracking_frame_index
     
     pose_label = "unknown"
     safety_reason = "normal"
@@ -224,18 +306,30 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
             # Skip pose classification and fall detection if keypoints are incomplete
             if not can_process:
                 logger.print("TRACKING", "Track %d: Keypoints incomplete, skipping pose classification and fall detection.", track.id)
+
+                current_bbox = [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h]
+                recovered = _find_recovery_snapshot(current_bbox, tracking_frame_index)
+
+                if recovered is not None:
+                    logger.print(
+                        "TRACKING",
+                        "Track %d: Recovered pose from recent snapshot (gap=%d, bottom_diff=%.1f)",
+                        track.id,
+                        tracking_frame_index - recovered.get("frame_idx", tracking_frame_index),
+                        abs(_bbox_bottom_y(current_bbox) - recovered.get("bbox_bottom", _bbox_bottom_y(current_bbox)))
+                    )
                 
                 # Still return track result with default values
                 track_result = {
                     "track_id": track.id,
-                    "bbox": [tracker_obj.x, tracker_obj.y, tracker_obj.w, tracker_obj.h],
+                    "bbox": recovered.get("bbox") if recovered is not None else current_bbox,
                     "keypoints": obj.points,
                     "keypoints_np": keypoints_np,
-                    "pose_label": "unknown",  # Unknown due to incomplete keypoints
-                    "status": "tracking",
-                    "int_features": None,
-                    "safety_reason": "normal",
-                    "safety_details": {}
+                    "pose_label": recovered.get("pose_label", "unknown") if recovered is not None else "unknown",
+                    "status": recovered.get("status", "normal") if recovered is not None else "normal",
+                    "int_features": recovered.get("int_features") if recovered is not None else None,
+                    "safety_reason": recovered.get("safety_reason", "normal") if recovered is not None else "normal",
+                    "safety_details": recovered.get("safety_details", {}) if recovered is not None else {}
                 }
                 return track_result
                 
@@ -360,10 +454,20 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                 "keypoints": obj.points,
                 "keypoints_np": keypoints_np,
                 "pose_label": pose_label,  # Return pose label for analytics/local processing
-                "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "tracking"),
+                "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "normal"),
                 "safety_reason": safety_reason,
                 "safety_details": safety_details
             }
+
+            _store_pose_snapshot(
+                tracking_frame_index,
+                track_result["bbox"],
+                track_result["pose_label"],
+                track_result["status"],
+                track_result["safety_reason"],
+                track_result["safety_details"],
+                int_features
+            )
             # print(f"process_track() -> {track_result}")
             
             return track_result
@@ -468,7 +572,7 @@ def update_fall_counters(fall_info):
 
 def clear_track_history():
     """Clear all track history"""
-    global online_targets, fall_ids, unsafe_ids, fall_states
+    global online_targets, fall_ids, unsafe_ids, fall_states, recent_pose_snapshots, tracking_frame_index
     online_targets = {
         "id": [],
         "bbox": [],
@@ -477,6 +581,8 @@ def clear_track_history():
     fall_ids.clear()
     unsafe_ids.clear()
     fall_states.clear()
+    recent_pose_snapshots.clear()
+    tracking_frame_index = 0
 
 def get_online_targets():
     """Get current online targets"""

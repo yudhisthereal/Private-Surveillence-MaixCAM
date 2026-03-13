@@ -498,12 +498,39 @@ NO_HUMAN_CONFIRM_FRAMES = 10       # Confirm human absence with 10 frames
     "angle": 70                    # Angle threshold (legacy)
 }
 FALL_COUNT_THRES = 2               # Consecutive frames to confirm
+
+# Pose-recovery fallback (tracking.py)
+POSE_RECOVERY_MAX_GAP_FRAMES = 3            # Max missing-frame gap to allow recovery
+POSE_RECOVERY_BBOX_BOTTOM_TOLERANCE_PX = 20 # Max |bottom_y_now - bottom_y_prev|
+POSE_RECOVERY_CACHE_SIZE = 64               # Snapshot cache length
 ```
+
+**Pose-Recovery Fallback (new):**
+- If pose estimation is incomplete for a track, the system can recover using the **most recent valid skeleton snapshot**.
+- Recovery is accepted only when:
+    1. Snapshot age is within `POSE_RECOVERY_MAX_GAP_FRAMES` (default: 3 frames), and
+    2. Bounding-box bottom alignment is close enough:
+         $|y_{bottom}^{now} - y_{bottom}^{snapshot}| \le \texttt{POSE_RECOVERY_BBOX_BOTTOM_TOLERANCE_PX}$.
+- Recovered fields are: `bbox`, `pose_label`, and safety-related status fields. This improves continuity after brief pose dropouts.
 
 **Refinement Features:**
 - **Incomplete Body Safeguard**: Automatically aborts detection if person is too close (Eye/Shoulder/Hip/Knee visibility check).
 - **Per-Track Counters**: Each person has their own fall detection state to prevent cross-interference.
 - **BBox Shrinkage Analysis**: Algorithm 1 now uses height shrinkage percentage rather than just raw vertical motion.
+
+**How to tune and effect on behavior:**
+- Increase `POSE_RECOVERY_MAX_GAP_FRAMES`:
+    - ✅ More tolerant to short detector outages.
+    - ⚠️ Higher chance of reusing stale pose/status if subjects move quickly.
+- Decrease `POSE_RECOVERY_MAX_GAP_FRAMES`:
+    - ✅ More conservative and reactive to scene changes.
+    - ⚠️ Less tolerant to transient failures.
+- Increase `POSE_RECOVERY_BBOX_BOTTOM_TOLERANCE_PX`:
+    - ✅ More matches recovered under noisy tracking.
+    - ⚠️ Greater risk of matching the wrong person in crowded scenes.
+- Decrease `POSE_RECOVERY_BBOX_BOTTOM_TOLERANCE_PX`:
+    - ✅ Safer matching, fewer false associations.
+    - ⚠️ More missed recoveries.
 
 **Available Algorithms:**
 - **Algorithm 1**: BBox motion only

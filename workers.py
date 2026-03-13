@@ -951,7 +951,7 @@ class TracksSenderWorker(threading.Thread):
                     "keypoints": track.get("keypoints", []),
                     "bbox": track.get("bbox"),
                     "pose_label": track.get("pose_label", "unknown"),
-                    "safety_status": track.get("status", "tracking"),
+                    "safety_status": track.get("safety_status", track.get("status", "normal")),
                     "safety_reason": track.get("safety_reason", "normal"),
                     "int_features": track.get("int_features")
                 }

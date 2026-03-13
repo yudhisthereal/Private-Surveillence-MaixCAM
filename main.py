@@ -52,6 +52,14 @@ import gc
 
 logger = DebugLogger("MAIN", instance_enable=False)
 
+# COCO 17 keypoint skeleton connections
+SKELETON_CONNECTIONS = [
+    (0, 1), (0, 2), (1, 3), (2, 4),
+    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+    (5, 11), (6, 12), (11, 12),
+    (11, 13), (13, 15), (12, 14), (14, 16)
+]
+
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
@@ -162,6 +170,55 @@ def merge_background_with_mask(old_background, new_frame, processed_tracks, padd
                             pass
 
     return merged
+
+
+def draw_skeleton_lines(img, keypoints, color=image.COLOR_GREEN, thickness=2):
+    """Draw skeleton lines from flattened COCO keypoints [x1, y1, x2, y2, ...]."""
+    if not keypoints or len(keypoints) < 4:
+        return
+
+    img_w = img.width()
+    img_h = img.height()
+
+    def is_valid_point(x, y):
+        """Return True only for drawable keypoints.
+
+        Invalid cases:
+        - undetected keypoint encoded as -1,-1
+        - negative coordinates
+        - legacy invalid 0,0
+        - coordinates outside image bounds
+        """
+        if x is None or y is None:
+            return False
+        if x == -1 or y == -1:
+            return False
+        # if x < 0 or y < 0:
+        #     return False
+        # if x == 0 and y == 0:
+        #     return False
+        if x >= img_w or y >= img_h:
+            return False
+        return True
+
+    points = []
+    for i in range(0, len(keypoints) - 1, 2):
+        x = float(keypoints[i])
+        y = float(keypoints[i + 1])
+        points.append((x, y))
+
+    for p1, p2 in SKELETON_CONNECTIONS:
+        if p1 >= len(points) or p2 >= len(points):
+            continue
+
+        x1, y1 = points[p1]
+        x2, y2 = points[p2]
+
+        # Do not draw lines connected to invalid keypoints (including -1,-1)
+        if not is_valid_point(x1, y1) or not is_valid_point(x2, y2):
+            continue
+
+        img.draw_line(int(x1), int(y1), int(x2), int(y2), color=color, thickness=thickness)
 
 # ============================================
 # MAIN INITIALIZATION
@@ -676,8 +733,17 @@ def main():
             recorder.add_frame(img)
         frame_profiler.end_task("recording")
         
-        # 11. Display to MaixVision
+        # 11. Display to MaixVision (with skeleton overlay)
         frame_profiler.start_task("display")
+        for track in processed_tracks:
+            keypoints = track.get("keypoints")
+            if not keypoints:
+                continue
+
+            safety_status = track.get("safety_status", "normal")
+            skeleton_color = image.COLOR_RED if safety_status == "fall" else image.COLOR_GREEN
+            draw_skeleton_lines(img, keypoints, color=skeleton_color, thickness=2)
+
         disp.show(img)
         frame_profiler.end_task("display")
         

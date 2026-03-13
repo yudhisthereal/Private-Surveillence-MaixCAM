@@ -16,3 +16,4 @@ TODO*.md
 .env.local
 pose/pose_estimation_old.py
 *.json
+commit_history.txt
