@@ -453,6 +453,9 @@ def main():
     cached_tracks = None
     cached_tracks_timeout = 3000 # 3s
     cached_tracks_last_updated = 0
+    raw_upload_interval_public_ms = 100
+    raw_upload_interval_private_ms = 5000
+    last_raw_upload_ms = 0
     
     # ============================================
     # MAIN LOOP
@@ -940,12 +943,18 @@ def main():
         frame_profiler.end_task("display")
         
         # 12. Update FrameUploadWorker with latest RAW frame (no overlays)
-        # Always send raw frame regardless of show_raw flag
+        # Privacy mode: throttle raw uploads to reduce exposure.
         frame_profiler.start_task("frame_upload")
         try:
-            success, jpeg_bytes = cv2.imencode('.jpg', raw_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-            if success:
-                frame_upload_worker.update_frame(jpeg_bytes.tobytes())
+            show_raw = get_flag("show_raw", False)
+            upload_interval_ms = raw_upload_interval_public_ms if show_raw else raw_upload_interval_private_ms
+            now_ms = time_ms()
+
+            if now_ms - last_raw_upload_ms >= upload_interval_ms:
+                success, jpeg_bytes = cv2.imencode('.jpg', raw_img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                if success:
+                    frame_upload_worker.update_frame(jpeg_bytes.tobytes())
+                    last_raw_upload_ms = now_ms
         except Exception:
             pass
         frame_profiler.end_task("frame_upload")
