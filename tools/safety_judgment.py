@@ -29,10 +29,8 @@ class SafetyJudgment:
 
     Rules (in order of priority):
     1. Fall detection always takes precedence (handled by caller)
-    2. If lying_down AND in_floor_area → UNSAFE (lying on floor)
-    3. If in_bed_area AND time > threshold → UNSAFE (in bed too long)
-    4. If lying_down AND not_in_safe_area → UNSAFE (lying down outside safe zone)
-    5. Otherwise → SAFE (tracking)
+    2. Area overlap resolution priority: bed > couch > bench > chair > floor
+    3. Otherwise → SAFE (tracking)
     """
 
     def __init__(self,
@@ -101,11 +99,11 @@ class SafetyJudgment:
             check_method = self.check_method
 
         is_lying_down = pose_label == "lying_down"
+        is_sitting = pose_label == "sitting"
 
         # Initialize details dictionary
         details = {
             "in_bed_area": False,
-            "in_floor_area": False,
             "in_floor_area": False,
             "in_chair_area": False,
             "in_couch_area": False,
@@ -115,18 +113,19 @@ class SafetyJudgment:
             "pose_label": pose_label
         }
 
-        # Rule 1: If lying_down AND in_floor_area → UNSAFE (lying on floor)
-        if self.floor_area_checker is not None and is_lying_down:
-            in_floor = self.floor_area_checker.check_floor_area(body_keypoints, check_method)
-            details["in_floor_area"] = in_floor
+        # Evaluate all relevant checkers first, then resolve by priority:
+        # bed > couch > bench > chair > floor
+        checker_outcomes = {
+            "bed": None,
+            "couch": None,
+            "bench": None,
+            "chair": None,
+            "floor": None,
+        }
 
-            if in_floor:
-                # Person is lying on the floor - UNSAFE
-                return False, SafetyReason.LYING_ON_FLOOR, details
-
-        # Rule 2: Check Bed Area (Smart Monitoring)
+        # Bed area check (Smart Monitoring)
         if self.bed_area_checker is not None:
-             is_in_bed, time_in_bed, is_bed_unsafe, bed_unsafe_reason = self.bed_area_checker.check_bed_area(
+            is_in_bed, time_in_bed, is_bed_unsafe, bed_unsafe_reason = self.bed_area_checker.check_bed_area(
                 track_id, body_keypoints,
                 current_time_str=current_time_str,
                 max_sleep_duration_min=max_sleep_duration_min,
@@ -134,10 +133,10 @@ class SafetyJudgment:
                 wakeup_time_str=wakeup_time_str,
                 check_method=check_method
             )
-             details["in_bed_area"] = is_in_bed
-             details["bed_time_ms"] = time_in_bed * 1000 # Convert back to ms for consistency if needed
-             
-             if is_in_bed:
+            details["in_bed_area"] = is_in_bed
+            details["bed_time_ms"] = time_in_bed * 1000  # Convert back to ms for consistency if needed
+
+            if is_in_bed:
                 # If lying down or sitting in bed
                 if pose_label in ["lying_down", "sitting"]:
                     if is_bed_unsafe:
@@ -146,30 +145,18 @@ class SafetyJudgment:
                             reason = SafetyReason.UNSAFE_SLEEP_PAST_WAKEUP
                         elif bed_unsafe_reason == "sleep_too_long":
                             reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-                        
-                        return False, reason, details
+                        checker_outcomes["bed"] = (False, reason)
                     else:
-                        return True, SafetyReason.SAFE_IN_BED, details
+                        checker_outcomes["bed"] = (True, SafetyReason.SAFE_IN_BED)
                 # If standing in bed -> fall through to safe tracking
 
-        # Rule 3: Chair area check (only for sitting pose, hips only)
-        if self.chair_area_checker is not None and pose_label == "sitting":
-            in_chair = self.chair_area_checker.check_chair_area(
-                body_keypoints, CheckMethod.HIP
-            )
-            details["in_chair_area"] = in_chair
-            if in_chair:
-                return True, SafetyReason.SAFE_IN_CHAIR, details
-
-        # Rule 4: Couch area check (Smart Monitoring)
+        # Couch area check (Smart Monitoring)
         if self.couch_area_checker is not None:
-            # Couch check needs specific check method logic inside, but our wrapper handles smart monitoring too
-            # We need to decide which method to pass.
             # If lying -> TORSO. If sitting -> HIP.
-            check_method_couch = CheckMethod.TORSO # default
-            if pose_label == "sitting":
-                 check_method_couch = CheckMethod.HIP
-            
+            check_method_couch = CheckMethod.TORSO
+            if is_sitting:
+                check_method_couch = CheckMethod.HIP
+
             is_in_couch, time_in_couch, is_couch_unsafe, couch_unsafe_reason = self.couch_area_checker.check_couch_area(
                 track_id, body_keypoints,
                 current_time_str=current_time_str,
@@ -179,33 +166,32 @@ class SafetyJudgment:
                 check_method=check_method_couch
             )
             details["in_couch_area"] = is_in_couch
-            
-            if is_in_couch:
-                if pose_label in ["lying_down", "sitting"]:
-                     if is_couch_unsafe:
-                        reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-                        if couch_unsafe_reason == "oversleeping":
-                            reason = SafetyReason.UNSAFE_SLEEP_PAST_WAKEUP
-                        elif couch_unsafe_reason == "sleep_too_long":
-                            reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-                        
-                        return False, reason, details
-                     else:
-                        reason = SafetyReason.SAFE_IN_COUCH_LYING if pose_label == "lying_down" else SafetyReason.SAFE_IN_COUCH_SITTING
-                        return True, reason, details
 
-        # Rule 5: Bench area check (conditional on pose)
+            if is_in_couch and (is_lying_down or is_sitting):
+                if is_couch_unsafe:
+                    reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
+                    if couch_unsafe_reason == "oversleeping":
+                        reason = SafetyReason.UNSAFE_SLEEP_PAST_WAKEUP
+                    elif couch_unsafe_reason == "sleep_too_long":
+                        reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
+
+                    checker_outcomes["couch"] = (False, reason)
+                else:
+                    reason = SafetyReason.SAFE_IN_COUCH_LYING if is_lying_down else SafetyReason.SAFE_IN_COUCH_SITTING
+                    checker_outcomes["couch"] = (True, reason)
+
+        # Bench area check (conditional on pose)
         if self.bench_area_checker is not None:
             check_method_bench = None
             reason_suffix = ""
-            
-            if pose_label == "lying_down":
+
+            if is_lying_down:
                 check_method_bench = CheckMethod.TORSO
                 reason_suffix = "LYING"
-            elif pose_label == "sitting":
+            elif is_sitting:
                 check_method_bench = CheckMethod.HIP
                 reason_suffix = "SITTING"
-            
+
             if check_method_bench:
                 in_bench = self.bench_area_checker.check_bench_area(
                     body_keypoints, check_method_bench
@@ -213,9 +199,34 @@ class SafetyJudgment:
                 details["in_bench_area"] = in_bench
                 if in_bench:
                     reason = SafetyReason.SAFE_IN_BENCH_LYING if reason_suffix == "LYING" else SafetyReason.SAFE_IN_BENCH_SITTING
-                    return True, reason, details
+                    checker_outcomes["bench"] = (True, reason)
 
-        # Rule 6: Otherwise → SAFE
+        # Chair area check (only for sitting pose, hips only)
+        if self.chair_area_checker is not None and is_sitting:
+            in_chair = self.chair_area_checker.check_chair_area(
+                body_keypoints, CheckMethod.HIP
+            )
+            details["in_chair_area"] = in_chair
+            if in_chair:
+                checker_outcomes["chair"] = (True, SafetyReason.SAFE_IN_CHAIR)
+
+        # Floor area check (lowest priority, only relevant for lying_down)
+        if self.floor_area_checker is not None and is_lying_down:
+            in_floor = self.floor_area_checker.check_floor_area(body_keypoints, check_method)
+            details["in_floor_area"] = in_floor
+
+            if in_floor:
+                checker_outcomes["floor"] = (False, SafetyReason.LYING_ON_FLOOR)
+
+        # Resolve by priority when overlaps happen
+        for checker_name in ["bed", "couch", "bench", "chair", "floor"]:
+            outcome = checker_outcomes[checker_name]
+            if outcome is not None:
+                is_safe, reason = outcome
+                details["bed_status"] = checker_name
+                return is_safe, reason, details
+
+        # Otherwise → SAFE
         return True, SafetyReason.SAFE_TRACKING, details
 
     def reset_bed_tracking(self, track_id: int):
