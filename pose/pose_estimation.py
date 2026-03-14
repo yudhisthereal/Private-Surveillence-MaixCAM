@@ -3,6 +3,9 @@ from collections import deque
 import random
 import math
 import time
+from debug_config import DebugLogger
+
+_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
 
 
 class PoseEstimation:
@@ -182,6 +185,12 @@ class PoseEstimation:
                 thigh_calf_ratio, torso_leg_ratio
             ) = self._calculate_limb_lengths_and_ratios(km)
 
+            _logger.print("RAW_INPUT",
+                          "torso_angle=%.2f  thigh_uprightness=%.2f  "
+                          "thigh_len=%.2f  calf_len=%.2f  torso_h=%.2f  leg_len=%.2f",
+                          torso_angle, thigh_uprightness,
+                          thigh_len, calf_len, torso_h, leg_len)
+
             plain_label, plain_code, flags = self._classify_pose_plain(
                 torso_angle, thigh_uprightness,
                 thigh_calf_ratio, torso_leg_ratio
@@ -220,6 +229,9 @@ class PoseEstimation:
 
             # Store as array in exact order: [Tra, Tha, Thl, cl, Trl, ll]
             self.pose_data['int_features'] = [Tra, Tha, Thl, cl, Trl, ll]
+            _logger.print("COMPUTED",
+                          "int_features → [Tra=%d, Tha=%d, Thl=%d, cl=%d, Trl=%d, ll=%d]",
+                          Tra, Tha, Thl, cl, Trl, ll)
 
             # Testing flow: Local simulation of Caregiver and Analytics Server operations
             

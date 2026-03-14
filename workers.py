@@ -11,6 +11,7 @@ from debug_config import DebugLogger
 
 # Module-level debug logger instance
 logger = DebugLogger(tag="WORKERS", instance_enable=False)
+int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
 from config import (
     FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
@@ -955,6 +956,11 @@ class TracksSenderWorker(threading.Thread):
                     "safety_reason": track.get("safety_reason", "normal"),
                     "int_features": track.get("int_features")
                 }
+                int_features_logger.print("BUILD_PAYLOAD",
+                                          "Track %s → payload keys: %s | int_features: %s",
+                                          track_for_streaming["track_id"],
+                                          list(track_for_streaming.keys()),
+                                          track_for_streaming["int_features"])
                 tracks_for_streaming.append(track_for_streaming)
             
             # Send to streaming server asynchronously (fire-and-forget)

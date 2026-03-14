@@ -7,7 +7,8 @@ from config import STREAMING_HTTP_URL
 from debug_config import DebugLogger
 
 # Module-level debug logger instance
-logger = DebugLogger(tag="STREAMING", instance_enable=True)
+logger = DebugLogger(tag="STREAMING", instance_enable=False)
+int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
 
 
 def _fire_and_forget_post(endpoint, json_data=None, data=None, params=None, headers=None, timeout=2.0, tag="API_REQUEST", log_success=False):
@@ -187,5 +188,11 @@ def send_tracks_to_streaming_server(camera_id, tracks):
         "tracks": tracks,
         "timestamp": time.time()
     }
+    for track in tracks:
+        int_features_logger.print("POST /api/stream/tracks",
+                                  "Track %s → payload keys: %s | int_features: %s",
+                                  track.get("track_id"),
+                                  list(track.keys()),
+                                  track.get("int_features"))
     return _fire_and_forget_post("/api/stream/tracks", json_data=data, timeout=0.1, tag="POST TRACKS")
 

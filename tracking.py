@@ -10,6 +10,7 @@ from debug_config import DebugLogger
 
 # Module-level debug logger instance
 logger = DebugLogger(tag="TRACKING", instance_enable=False)
+int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
 
 pose_estimator = PoseEstimation()
 
@@ -456,8 +457,12 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                 "pose_label": pose_label,  # Return pose label for analytics/local processing
                 "status": "fall" if track.id in fall_ids else ("unsafe" if track.id in unsafe_ids else "normal"),
                 "safety_reason": safety_reason,
-                "safety_details": safety_details
+                "safety_details": safety_details,
+                "int_features": int_features
             }
+            int_features_logger.print("TRACK_RESULT",
+                                      "Track %s: int_features in track_result: %s",
+                                      track.id, int_features)
 
             _store_pose_snapshot(
                 tracking_frame_index,
@@ -510,6 +515,9 @@ def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
                     # Get features when HME is enabled for Caregiver payload or Analytics
                     # Since use_hme is hardcoded to True, we always get int_features
                     int_features = pose_estimator.get_int_features()
+                    int_features_logger.print("CHECK_FALL",
+                                              "int_features retrieved from pose_estimator: %s",
+                                              int_features)
             except ImportError:
                 # Fallback if pose_estimation not available
                 pass
