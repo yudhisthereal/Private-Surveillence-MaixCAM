@@ -937,7 +937,7 @@ By representing physical ratios as reliable integers, it enables privacy-preserv
 
 #### HME Multi-Party Computation Flow
 
-These extracted integer features are encrypted using a Paillier-like scheme by the Streaming Server (Caregiver) and processed in tandem with the [Analytics Server](https://github.com/yudhisthereal/fall-detection-analytics/). This allows the cloud service to securely compute pose classification without ever exposing the patient's raw physical measurements.
+These extracted integer features are encrypted by the Streaming Server (Caregiver) and processed in tandem with the [Analytics Server](https://github.com/yudhisthereal/fall-detection-analytics/). This allows the cloud service to securely compute pose classification without ever exposing the patient's raw physical measurements.
 
 The system relies on a multi-party protocol to evaluate non-linear comparisons and polynomial evaluations over encrypted data:
 
@@ -949,7 +949,7 @@ sequenceDiagram
 
     C->>S: 1. Send Plaintext Integer Features
 
-    Note over S: Encrypt Features<br/>(Paillier Scheme)
+    Note over S: Encrypt Features<br/>
     
     S->>A: 2. Send Encrypted Features
 
