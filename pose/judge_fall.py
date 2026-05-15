@@ -67,10 +67,12 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     # 2. Percentage of shrinkage of bbox height
     # Logic: if previous is higher than current y (moved down), check shrinkage
     shrinkage = 0.0
+    height_decrement_px = 0
     if dy_top > 0 and pre_bbox[3] > 0:
-        shrinkage = (pre_bbox[3] - cur_bbox[3]) / pre_bbox[3]
+        height_decrement_px = pre_bbox[3] - cur_bbox[3]
+        shrinkage = height_decrement_px / pre_bbox[3]
 
-    logger.print("FALL_DETECT", "dy_top=%.2f, shrinkage=%.4f, threshold=%s, fps=%s", dy_top, shrinkage, fallParam['v_bbox_y'], fps)
+    logger.print("FALL_DETECT", "dy_top=%.2f, shrinkage=%.4f, height_decrement_px=%.2f, threshold=%s, fps=%s", dy_top, shrinkage, height_decrement_px, fallParam['v_bbox_y'], fps)
 
     # Extract from pose_data
     torso_angle = None
@@ -82,8 +84,8 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
         logger.print("FALL_DETECT", "Pose mode: torso_angle=%s, thigh_uprightness=%s", torso_angle, thigh_uprightness)
 
     # Calculate bbox motion evidence
-    # User Request: if moved down AND shrinkage > threshold -> Fall
-    bbox_motion_detected = (dy_top > 0 and abs(shrinkage) > fallParam["v_bbox_y"])
+    # User Request: if moved down AND shrinkage > threshold AND height decrement > pixel threshold -> Fall
+    bbox_motion_detected = (dy_top > 0 and abs(shrinkage) > fallParam["v_bbox_y"] and height_decrement_px > fallParam.get("v_bbox_height_min_px", 0))
     
     # Calculate pose condition
     strict_pose_condition = False
@@ -102,9 +104,6 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
     if bbox_motion_detected and strict_pose_condition:
         # Strong evidence: both motion AND clearly lying down
         counter_motion_pose_and = min(FALL_COUNT_THRES, counter_motion_pose_and + 2)
-    elif bbox_motion_detected or strict_pose_condition:
-        # Moderate evidence: one or the other
-        counter_motion_pose_and = min(FALL_COUNT_THRES, counter_motion_pose_and + 1)
     else:
         # No evidence
         counter_motion_pose_and = max(0, counter_motion_pose_and - 1)

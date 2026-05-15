@@ -25,6 +25,7 @@ valid_class_id = [0]
 # Fall detection parameters
 fallParam = {
     "v_bbox_y": 0.4, # amount of shrinkage in bounding box relative to the original size in percent (30%)
+    "v_bbox_height_min_px": 25, # minimum pixel height decrement required (even if shrinkage % is high)
     "angle": 70
 }
 
