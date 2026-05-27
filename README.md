@@ -438,8 +438,7 @@ Place these files in `/root/models/` on your MaixCAM:
 1. **Copy .env.example to .env** and configure:
 
 ```bash
-STREAMING_SERVER_IP=your.server.ip
-STREAMING_SERVER_PORT=8000
+STREAMING_SERVER_BASE_URL=http://emotression.iik.ntnu.no
 ```
 
 2. **Configure Wi-Fi** in `main.py` or via environment:

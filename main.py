@@ -21,7 +21,7 @@ from config import (
     BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START, NO_HUMAN_FRAMES_TO_STOP,
     MAX_RECORDING_DURATION_MS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
     GC_INTERVAL_MS, NO_HUMAN_SECONDS_TO_STOP,
-    STREAMING_SERVER_IP, register_with_streaming_server
+    register_with_streaming_server
 )
 from camera_manager import (
     initialize_cameras, load_fonts,
@@ -241,7 +241,6 @@ def main():
         logger.print("MAIN", "[REG] Status is '%s'. Retrying registration until pending/registered...", registration_status)
         while registration_status not in ("pending", "registered"):
             CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
-                STREAMING_SERVER_IP,
                 existing_camera_id=CAMERA_ID if CAMERA_ID and CAMERA_ID != "camera_000" else None
             )
             camera_state_manager.set_camera_id(CAMERA_ID, notify=False)
@@ -259,7 +258,6 @@ def main():
         while registration_status == "pending":
             py_time.sleep(1)
             polled_camera_id, polled_camera_name, polled_status, polled_ip = register_with_streaming_server(
-                STREAMING_SERVER_IP,
                 existing_camera_id=CAMERA_ID if CAMERA_ID and CAMERA_ID != "camera_000" else None
             )
 

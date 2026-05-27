@@ -85,16 +85,20 @@ def _parse_env_file(path):
 
 def reload_from_env():
     """Reload env-derived config values from os.environ."""
-    global STREAMING_SERVER_IP, STREAMING_SERVER_PORT, STREAMING_HTTP_URL
-    STREAMING_SERVER_IP = os.getenv("STREAMING_SERVER_IP", "103.150.93.198")
-    STREAMING_SERVER_PORT = int(os.getenv("STREAMING_SERVER_PORT", "8000"))
-    STREAMING_HTTP_URL = f"http://{STREAMING_SERVER_IP}:{STREAMING_SERVER_PORT}"
+    global STREAMING_SERVER_BASE_URL, STREAMING_HTTP_URL
+    STREAMING_SERVER_BASE_URL = (os.getenv("STREAMING_SERVER_BASE_URL") or "").strip()
+    if not STREAMING_SERVER_BASE_URL:
+        raise RuntimeError(
+            "Missing required env var: STREAMING_SERVER_BASE_URL. "
+            "Example: STREAMING_SERVER_BASE_URL=http://emotression.iik.ntnu.no"
+        )
+
+    STREAMING_HTTP_URL = STREAMING_SERVER_BASE_URL.rstrip("/")
     _log(
         "INFO",
         (
             "Effective streaming config: "
-            f"STREAMING_SERVER_IP={STREAMING_SERVER_IP}, "
-            f"STREAMING_SERVER_PORT={STREAMING_SERVER_PORT}, "
+            f"STREAMING_SERVER_BASE_URL={STREAMING_SERVER_BASE_URL}, "
             f"STREAMING_HTTP_URL={STREAMING_HTTP_URL}"
         )
     )
@@ -110,9 +114,14 @@ def configure_env(path):
 # ============================================
 # SERVER CONFIGURATION (loaded from .env)
 # ============================================
-STREAMING_SERVER_IP = None
-STREAMING_SERVER_PORT = None
+STREAMING_SERVER_BASE_URL = None
 STREAMING_HTTP_URL = None
+
+# Best-effort bootstrap: load common .env paths before strict validation.
+for _default_env_path in ("/root/.env", ".env"):
+    if os.path.exists(_default_env_path):
+        _parse_env_file(_default_env_path)
+
 reload_from_env()
 
 # ============================================
@@ -216,7 +225,7 @@ def save_camera_info(camera_id, camera_name, registration_status, ip_address="")
         _log("ERROR", f"Error saving camera info: {e}")
         return False
 
-def register_with_streaming_server(server_ip, existing_camera_id=None):
+def register_with_streaming_server(existing_camera_id=None):
     """Register camera with streaming server (now handles all camera management)"""
     try:
         # First get our local IP
@@ -225,7 +234,7 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
             _log("INFO", "Cannot determine local IP address")
             return "camera_000", "Unnamed Camera", "unregistered", local_ip
         
-        url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/register"
+        url = f"{STREAMING_HTTP_URL}/api/stream/register"
         
         params = {}
         if existing_camera_id:
@@ -267,10 +276,10 @@ def register_with_streaming_server(server_ip, existing_camera_id=None):
         local_ip = get_local_ip()
         return "camera_000", "Unnamed Camera", "unregistered", local_ip
 
-def check_registration_status(server_ip, camera_id, local_ip):
+def check_registration_status(camera_id):
     """Check if camera is already registered with server"""
     try:
-        url = f"http://{server_ip}:{STREAMING_SERVER_PORT}/api/stream/registered"
+        url = f"{STREAMING_HTTP_URL}/api/stream/registered"
         _log("INFO", "Checking registration status on streaming server...")
         # debug_print("INFO", "API_REQUEST", "%s | endpoint: /api/stream/registered", "GET")
 
@@ -316,7 +325,7 @@ def initialize_camera():
 
     # Always check registration status with server on startup
     if CAMERA_ID and CAMERA_ID != "camera_000":
-        server_status = check_registration_status(STREAMING_SERVER_IP, CAMERA_ID, local_ip)
+        server_status = check_registration_status(CAMERA_ID)
         
         if server_status == "registered":
             # Camera is registered on server
@@ -326,7 +335,6 @@ def initialize_camera():
             # Need to re-register
             _log("INFO", f"Camera not registered on server, attempting registration...")
             CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
-                STREAMING_SERVER_IP, 
                 existing_camera_id=CAMERA_ID
             )
             # Save the new registration info
@@ -338,7 +346,7 @@ def initialize_camera():
         # First time registration
         _log("INFO", f"First time registration...")
         CAMERA_ID, CAMERA_NAME, registration_status, local_ip = register_with_streaming_server(
-            STREAMING_SERVER_IP
+            existing_camera_id=None
         )
         save_camera_info(CAMERA_ID, CAMERA_NAME, registration_status, local_ip)
 

@@ -22,7 +22,7 @@ from control_manager import (
     get_camera_state_from_server, report_state,
     get_bed_areas_from_server, get_floor_areas_from_server,
     get_chair_areas_from_server, get_couch_areas_from_server, get_bench_areas_from_server,
-    camera_state_manager
+    camera_state_manager, get_flag
 )
 from streaming import send_frame_to_server, send_background_to_server
 from tools.time_utils import time_ms, TaskProfiler
@@ -370,7 +370,15 @@ class FrameUploadWorker(threading.Thread):
                     time.sleep(0.01)  # Brief pause after background upload
                     continue
                 
-                # PRIORITY 2: Regular frame upload (ALWAYS send raw frames)
+                # PRIORITY 2: Regular frame upload (respects show_raw flag)
+                # Check if show_raw flag is enabled - if not, skip frame upload for privacy
+                show_raw = get_flag("show_raw", False)
+                if not show_raw:
+                    # Privacy mode: don't send raw frames to streaming server
+                    # Only keypoints are sent via TracksSenderWorker
+                    time.sleep(0.01)
+                    continue
+                
                 # Get the current frame
                 current_frame = self.get_frame()
 
