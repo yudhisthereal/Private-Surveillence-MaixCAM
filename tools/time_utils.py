@@ -42,7 +42,7 @@ def get_current_time_str(camera_id: str = None) -> str:
 
     # 2. Fallback to local system time
     tm = time.localtime()
-    return f"{tm.tm_hour:02d}:{tm.tm_min:02d}"
+    return f"fb: {tm.tm_hour:02d}:{tm.tm_min:02d}"
 
 def time_ms():
     return round(time.time() * 1000)

@@ -772,13 +772,7 @@ def main():
 
         frame_profiler.end_task("tracking")
         
-        # 10. Recording (no display, no UI rendering)
-        frame_profiler.start_task("recording")
-        if is_recording:
-            recorder.add_frame(img)
-        frame_profiler.end_task("recording")
-        
-        # 11. Display to MaixVision (with skeleton overlay)
+        # 10. Display to MaixVision (with skeleton overlay)
         frame_profiler.start_task("display")
         for track in processed_tracks:
             keypoints = track.get("keypoints")
@@ -788,9 +782,54 @@ def main():
             safety_status = track.get("safety_status", "normal")
             skeleton_color = image.COLOR_RED if safety_status == "fall" else image.COLOR_GREEN
             draw_skeleton_lines(img, keypoints, color=skeleton_color, thickness=2)
+        # Draw time overlay at top-right corner
+        try:
+            from tools.time_utils import get_current_time_str
+            time_str = get_current_time_str(CAMERA_ID)
+            
+            # Get image dimensions for positioning
+            img_width = img.width()
+            
+            scale = 0.5  # Adjust this for larger/smaller text
+            char_width = 8 * scale  # Approximate width per character at this scale
+            char_height = 14 * scale  # Approximate height at this scale
+            
+            text_width = len(time_str) * char_width
+            text_height = char_height
+            
+            # Position: top-right with some padding
+            x = int(img_width - text_width - 30)
+            y = 10
+            
+            # Clamp to ensure text stays within image bounds
+            if x < 0:
+                x = padding
+            if y < 0:
+                y = padding
+            
+            # Draw black outline (8-direction offset)
+            outline_color = image.COLOR_BLACK
+            offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+            for ox, oy in offsets:
+                img.draw_string(x + ox, y + oy, time_str, color=outline_color, scale=scale)
+            
+            # Draw white text on top
+            img.draw_string(x, y, time_str, color=image.COLOR_WHITE, scale=scale)
+            
+        except Exception as e:
+            logger.print("MAIN", "[OVERLAY] Failed to draw time overlay: %s", e)
 
         disp.show(img)
         frame_profiler.end_task("display")
+
+        disp.show(img)
+        frame_profiler.end_task("display")
+        
+        # 11. Recording
+        frame_profiler.start_task("recording")
+        if is_recording:
+            recorder.add_frame(img)
+        frame_profiler.end_task("recording")
         
         # 12. Update FrameUploadWorker with latest RAW frame (no overlays)
         # Privacy mode: throttle raw uploads to reduce exposure.
