@@ -135,9 +135,9 @@ CAMERA_NAME = None
 # RECORDING PARAMETERS
 # ============================================
 MIN_HUMAN_FRAMES_TO_START = 3
-NO_HUMAN_FRAMES_TO_STOP = 30  # Will be overridden by NO_HUMAN_SECONDS_TO_STOP
 NO_HUMAN_SECONDS_TO_STOP = 5  # 5 seconds at 60fps = 300 frames before confirming no person
-MAX_RECORDING_DURATION_MS = 90000
+MAX_VIDEO_DURATION_SECONDS = 3600  # 1 hour in seconds
+MAX_VIDEO_DURATION_MS = MAX_VIDEO_DURATION_SECONDS * 1000
 
 # Background update settings
 UPDATE_INTERVAL_MS = 10000

@@ -18,8 +18,8 @@ from tools.safety_judgment import SafetyJudgment
 # Import modular components
 from config import (
     initialize_camera, save_camera_info, STREAMING_HTTP_URL,
-    BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START, NO_HUMAN_FRAMES_TO_STOP,
-    MAX_RECORDING_DURATION_MS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
+    BACKGROUND_PATH, MIN_HUMAN_FRAMES_TO_START,
+    MAX_VIDEO_DURATION_MS, MAX_VIDEO_DURATION_SECONDS, UPDATE_INTERVAL_MS, NO_HUMAN_CONFIRM_FRAMES,
     GC_INTERVAL_MS, NO_HUMAN_SECONDS_TO_STOP,
     register_with_streaming_server
 )
@@ -195,10 +195,6 @@ def draw_skeleton_lines(img, keypoints, color=image.COLOR_GREEN, thickness=2):
             return False
         if x == -1 or y == -1:
             return False
-        # if x < 0 or y < 0:
-        #     return False
-        # if x == 0 and y == 0:
-        #     return False
         if x >= img_w or y >= img_h:
             return False
         return True
@@ -223,8 +219,39 @@ def draw_skeleton_lines(img, keypoints, color=image.COLOR_GREEN, thickness=2):
         img.draw_line(int(x1), int(y1), int(x2), int(y2), color=color, thickness=thickness)
 
 # ============================================
-# MAIN INITIALIZATION
+# RECORDING HELPER FUNCTIONS
 # ============================================
+
+def start_new_recording(recorder, skeleton_saver, is_recording, pose_extractor):
+    """Start a new recording session."""
+    if is_recording:
+        # Stop current recording first
+        recorder.end()
+        skeleton_saver.save_to_csv()
+        logger.print("MAIN", "Stopped recording for segment split")
+    
+    timestamp = get_timestamp_str()
+    video_path = f"/root/recordings/{timestamp}.mp4"
+    
+    # Use the same dimensions as the original code
+    recorder.start(video_path, pose_extractor.input_width(), pose_extractor.input_height())
+    
+    skeleton_saver.start_new_log(timestamp)
+    recording_start_time = time_ms()
+    frame_id = 0
+    is_recording = True
+    update_is_recording(True)
+    logger.print("MAIN", "Started new recording segment: %s", timestamp)
+    
+    return is_recording, recording_start_time, frame_id
+
+
+def calculate_mean_fps(fps_history, default_fps=30.0):
+    """Calculate mean FPS from history array."""
+    if not fps_history:
+        return default_fps
+    return sum(fps_history) / len(fps_history)
+
 
 def main():
     """Main entry point"""
@@ -439,6 +466,12 @@ def main():
     ])
     frame_start_time = time_ms()
     
+    # FPS tracking
+    fps_history = []  # Store raw FPS values
+    FPS_HISTORY_SIZE = 100  # Number of frames to average
+    mean_fps = 30.0  # Default fallback FPS
+    no_human_frames_to_stop = int(NO_HUMAN_SECONDS_TO_STOP * mean_fps)  # Dynamic frames to stop based on mean FPS
+    
     # caches last known track, will only be cleared after `cached_tracks_timeout` of no tracks detected.
     # is used for selective background updates
     cached_tracks = None
@@ -462,6 +495,7 @@ def main():
     logger.print("MAIN", "  UI Rendering: DISABLED (no text/skeleton)")
     logger.print("MAIN", "  Display: DISABLED")
     logger.print("MAIN", "  Fall Algorithm: %s", control_flags.get('fall_algorithm'))
+    logger.print("MAIN", "  Max Video Duration: %d seconds (1 hour)", MAX_VIDEO_DURATION_SECONDS)
     
     # Upload background image to server at startup
     if streaming_server_available and background_img is not None:
@@ -622,26 +656,22 @@ def main():
         human_present = current_human_present or pose_human_present
         
         human_presence_history.append(human_present)
-        if len(human_presence_history) > NO_HUMAN_FRAMES_TO_STOP + 1:
+        if len(human_presence_history) > no_human_frames_to_stop + 1:
             human_presence_history.pop(0)
         
         # Recording logic
         record_flag = get_flag("record", False)
         now = time_ms()
-        
+
+        # Check if we need to start recording
         if record_flag and not is_recording:
             if (len(human_presence_history) >= MIN_HUMAN_FRAMES_TO_START and 
                 all(human_presence_history[-MIN_HUMAN_FRAMES_TO_START:])):
-                timestamp = get_timestamp_str()
-                video_path = f"/root/recordings/{timestamp}.mp4"
-                recorder.start(video_path, pose_extractor.input_width(), pose_extractor.input_height())
-                skeleton_saver_2d.start_new_log(timestamp)
-                frame_id = 0
-                recording_start_time = now
-                is_recording = True
-                update_is_recording(True)
-                logger.print("MAIN", "Started recording: %s", timestamp)
-        
+                is_recording, recording_start_time, frame_id = start_new_recording(
+                    recorder, skeleton_saver_2d, is_recording, pose_extractor
+                )
+
+        # Check if we need to stop recording (due to no humans or record flag off)
         if is_recording:
             no_human_count = 0
             for presence in reversed(human_presence_history):
@@ -650,29 +680,47 @@ def main():
                 else:
                     break
             
-            no_human_frames_to_stop = NO_HUMAN_SECONDS_TO_STOP * 60
+            # Check for max video duration (1 hour) FIRST - this takes priority
+            video_duration_ms = now - recording_start_time
             
-            if (no_human_count >= no_human_frames_to_stop or 
-                now - recording_start_time >= MAX_RECORDING_DURATION_MS or
-                not record_flag):
+            if video_duration_ms >= MAX_VIDEO_DURATION_MS:
+                # Video reached 1 hour - save and restart if still recording should continue
+                logger.print("MAIN", "Video reached 1 hour duration - splitting recording")
+                # Save current video and start new one immediately
+                is_recording, recording_start_time, frame_id = start_new_recording(
+                    recorder, skeleton_saver_2d, is_recording, pose_extractor
+                )
+            elif (no_human_count >= no_human_frames_to_stop or not record_flag):
+                # Stop recording due to no humans or recording disabled
                 recorder.end()
                 skeleton_saver_2d.save_to_csv()
                 is_recording = False
                 update_is_recording(False)
-                logger.print("MAIN", "Stopped recording")
-        frame_profiler.end_task("pose_extraction")
-        
-        # 8. Process tracking and collect all tracks into processed_tracks list
-        frame_profiler.start_task("tracking")
-        tracks = update_tracks(objs)
+                logger.print("MAIN", "Stopped recording (no humans or record flag off)")
 
         if is_recording:
             frame_id += 1
+        
+        frame_profiler.end_task("pose_extraction")
+                
+        # 8. Process tracking and collect all tracks into processed_tracks list
+        frame_profiler.start_task("tracking")
+        tracks = update_tracks(objs)
 
         # Calculate FPS and elapsed time
         frame_end_time = time_ms()
         frame_duration = frame_end_time - frame_start_time
         current_fps = 1000.0 / frame_duration if frame_duration > 0 else 30.0
+        
+        # Store FPS in history for mean calculation
+        fps_history.append(current_fps)
+        if len(fps_history) > FPS_HISTORY_SIZE:
+            fps_history.pop(0)
+
+        # Calculate mean FPS
+        mean_fps = calculate_mean_fps(fps_history)
+        no_human_frames_to_stop = int(NO_HUMAN_SECONDS_TO_STOP * mean_fps)
+        
         set_fps(current_fps)
         frame_start_time = frame_end_time
 
@@ -801,12 +849,6 @@ def main():
             x = int(img_width - text_width - 30)
             y = 10
             
-            # Clamp to ensure text stays within image bounds
-            if x < 0:
-                x = padding
-            if y < 0:
-                y = padding
-            
             # Draw black outline (8-direction offset)
             outline_color = image.COLOR_BLACK
             offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
@@ -818,9 +860,6 @@ def main():
             
         except Exception as e:
             logger.print("MAIN", "[OVERLAY] Failed to draw time overlay: %s", e)
-
-        disp.show(img)
-        frame_profiler.end_task("display")
 
         disp.show(img)
         frame_profiler.end_task("display")
@@ -858,7 +897,7 @@ def main():
         
         frame_counter += 1
         if frame_counter % 30 == 0:
-            logger.print("MAIN", "Frame %d processed", frame_counter)
+            logger.print("MAIN", "Frame %d processed, Mean FPS: %.2f", frame_counter, mean_fps)
             if frame_counter % 60 == 0:
                 control_flags = get_control_flags()
                 logger.print("MAIN", "[STATUS] Flags: record=%s, fall_algorithm=%s",
@@ -892,4 +931,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
