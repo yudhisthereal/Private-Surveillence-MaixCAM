@@ -521,7 +521,7 @@ POSE_RECOVERY_CACHE_SIZE = 64               # Snapshot cache length
 - Recovery is accepted only when:
     1. Snapshot age is within `POSE_RECOVERY_MAX_GAP_FRAMES` (default: 3 frames), and
     2. Bounding-box bottom alignment is close enough:
-       $|y_{\text{bottom}}^{\text{now}} - y_{\text{bottom}}^{\text{snapshot}}| \le \text{POSE\_RECOVERY\_BBOX\_BOTTOM\_TOLERANCE\_PX}$
+     $|y_{\mathrm{bottom}}^{\mathrm{now}} - y_{\mathrm{bottom}}^{\mathrm{snapshot}}| \le \mathrm{POSE\_RECOVERY\_BBOX\_BOTTOM\_TOLERANCE\_PX}$
 - Recovered fields are: `bbox`, `pose_label`, and safety-related status fields. This improves continuity after brief pose dropouts.
 
 **Refinement Features:**
