@@ -88,11 +88,8 @@ def reload_from_env():
     global STREAMING_SERVER_BASE_URL, STREAMING_HTTP_URL
     STREAMING_SERVER_BASE_URL = (os.getenv("STREAMING_SERVER_BASE_URL") or "").strip()
     if not STREAMING_SERVER_BASE_URL:
-        raise RuntimeError(
-            "Missing required env var: STREAMING_SERVER_BASE_URL. "
-            "Example: STREAMING_SERVER_BASE_URL=http://emotression.iik.ntnu.no"
-        )
-
+        # fallback to default url
+        STREAMING_SERVER_BASE_URL = "http://emotression.iik.ntnu.no"
     STREAMING_HTTP_URL = STREAMING_SERVER_BASE_URL.rstrip("/")
     _log(
         "INFO",
