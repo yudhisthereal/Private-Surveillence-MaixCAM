@@ -516,12 +516,12 @@ POSE_RECOVERY_CACHE_SIZE = 64               # Snapshot cache length
   - Person with bbox height 20px shrinks to 10px → 50% shrinkage (passes % threshold) BUT only 10px drop (equal to minimum, not greater) → **NO FALL**
   - Person with bbox height 50px shrinks to 35px → 30% shrinkage (fails % threshold) → **NO FALL** (short-circuits)
 
-**Pose-Recovery Fallback (new):**
+**Pose-Recovery Fallback:**
 - If pose estimation is incomplete for a track, the system can recover using the **most recent valid skeleton snapshot**.
 - Recovery is accepted only when:
     1. Snapshot age is within `POSE_RECOVERY_MAX_GAP_FRAMES` (default: 3 frames), and
     2. Bounding-box bottom alignment is close enough:
-       $|y_{\text{bottom}}^{\text{now}} - y_{\text{bottom}}^{\text{snapshot}}| \le \texttt{POSE\_RECOVERY\_BBOX\_BOTTOM\_TOLERANCE\_PX}$
+       $|y_{\text{bottom}}^{\text{now}} - y_{\text{bottom}}^{\text{snapshot}}| \le \mathrm{POSE\_RECOVERY\_BBOX\_BOTTOM\_TOLERANCE\_PX}$
 - Recovered fields are: `bbox`, `pose_label`, and safety-related status fields. This improves continuity after brief pose dropouts.
 
 **Refinement Features:**
