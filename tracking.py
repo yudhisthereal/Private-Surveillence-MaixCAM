@@ -421,10 +421,7 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                     # Use SafetyJudgment to evaluate safety
                     is_safe, safety_reason, details = safety_judgment.evaluate_safety(
                         track.id, normalized_keypoints, pose_label,
-                        current_time_str=current_time_str,
-                        max_sleep_duration_min=max_sleep_duration,
-                        bedtime_str=bedtime,
-                        wakeup_time_str=wakeup_time
+                        max_sleep_duration_min=max_sleep_duration
                     )
 
                     if not is_safe:

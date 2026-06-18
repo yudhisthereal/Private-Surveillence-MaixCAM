@@ -19,7 +19,6 @@ class SafetyReason:
     SAFE_IN_BENCH_SITTING = "safe_in_bench_sitting"
     SAFE_IN_BENCH_LYING = "safe_in_bench_lying_down"
     UNSAFE_SLEEP_TOO_LONG = "unsafe_sleep_too_long"
-    UNSAFE_SLEEP_PAST_WAKEUP = "unsafe_sleep_past_wakeup"
 
 
 class SafetyJudgment:
@@ -60,10 +59,7 @@ class SafetyJudgment:
                        track_id: int,
                        body_keypoints: List[Tuple[float, float, float]],
                        pose_label: str,
-                       current_time_str: str = "12:00",
-                       max_sleep_duration_min: int = 0,
-                       bedtime_str: str = "",
-                       wakeup_time_str: str = "") -> Tuple[bool, Optional[str], Dict]:
+                       max_sleep_duration_min: int = 0) -> Tuple[bool, Optional[str], Dict]:
         """
         Evaluate safety status based on all area checkers.
 
@@ -74,6 +70,7 @@ class SafetyJudgment:
             track_id: The track ID to evaluate
             body_keypoints: List of (x, y, confidence) coordinates for COCO keypoints
             pose_label: Pose classification label (e.g., "lying_down", "standing", etc.)
+            max_sleep_duration_min: Maximum allowed sleep duration in minutes (0 = disabled)
 
         Returns:
             Tuple of (is_safe, reason, details)
@@ -108,9 +105,10 @@ class SafetyJudgment:
             "in_chair_area": False,
             "in_couch_area": False,
             "in_bench_area": False,
-            "bed_time_ms": 0,
+            "bed_time_sec": 0,
             "bed_status": None,
-            "pose_label": pose_label
+            "pose_label": pose_label,
+            "max_sleep_duration_min": max_sleep_duration_min
         }
 
         # Evaluate all relevant checkers first, then resolve by priority:
@@ -125,27 +123,19 @@ class SafetyJudgment:
 
         # Bed area check (Smart Monitoring)
         if self.bed_area_checker is not None:
-            is_in_bed, time_in_bed, is_bed_unsafe, bed_unsafe_reason = self.bed_area_checker.check_bed_area(
+            is_in_bed, time_in_bed_sec, is_bed_unsafe, bed_unsafe_reason = self.bed_area_checker.check_bed_area(
                 track_id, body_keypoints,
-                current_time_str=current_time_str,
                 max_sleep_duration_min=max_sleep_duration_min,
-                bedtime_str=bedtime_str,
-                wakeup_time_str=wakeup_time_str,
                 check_method=check_method
             )
             details["in_bed_area"] = is_in_bed
-            details["bed_time_ms"] = time_in_bed * 1000  # Convert back to ms for consistency if needed
+            details["bed_time_sec"] = time_in_bed_sec
 
             if is_in_bed:
                 # If lying down or sitting in bed
                 if pose_label in ["lying_down", "sitting"]:
                     if is_bed_unsafe:
-                        reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-                        if bed_unsafe_reason == "oversleeping":
-                            reason = SafetyReason.UNSAFE_SLEEP_PAST_WAKEUP
-                        elif bed_unsafe_reason == "sleep_too_long":
-                            reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-                        checker_outcomes["bed"] = (False, reason)
+                        checker_outcomes["bed"] = (False, SafetyReason.UNSAFE_SLEEP_TOO_LONG)
                     else:
                         checker_outcomes["bed"] = (True, SafetyReason.SAFE_IN_BED)
                 # If standing in bed -> fall through to safe tracking
@@ -157,25 +147,16 @@ class SafetyJudgment:
             if is_sitting:
                 check_method_couch = CheckMethod.HIP
 
-            is_in_couch, time_in_couch, is_couch_unsafe, couch_unsafe_reason = self.couch_area_checker.check_couch_area(
+            is_in_couch, time_in_couch_sec, is_couch_unsafe, couch_unsafe_reason = self.couch_area_checker.check_couch_area(
                 track_id, body_keypoints,
-                current_time_str=current_time_str,
                 max_sleep_duration_min=max_sleep_duration_min,
-                bedtime_str=bedtime_str,
-                wakeup_time_str=wakeup_time_str,
                 check_method=check_method_couch
             )
             details["in_couch_area"] = is_in_couch
 
             if is_in_couch and (is_lying_down or is_sitting):
                 if is_couch_unsafe:
-                    reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-                    if couch_unsafe_reason == "oversleeping":
-                        reason = SafetyReason.UNSAFE_SLEEP_PAST_WAKEUP
-                    elif couch_unsafe_reason == "sleep_too_long":
-                        reason = SafetyReason.UNSAFE_SLEEP_TOO_LONG
-
-                    checker_outcomes["couch"] = (False, reason)
+                    checker_outcomes["couch"] = (False, SafetyReason.UNSAFE_SLEEP_TOO_LONG)
                 else:
                     reason = SafetyReason.SAFE_IN_COUCH_LYING if is_lying_down else SafetyReason.SAFE_IN_COUCH_SITTING
                     checker_outcomes["couch"] = (True, reason)

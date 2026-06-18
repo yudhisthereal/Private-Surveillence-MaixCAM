@@ -9,7 +9,7 @@ class BedAreaChecker:
     Checker for bed areas with time tracking.
 
     Monitors how long a person stays in bed areas and flags as unsafe
-    if they remain in bed for too long (configurable threshold).
+    if they remain in bed for longer than the maximum allowed duration.
     """
 
     def __init__(self, too_long_threshold_ms: float = 5000):
@@ -17,7 +17,7 @@ class BedAreaChecker:
         Initialize BedAreaChecker.
 
         Args:
-            too_long_threshold_sec: Time in seconds before being in bed is considered too long (default: 5.0)
+            too_long_threshold_ms: Time in milliseconds before being in bed is considered too long (default: 5000)
         """
         self._polygon_checker = BodyInPolygonChecker()
         self._too_long_threshold_ms = too_long_threshold_ms
@@ -39,11 +39,11 @@ class BedAreaChecker:
         self._polygon_checker.polygons = polygons
 
     @property
-    def too_long_threshold_sec(self) -> float:
+    def too_long_threshold_ms(self) -> float:
         return self._too_long_threshold_ms
 
-    @too_long_threshold_sec.setter
-    def too_long_threshold_sec(self, value: float):
+    @too_long_threshold_ms.setter
+    def too_long_threshold_ms(self, value: float):
         self._too_long_threshold_ms = value
 
     def update_bed_areas(self, polygons: List[List[Tuple[float, float]]]):
@@ -61,10 +61,7 @@ class BedAreaChecker:
     def check_bed_area(self,
                       track_id: int,
                       body_keypoints: List[Tuple[float, float, float]],
-                      current_time_str: str = "12:00",
                       max_sleep_duration_min: int = 0,
-                      bedtime_str: str = "",
-                      wakeup_time_str: str = "",
                       check_method: CheckMethod = CheckMethod.FULL_BODY) -> Tuple[bool, float, bool, str]:
         """
         Check if person is in bed area and for how long.
@@ -72,10 +69,7 @@ class BedAreaChecker:
         Args:
             track_id: The track ID to check
             body_keypoints: List of (x, y, confidence) coordinates for COCO keypoints
-            current_time_str: "HH:MM"
-            max_sleep_duration_min: 0 = disabled
-            bedtime_str: "HH:MM" start of night sleep
-            wakeup_time_str: "HH:MM" end of night sleep
+            max_sleep_duration_min: Maximum allowed sleep duration in minutes (0 = disabled)
             check_method: Which keypoints to check
 
         Returns:
@@ -98,46 +92,12 @@ class BedAreaChecker:
             is_unsafe = False
             unsafe_reason = "normal"
             
-            # Helper to parse HH:MM to minutes from midnight
-            def to_mins(t_str):
-                try:
-                    h, m = map(int, t_str.split(':'))
-                    return h * 60 + m
-                except:
-                    return None
-
-            cur_mins = to_mins(current_time_str)
-            bed_result = to_mins(bedtime_str)
-            wake_result = to_mins(wakeup_time_str)
-            
-            # Determine if it is "Night Window" (Safe to sleep)
-            is_night = False
-            if cur_mins is not None and bed_result is not None and wake_result is not None:
-                if bed_result > wake_result:
-                    if cur_mins >= bed_result or cur_mins < wake_result:
-                        is_night = True
-                else:
-                    if bed_result <= cur_mins < wake_result:
-                        is_night = True
-            
-            if is_night:
-                # Night sleep is SAFE
-                is_unsafe = False
-            else:
-                # Day Window
-                # 1. Check Oversleeping (Sleeping past wakeup time)
-                if cur_mins is not None and wake_result is not None:
-                    # Check if "Past Wakeup" (e.g. within 3 hours after wakeup)
-                    diff = cur_mins - wake_result
-                    if 0 < diff < 180: # 3 hours window to call it "Oversleeping" vs "Afternoon Nap"
-                         is_unsafe = True
-                         unsafe_reason = "oversleeping" # Will map to enum later
-                
-                # Check Duration (Napping too long)
-                if not is_unsafe and max_sleep_duration_min > 0:
-                    if time_in_bed_sec > (max_sleep_duration_min * 60):
-                        is_unsafe = True
-                        unsafe_reason = "sleep_too_long"
+            # Check Duration (Sleeping too long)
+            if max_sleep_duration_min > 0:
+                max_sleep_duration_sec = max_sleep_duration_min * 60
+                if time_in_bed_sec > max_sleep_duration_sec:
+                    is_unsafe = True
+                    unsafe_reason = "sleep_too_long"
 
             return True, time_in_bed_sec, is_unsafe, unsafe_reason
         else:
@@ -160,7 +120,7 @@ class BedAreaChecker:
             Time in seconds in bed area, or 0.0 if not in bed
         """
         if track_id in self._bed_entry_times:
-            return time_ms() - self._bed_entry_times[track_id]
+            return (time_ms() - self._bed_entry_times[track_id]) / 1000.0
         return 0.0
 
     def is_in_bed(self, track_id: int) -> bool:
@@ -186,7 +146,7 @@ class BedAreaChecker:
             True if in bed for longer than threshold, False otherwise
         """
         time_in_bed = self.get_bed_time(track_id)
-        return time_in_bed > self._too_long_threshold_ms
+        return time_in_bed > self._too_long_threshold_ms / 1000.0
 
     def reset_track(self, track_id: int):
         """
