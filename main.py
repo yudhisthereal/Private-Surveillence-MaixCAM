@@ -66,112 +66,112 @@ SKELETON_CONNECTIONS = [
 # HELPER FUNCTIONS
 # ============================================
 
-def merge_background_with_mask(old_background, new_frame, processed_tracks, padding=20, step=4):
-    """Merge old background with new frame, masking out areas where humans are present.
+# def merge_background_with_mask(old_background, new_frame, processed_tracks, padding=20, step=4):
+#     """Merge old background with new frame, masking out areas where humans are present.
 
-    Uses keypoints for precise masking: body bbox and head area (ear-nose-ear).
+#     Uses keypoints for precise masking: body bbox and head area (ear-nose-ear).
 
-    Args:
-        old_background: Existing background image (to preserve human areas)
-        new_frame: New raw frame (to update non-human areas)
-        processed_tracks: List of track dicts with 'bbox' and 'keypoints'
-        padding: Extra padding around body bboxes and head base
-        step: Pixel step for copying (higher = faster but blockier)
+#     Args:
+#         old_background: Existing background image (to preserve human areas)
+#         new_frame: New raw frame (to update non-human areas)
+#         processed_tracks: List of track dicts with 'bbox' and 'keypoints'
+#         padding: Extra padding around body bboxes and head base
+#         step: Pixel step for copying (higher = faster but blockier)
 
-    Returns:
-        Merged image with old background in human areas, new frame elsewhere
-    """
-    import math
+#     Returns:
+#         Merged image with old background in human areas, new frame elsewhere
+#     """
+#     import math
     
-    head_padding_factor = 0.8
+#     head_padding_factor = 0.8
 
-    # Start with a copy of the new frame
-    merged = new_frame.copy()
+#     # Start with a copy of the new frame
+#     merged = new_frame.copy()
 
-    width = new_frame.width()
-    height = new_frame.height()
+#     width = new_frame.width()
+#     height = new_frame.height()
 
-    # For each track, mask body bbox and head area
-    for track in processed_tracks:
-        bbox = track.get("bbox")
-        keypoints = track.get("keypoints")
+#     # For each track, mask body bbox and head area
+#     for track in processed_tracks:
+#         bbox = track.get("bbox")
+#         keypoints = track.get("keypoints")
 
-        if not bbox:
-            continue
+#         if not bbox:
+#             continue
 
-        x, y, w, h = bbox
+#         x, y, w, h = bbox
 
-        # 1. Mask body bbox with normal padding
-        x1 = max(0, int(x - padding))
-        y1 = max(0, int(y - padding))
-        x2 = min(width, int(x + w + padding))
-        y2 = min(height, int(y + h + padding))
+#         # 1. Mask body bbox with normal padding
+#         x1 = max(0, int(x - padding))
+#         y1 = max(0, int(y - padding))
+#         x2 = min(width, int(x + w + padding))
+#         y2 = min(height, int(y + h + padding))
 
-        for py in range(y1, y2, step):
-            for px in range(x1, x2, step):
-                try:
-                    pixel = old_background[px, py]
-                    merged[px, py] = pixel
-                except (IndexError, OSError):
-                    pass
+#         for py in range(y1, y2, step):
+#             for px in range(x1, x2, step):
+#                 try:
+#                     pixel = old_background[px, py]
+#                     merged[px, py] = pixel
+#                 except (IndexError, OSError):
+#                     pass
 
-        # 2. Mask head area (ear-nose-ear) with proportional padding
-        if keypoints and len(keypoints) >= 10:
-            # Extract nose and ear coordinates
-            nose_x, nose_y = keypoints[0], keypoints[1]
-            left_ear_x, left_ear_y = keypoints[6], keypoints[7]
-            right_ear_x, right_ear_y = keypoints[8], keypoints[9]
+#         # 2. Mask head area (ear-nose-ear) with proportional padding
+#         if keypoints and len(keypoints) >= 10:
+#             # Extract nose and ear coordinates
+#             nose_x, nose_y = keypoints[0], keypoints[1]
+#             left_ear_x, left_ear_y = keypoints[6], keypoints[7]
+#             right_ear_x, right_ear_y = keypoints[8], keypoints[9]
 
-            # Check if keypoints are valid (not 0,0 or near it)
-            if nose_x > 0 and nose_y > 0:
-                # Calculate distances from nose to ears
-                nose_to_left_ear_dist = 0
-                nose_to_right_ear_dist = 0
+#             # Check if keypoints are valid (not 0,0 or near it)
+#             if nose_x > 0 and nose_y > 0:
+#                 # Calculate distances from nose to ears
+#                 nose_to_left_ear_dist = 0
+#                 nose_to_right_ear_dist = 0
 
-                if left_ear_x > 0 and left_ear_y > 0:
-                    nose_to_left_ear_dist = math.sqrt((nose_x - left_ear_x)**2 + (nose_y - left_ear_y)**2)
+#                 if left_ear_x > 0 and left_ear_y > 0:
+#                     nose_to_left_ear_dist = math.sqrt((nose_x - left_ear_x)**2 + (nose_y - left_ear_y)**2)
 
-                if right_ear_x > 0 and right_ear_y > 0:
-                    nose_to_right_ear_dist = math.sqrt((nose_x - right_ear_x)**2 + (nose_y - right_ear_y)**2)
+#                 if right_ear_x > 0 and right_ear_y > 0:
+#                     nose_to_right_ear_dist = math.sqrt((nose_x - right_ear_x)**2 + (nose_y - right_ear_y)**2)
 
-                # Use the longer distance, proportionally scale padding
-                max_ear_nose_dist = max(nose_to_left_ear_dist, nose_to_right_ear_dist)
+#                 # Use the longer distance, proportionally scale padding
+#                 max_ear_nose_dist = max(nose_to_left_ear_dist, nose_to_right_ear_dist)
 
-                # Calculate proportional head padding: base (padding) + (longest ear-nose distance)
-                if max_ear_nose_dist > 0:
-                    head_padding = int(max_ear_nose_dist * head_padding_factor)
-                else:
-                    head_padding = padding
+#                 # Calculate proportional head padding: base (padding) + (longest ear-nose distance)
+#                 if max_ear_nose_dist > 0:
+#                     head_padding = int(max_ear_nose_dist * head_padding_factor)
+#                 else:
+#                     head_padding = padding
 
-                # Calculate head bounding box from ear-nose-ear
-                if left_ear_x > 0 and right_ear_x > 0:
-                    # Both ears visible
-                    head_x1 = int(min(left_ear_x, right_ear_x) - head_padding)
-                    head_x2 = int(max(left_ear_x, right_ear_x) + head_padding)
-                else:
-                    # One or both ears not visible, use nose as center
-                    head_x1 = int(nose_x - head_padding)
-                    head_x2 = int(nose_x + head_padding)
+#                 # Calculate head bounding box from ear-nose-ear
+#                 if left_ear_x > 0 and right_ear_x > 0:
+#                     # Both ears visible
+#                     head_x1 = int(min(left_ear_x, right_ear_x) - head_padding)
+#                     head_x2 = int(max(left_ear_x, right_ear_x) + head_padding)
+#                 else:
+#                     # One or both ears not visible, use nose as center
+#                     head_x1 = int(nose_x - head_padding)
+#                     head_x2 = int(nose_x + head_padding)
 
-                head_y1 = int(min(nose_y, left_ear_y if left_ear_y > 0 else nose_y, right_ear_y if right_ear_y > 0 else nose_y) - head_padding)
-                head_y2 = int(max(nose_y, left_ear_y if left_ear_y > 0 else nose_y, right_ear_y if right_ear_y > 0 else nose_y) + head_padding)
+#                 head_y1 = int(min(nose_y, left_ear_y if left_ear_y > 0 else nose_y, right_ear_y if right_ear_y > 0 else nose_y) - head_padding)
+#                 head_y2 = int(max(nose_y, left_ear_y if left_ear_y > 0 else nose_y, right_ear_y if right_ear_y > 0 else nose_y) + head_padding)
 
-                # Clamp to image bounds
-                head_x1 = max(0, head_x1)
-                head_y1 = max(0, head_y1)
-                head_x2 = min(width, head_x2)
-                head_y2 = min(height, head_y2)
+#                 # Clamp to image bounds
+#                 head_x1 = max(0, head_x1)
+#                 head_y1 = max(0, head_y1)
+#                 head_x2 = min(width, head_x2)
+#                 head_y2 = min(height, head_y2)
 
-                # Copy head area from old background
-                for py in range(head_y1, head_y2, step):
-                    for px in range(head_x1, head_x2, step):
-                        try:
-                            pixel = old_background[px, py]
-                            merged[px, py] = pixel
-                        except (IndexError, OSError):
-                            pass
+#                 # Copy head area from old background
+#                 for py in range(head_y1, head_y2, step):
+#                     for px in range(head_x1, head_x2, step):
+#                         try:
+#                             pixel = old_background[px, py]
+#                             merged[px, py] = pixel
+#                         except (IndexError, OSError):
+#                             pass
 
-    return merged
+#     return merged
 
 
 def draw_skeleton_lines(img, keypoints, color=image.COLOR_GREEN, thickness=2):
@@ -776,47 +776,47 @@ def main():
                 cached_tracks = None 
 
         # Deferred background update with masking (after we have track bboxes)
-        if background_update_needed and background_img is not None:
-            try:
-                # Extract bounding boxes from processed tracks
-                # Get valid tracks (have bbox and keypoints)
-                valid_tracks = [t for t in processed_tracks if t.get("bbox") and t.get("keypoints")]
+        # if background_update_needed and background_img is not None:
+        #     try:
+        #         # Extract bounding boxes from processed tracks
+        #         # Get valid tracks (have bbox and keypoints)
+        #         valid_tracks = [t for t in processed_tracks if t.get("bbox") and t.get("keypoints")]
 
-                if valid_tracks:
-                    # Merge background with new frame, masking out human areas
-                    logger.print("MAIN", "[BACKGROUND] Updating background with %d masked track(s)", len(valid_tracks))
-                    new_background = merge_background_with_mask(background_img, raw_img, valid_tracks, padding=20)
+        #         if valid_tracks:
+        #             # Merge background with new frame, masking out human areas
+        #             logger.print("MAIN", "[BACKGROUND] Updating background with %d masked track(s)", len(valid_tracks))
+        #             new_background = merge_background_with_mask(background_img, raw_img, valid_tracks, padding=20)
                     
-                    # Update cached_tracks (and reset `timer`) if valid_track exist
-                    cached_tracks_last_updated = time_ms()
-                    cached_tracks = valid_tracks
-                elif cached_tracks:
-                    # No valid tracks for the current frame, but the tracks cache is still available
-                    # Workaround for "person(/people) exist in the frame but isn't being detected by the pose extractor"
-                    logger.print("MAIN", "[BACKGROUND] Updating background with %d cached track(s)", len(cached_tracks))
-                    new_background = merge_background_with_mask(background_img, raw_img, cached_tracks, padding=20)
-                else:
-                    # No tracks, just use the raw frame
-                    logger.print("MAIN", "[BACKGROUND] No tracks to mask, using raw frame")
-                    new_background = raw_img.copy()
+        #             # Update cached_tracks (and reset `timer`) if valid_track exist
+        #             cached_tracks_last_updated = time_ms()
+        #             cached_tracks = valid_tracks
+        #         elif cached_tracks:
+        #             # No valid tracks for the current frame, but the tracks cache is still available
+        #             # Workaround for "person(/people) exist in the frame but isn't being detected by the pose extractor"
+        #             logger.print("MAIN", "[BACKGROUND] Updating background with %d cached track(s)", len(cached_tracks))
+        #             new_background = merge_background_with_mask(background_img, raw_img, cached_tracks, padding=20)
+        #         else:
+        #             # No tracks, just use the raw frame
+        #             logger.print("MAIN", "[BACKGROUND] No tracks to mask, using raw frame")
+        #             new_background = raw_img.copy()
 
-                # Save and upload the new background
-                background_img = new_background
-                background_img.save(BACKGROUND_PATH)
+        #         # Save and upload the new background
+        #         background_img = new_background
+        #         background_img.save(BACKGROUND_PATH)
 
-                if streaming_server_available:
-                    try:
-                        jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
-                        frame_upload_worker.update_background(jpeg_bytes)
-                        logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
-                    except Exception as e:
-                        logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
+        #         if streaming_server_available:
+        #             try:
+        #                 jpeg_bytes = background_img.to_jpeg(quality=70).to_bytes(copy=False)
+        #                 frame_upload_worker.update_background(jpeg_bytes)
+        #                 logger.print("MAIN", "[BACKGROUND] Auto-update background queued for upload")
+        #             except Exception as e:
+        #                 logger.print("MAIN", "[BACKGROUND] Auto-update failed to queue background: %s", e)
 
-                last_update_ms = time_ms()
-            except Exception as e:
-                logger.print("MAIN", "[BACKGROUND] Error during masked background update: %s", e)
-            finally:
-                background_update_needed = False
+        #         last_update_ms = time_ms()
+        #     except Exception as e:
+        #         logger.print("MAIN", "[BACKGROUND] Error during masked background update: %s", e)
+        #     finally:
+        #         background_update_needed = False
 
         frame_profiler.end_task("tracking")
         
@@ -840,10 +840,8 @@ def main():
             
             scale = 0.5  # Adjust this for larger/smaller text
             char_width = 8 * scale  # Approximate width per character at this scale
-            char_height = 14 * scale  # Approximate height at this scale
             
             text_width = len(time_str) * char_width
-            text_height = char_height
             
             # Position: top-right with some padding
             x = int(img_width - text_width - 30)
