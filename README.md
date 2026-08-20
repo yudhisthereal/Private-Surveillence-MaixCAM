@@ -366,7 +366,7 @@ This application **requires a MaixCAM device**. It will not run on conventional 
 
 1. **MaixVision IDE** (Highly Recommended)
    - Official IDE for MaixCAM development
-   - Download from: [MaixVision Releases](https://github.com/sipeed/MaixVision/releases)
+   - Download from: [MaixVision Releases](https://wiki.sipeed.com/maixvision)
    - Features:
      - Direct file deployment to MaixCAM
      - Serial console output
@@ -1137,7 +1137,7 @@ This research software is developed for privacy-preserving patient monitoring. Y
 - MaixCAM: [Sipeed MaixCAM](https://wiki.sipeed.com/maixcam)
 - YOLO11: [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
 - ByteTracker: [ByteTrack](https://github.com/Zhongdao/Towards-Realtime-MOT)
-- COCO Keypoints: [COCO Dataset](https://cocodataset.org/)
+- COCO Keypoints: [COCO-Pose Dataset](https://docs.ultralytics.com/datasets/pose/coco)
 
 ## 🌐 API Endpoints
 
