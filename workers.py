@@ -11,7 +11,7 @@ from debug_config import DebugLogger
 
 # Module-level debug logger instance
 logger = DebugLogger(tag="WORKERS", instance_enable=False)
-int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
+int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=False)
 from config import (
     FLAG_SYNC_INTERVAL_MS, 
     SAFE_AREA_SYNC_INTERVAL_MS, STATE_REPORT_INTERVAL_MS,
@@ -68,7 +68,7 @@ class CameraStateSyncWorker(threading.Thread):
                         # Put flags in queue for main thread to consume
                         try:
                             self.flags_queue.put_nowait(("flags_update", flags))
-                            # print(f"[FlagSync] Flags synced from server ({len(flags)} items)")
+                            print(f"FALL_THRES: {flags['fall_thres']}")
                         except queue.Full:
                             pass
                         

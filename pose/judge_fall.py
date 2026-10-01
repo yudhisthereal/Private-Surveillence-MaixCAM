@@ -9,7 +9,7 @@ FALL_COUNT_THRES = 2  # how many consecutive falls required to confirm
 
 
 
-def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_size, fps, pose_data=None, state=None):
+def get_fall_info(online_targets_det, online_targets, index, fall_thres, fall_height_min_px, queue_size, fps, pose_data=None, state=None):
     if state is None:
         state = {
             "counter_bbox_only": 0,
@@ -72,7 +72,7 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
         height_decrement_px = pre_bbox[3] - cur_bbox[3]
         shrinkage = height_decrement_px / pre_bbox[3]
 
-    logger.print("FALL_DETECT", "dy_top=%.2f, shrinkage=%.4f, height_decrement_px=%.2f, threshold=%s, fps=%s", dy_top, shrinkage, height_decrement_px, fallParam['v_bbox_y'], fps)
+    logger.print("FALL_DETECT", "dy_top=%.2f, shrinkage=%.4f, height_decrement_px=%.2f, threshold=%s, fps=%s", dy_top, shrinkage, height_decrement_px, fall_thres, fps)
 
     # Extract from pose_data
     torso_angle = None
@@ -85,7 +85,7 @@ def get_fall_info(online_targets_det, online_targets, index, fallParam, queue_si
 
     # Calculate bbox motion evidence
     # User Request: if moved down AND shrinkage > threshold AND height decrement > pixel threshold -> Fall
-    bbox_motion_detected = (dy_top > 0 and abs(shrinkage) > fallParam["v_bbox_y"] and height_decrement_px > fallParam.get("v_bbox_height_min_px", 0))
+    bbox_motion_detected = (dy_top > 0 and abs(shrinkage) > fall_thres and height_decrement_px > (fall_height_min_px or 0))
     
     # Calculate pose condition
     strict_pose_condition = False

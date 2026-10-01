@@ -10,7 +10,7 @@ from debug_config import DebugLogger
 
 # Module-level debug logger instance
 logger = DebugLogger(tag="TRACKING", instance_enable=False)
-int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
+int_features_logger = DebugLogger(tag="INT_FEATURES", instance_enable=False)
 
 pose_estimator = PoseEstimation()
 
@@ -24,9 +24,8 @@ valid_class_id = [0]
 
 # Fall detection parameters
 fallParam = {
-    "v_bbox_y": 0.4, # amount of shrinkage in bounding box relative to the original size in percent (30%)
     "v_bbox_height_min_px": 25, # minimum pixel height decrement required (even if shrinkage % is high)
-    "angle": 70
+    # "angle": 70 # might be used in the future if we can somehow consider camera angle in fall detection
 }
 
 queue_size = 5
@@ -335,11 +334,13 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
                 }
                 return track_result
                 
-            # Get fall_algorithm flag to determine which algorithm to use
+            # Get fall_algorithm and fall_thres flags to determine algorithm and threshold
             fall_algorithm = 1  # Default: Algorithm 1 (BBox motion only)
+            fall_thres = 0.3
             try:
                 from control_manager import get_flag
                 fall_algorithm = get_flag("fall_algorithm", 1)
+                fall_thres = get_flag("fall_thres", 0.3)
             except ImportError:
                 pass
 
@@ -350,7 +351,7 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
             # Use local fall detection
             if online_targets["bbox"][idx].qsize() >= 2:
                 state = fall_states.get(track.id)
-                fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state)
+                fall_result = check_fall(tracker_obj, online_targets, idx, fps, state=state, fall_thres=fall_thres)
                 if fall_result:
                     fall_info, pose_label, int_features, updated_state = fall_result
                     fall_states[track.id] = updated_state
@@ -477,7 +478,7 @@ def process_track(track, objs, camera_id="unknown", is_recording=False, skeleton
     
     return None
 
-def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
+def check_fall(tracker_obj, track_history, idx, fps=30, state=None, fall_thres=0.3):
     """Check for fall using track history
     
     Returns:
@@ -526,7 +527,8 @@ def check_fall(tracker_obj, track_history, idx, fps=30, state=None):
         tracker_obj,
         track_history,
         idx,
-        fallParam,
+        fall_thres,
+        fallParam.get("v_bbox_height_min_px", 0),
         queue_size,
         effective_fps,
         pose_data,

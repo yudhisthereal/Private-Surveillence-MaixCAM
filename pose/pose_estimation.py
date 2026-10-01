@@ -5,7 +5,7 @@ import math
 import time
 from debug_config import DebugLogger
 
-_logger = DebugLogger(tag="INT_FEATURES", instance_enable=True)
+_logger = DebugLogger(tag="INT_FEATURES", instance_enable=False)
 
 
 class PoseEstimation:

@@ -33,7 +33,7 @@ def test_independent_counters():
     state1 = {}
     state2 = {}
     
-    fall_param = {"v_bbox_y": 0.1}
+    fall_thres = 0.1
     fps = 30
     queue_size = 5
     
@@ -57,11 +57,11 @@ def test_independent_counters():
     det1 = MockDet(200, 100, 50, 100)
     
     # Run detection for track 0
-    res0 = get_fall_info(det0, targets, 0, fall_param, queue_size, fps, pose_data={'label': 'standing'}, state=state1)
+    res0 = get_fall_info(det0, targets, 0, fall_thres, 0, queue_size, fps, pose_data={'label': 'standing'}, state=state1)
     state1 = res0[4] # update state
     
     # Run detection for track 1
-    res1 = get_fall_info(det1, targets, 1, fall_param, queue_size, fps, pose_data={'label': 'standing'}, state=state2)
+    res1 = get_fall_info(det1, targets, 1, fall_thres, 0, queue_size, fps, pose_data={'label': 'standing'}, state=state2)
     state2 = res1[4] # update state
     
     print(f"Track 0 Counter: {state1['counter_bbox_only']}")
@@ -76,7 +76,7 @@ def test_safeguard():
     print("\nTesting Safeguard (Too Close)...")
     targets = create_mock_targets(1)
     state = {}
-    fall_param = {"v_bbox_y": 0.1}
+    fall_thres = 0.1
     fps = 30
     queue_size = 5
     
@@ -88,7 +88,7 @@ def test_safeguard():
     
     det = MockDet(100, 150, 50, 80) # Fall movement
     
-    res = get_fall_info(det, targets, 0, fall_param, queue_size, fps, pose_data={'label': 'standing'}, state=state)
+    res = get_fall_info(det, targets, 0, fall_thres, 0, queue_size, fps, pose_data={'label': 'standing'}, state=state)
     state = res[4]
     print(f"Result (Full Body): FallDetected={res[0]}, Counter={state['counter_bbox_only']}")
     
@@ -121,7 +121,7 @@ def test_safeguard():
     
     det = MockDet(100, 150, 50, 80) # Fall movement
     
-    res = get_fall_info(det, targets, 0, fall_param, queue_size, fps, pose_data={'label': 'standing'}, state=state)
+    res = get_fall_info(det, targets, 0, fall_thres, 0, queue_size, fps, pose_data={'label': 'standing'}, state=state)
     state = res[4]
     print(f"Result (Partial Body): FallDetected={res[0]}, Counter={state.get('counter_bbox_only', 0)}")
     

@@ -162,6 +162,8 @@ control_flags = {
     "show_floor_areas": False,
     "use_safety_check": True,
     "fall_algorithm": 1,
+    "fall_thres": 0.3,  # Float between 0.1 and 1.0
+    "active": True,  # When False, system is mostly idle (only ping & flag sync run)
     "check_method": 3,  # CheckMethod.TORSO_HEAD
     "max_sleep_duration": 0,  # Minutes, 0 = disabled
     # "bedtime": "", # "HH:MM", e.g. "22:00" # NO LONGER USED

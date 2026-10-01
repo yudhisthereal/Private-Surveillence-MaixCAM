@@ -586,6 +586,29 @@ def main():
         frame_profiler.end_task("commands")
         
         # 3. Camera Read
+        # Check active flag: if system is inactive, skip heavy per-frame processing
+        if not get_flag("active", True):
+            # Ensure recording is stopped when inactive
+            if is_recording:
+                try:
+                    recorder.end()
+                except Exception:
+                    pass
+                try:
+                    skeleton_saver_2d.save_to_csv()
+                except Exception:
+                    pass
+                is_recording = False
+                update_is_recording(False)
+
+            # Short sleep to avoid busy loop (ping worker and flag sync still run)
+            try:
+                time.sleep(1.0)
+            except Exception:
+                pass
+            frame_profiler.end_frame()
+            continue
+
         raw_img = cam.read()
         
         # 4. Check for background update request

@@ -494,10 +494,11 @@ NO_HUMAN_CONFIRM_FRAMES = 10       # Confirm human absence with 10 frames
 
 ```python
  fallParam = {
-    "v_bbox_y": 0.3,              # Height shrinkage threshold (0.0 - 1.0)
+    # "v_bbox_y": 0.3,              # Height shrinkage threshold (0.0 - 1.0) --> replaced by fall_thres stored in flags.
+    # You can set fall detection sensitivity from the web interface.
     "v_bbox_height_min_px": 10,   # Minimum pixel height decrement required to confirm fall
-    "angle": 70                    # Angle threshold (legacy)
 }
+
 FALL_COUNT_THRES = 2               # Consecutive frames to confirm
 
 # Pose-recovery fallback (tracking.py)
@@ -507,12 +508,12 @@ POSE_RECOVERY_CACHE_SIZE = 64               # Snapshot cache length
 ```
 
 **Fall Detection Thresholds:**
-- `v_bbox_y`: Shrinkage percentage threshold. If height shrinks by more than this percentage AND height decrement exceeds `v_bbox_height_min_px`, fall detection is triggered.
-- `v_bbox_height_min_px`: **NEW** — Minimum absolute pixel height decrement required. Even if the shrinkage percentage exceeds the threshold, if the actual pixel drop is less than this value, it will NOT register as a fall. This prevents false positives from high-percentage shrinkages in small bounding boxes (e.g., person farther from camera).
+- `fall_thres`: Shrinkage percentage threshold. If height shrinks by more than this percentage AND height decrement exceeds `v_bbox_height_min_px`, fall detection is triggered.
+- `v_bbox_height_min_px`: Minimum absolute pixel height decrement required. Even if the shrinkage percentage exceeds the threshold, if the actual pixel drop is less than this value, it will NOT register as a fall. This prevents false positives from high-percentage shrinkages in small bounding boxes (e.g., person farther from camera).
 - `angle`: Legacy angle threshold for pose detection.
 
 **Example:**
-- If `v_bbox_y = 0.4` (40%) and `v_bbox_height_min_px = 10`:
+- If `fall_thres = 0.4` (40%) and `v_bbox_height_min_px = 10`:
   - Person with bbox height 100px shrinks to 50px → 50% shrinkage (passes % threshold) AND 50px drop (passes pixel threshold) → **FALL DETECTED**
   - Person with bbox height 20px shrinks to 10px → 50% shrinkage (passes % threshold) BUT only 10px drop (equal to minimum, not greater) → **NO FALL**
   - Person with bbox height 50px shrinks to 35px → 30% shrinkage (fails % threshold) → **NO FALL** (short-circuits)
@@ -1057,7 +1058,7 @@ Solutions:
 #### Fall Detection Too Sensitive / Not Sensitive Enough
 ```
 Solutions:
-- Adjust fallParam["v_bbox_y"] (vertical speed threshold)
+- Adjust fall_thres--called "fall sensitivity" in the web interface. (vertical speed threshold)
 - Adjust fallParam["angle"] (pose angle threshold)
 - Try different fall_algorithm (1 or 2)
 - Adjust FALL_COUNT_THRES for consecutive frame count
