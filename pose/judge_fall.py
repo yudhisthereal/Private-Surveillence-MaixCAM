@@ -79,8 +79,9 @@ def get_fall_info(online_targets_det, online_targets, index, fall_thres, fall_he
     thigh_uprightness = None
 
     if pose_data and isinstance(pose_data, dict):
-        torso_angle = pose_data.get('torso_angle')
-        thigh_uprightness = pose_data.get('thigh_uprightness')
+        raw = pose_data.get('raw_features', {}) or pose_data
+        torso_angle = raw.get('torso_angle')
+        thigh_uprightness = raw.get('thigh_uprightness')
         logger.print("FALL_DETECT", "Pose mode: torso_angle=%s, thigh_uprightness=%s", torso_angle, thigh_uprightness)
 
     # Calculate bbox motion evidence

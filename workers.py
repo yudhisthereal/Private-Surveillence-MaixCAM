@@ -68,7 +68,6 @@ class CameraStateSyncWorker(threading.Thread):
                         # Put flags in queue for main thread to consume
                         try:
                             self.flags_queue.put_nowait(("flags_update", flags))
-                            print(f"FALL_THRES: {flags['fall_thres']}")
                         except queue.Full:
                             pass
                         
